@@ -68,8 +68,8 @@ extern int cifs_hardlink(struct dentry *, struct inode *, struct dentry *);
 extern int cifs_mknod(struct inode *, struct dentry *, umode_t, dev_t);
 extern int cifs_mkdir(struct inode *, struct dentry *, umode_t);
 extern int cifs_rmdir(struct inode *, struct dentry *);
-extern int cifs_rename(struct inode *, struct dentry *, struct inode *,
-		       struct dentry *);
+extern int cifs_rename2(struct inode *, struct dentry *, struct inode *,
+			struct dentry *, unsigned int);
 extern int cifs_revalidate_file_attr(struct file *filp);
 extern int cifs_revalidate_dentry_attr(struct dentry *);
 extern int cifs_revalidate_file(struct file *filp);
@@ -120,9 +120,8 @@ extern struct vfsmount *cifs_dfs_d_automount(struct path *path);
 #endif
 
 /* Functions related to symlinks */
-extern void *cifs_follow_link(struct dentry *direntry, struct nameidata *nd);
-extern int cifs_readlink(struct dentry *direntry, char __user *buffer,
-			 int buflen);
+extern const char *cifs_get_link(struct dentry *, struct inode *,
+			struct delayed_call *);
 extern int cifs_symlink(struct inode *inode, struct dentry *direntry,
 			const char *symname);
 extern int	cifs_removexattr(struct dentry *, const char *);
@@ -131,10 +130,9 @@ extern int	cifs_setxattr(struct dentry *, const char *, const void *,
 extern ssize_t	cifs_getxattr(struct dentry *, const char *, void *, size_t);
 extern ssize_t	cifs_listxattr(struct dentry *, char *, size_t);
 extern long cifs_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
-
 #ifdef CONFIG_CIFS_NFSD_EXPORT
 extern const struct export_operations cifs_export_ops;
 #endif /* CONFIG_CIFS_NFSD_EXPORT */
 
-#define CIFS_VERSION   "2.03"
+#define CIFS_VERSION   "2.08"
 #endif				/* _CIFSFS_H */

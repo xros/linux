@@ -255,15 +255,9 @@ static int dnet_mii_probe(struct net_device *dev)
 {
 	struct dnet *bp = netdev_priv(dev);
 	struct phy_device *phydev = NULL;
-	int phy_addr;
 
 	/* find the first phy */
-	for (phy_addr = 0; phy_addr < PHY_MAX_ADDR; phy_addr++) {
-		if (bp->mii_bus->phy_map[phy_addr]) {
-			phydev = bp->mii_bus->phy_map[phy_addr];
-			break;
-		}
-	}
+	phydev = phy_find_first(bp->mii_bus);
 
 	if (!phydev) {
 		printk(KERN_ERR "%s: no PHY found\n", dev->name);
@@ -274,11 +268,11 @@ static int dnet_mii_probe(struct net_device *dev)
 
 	/* attach the mac to the phy */
 	if (bp->capabilities & DNET_HAS_RMII) {
-		phydev = phy_connect(dev, dev_name(&phydev->dev),
+		phydev = phy_connect(dev, phydev_name(phydev),
 				     &dnet_handle_link_change,
 				     PHY_INTERFACE_MODE_RMII);
 	} else {
-		phydev = phy_connect(dev, dev_name(&phydev->dev),
+		phydev = phy_connect(dev, phydev_name(phydev),
 				     &dnet_handle_link_change,
 				     PHY_INTERFACE_MODE_MII);
 	}
@@ -308,7 +302,7 @@ static int dnet_mii_probe(struct net_device *dev)
 
 static int dnet_mii_init(struct dnet *bp)
 {
-	int err, i;
+	int err;
 
 	bp->mii_bus = mdiobus_alloc();
 	if (bp->mii_bus == NULL)
@@ -323,18 +317,9 @@ static int dnet_mii_init(struct dnet *bp)
 
 	bp->mii_bus->priv = bp;
 
-	bp->mii_bus->irq = kmalloc(sizeof(int) * PHY_MAX_ADDR, GFP_KERNEL);
-	if (!bp->mii_bus->irq) {
-		err = -ENOMEM;
-		goto err_out;
-	}
-
-	for (i = 0; i < PHY_MAX_ADDR; i++)
-		bp->mii_bus->irq[i] = PHY_POLL;
-
 	if (mdiobus_register(bp->mii_bus)) {
 		err = -ENXIO;
-		goto err_out_free_mdio_irq;
+		goto err_out;
 	}
 
 	if (dnet_mii_probe(bp->dev) != 0) {
@@ -346,8 +331,6 @@ static int dnet_mii_init(struct dnet *bp)
 
 err_out_unregister_bus:
 	mdiobus_unregister(bp->mii_bus);
-err_out_free_mdio_irq:
-	kfree(bp->mii_bus->irq);
 err_out:
 	mdiobus_free(bp->mii_bus);
 	return err;
@@ -399,13 +382,8 @@ static int dnet_poll(struct napi_struct *napi, int budget)
 		 * break out of while loop if there are no more
 		 * packets waiting
 		 */
-		if (!(dnet_readl(bp, RX_FIFO_WCNT) >> 16)) {
-			napi_complete(napi);
-			int_enable = dnet_readl(bp, INTR_ENB);
-			int_enable |= DNET_INTR_SRC_RX_CMDFIFOAF;
-			dnet_writel(bp, int_enable, INTR_ENB);
-			return 0;
-		}
+		if (!(dnet_readl(bp, RX_FIFO_WCNT) >> 16))
+			break;
 
 		cmd_word = dnet_readl(bp, RX_LEN_FIFO);
 		pkt_len = cmd_word & 0xFFFF;
@@ -434,20 +412,17 @@ static int dnet_poll(struct napi_struct *napi, int budget)
 			       "size %u.\n", dev->name, pkt_len);
 	}
 
-	budget -= npackets;
-
 	if (npackets < budget) {
 		/* We processed all packets available.  Tell NAPI it can
-		 * stop polling then re-enable rx interrupts */
+		 * stop polling then re-enable rx interrupts.
+		 */
 		napi_complete(napi);
 		int_enable = dnet_readl(bp, INTR_ENB);
 		int_enable |= DNET_INTR_SRC_RX_CMDFIFOAF;
 		dnet_writel(bp, int_enable, INTR_ENB);
-		return 0;
 	}
 
-	/* There are still packets waiting */
-	return 1;
+	return npackets;
 }
 
 static irqreturn_t dnet_interrupt(int irq, void *dev_id)
@@ -825,28 +800,14 @@ static int dnet_probe(struct platform_device *pdev)
 	struct net_device *dev;
 	struct dnet *bp;
 	struct phy_device *phydev;
-	int err = -ENXIO;
-	unsigned int mem_base, mem_size, irq;
+	int err;
+	unsigned int irq;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "no mmio resource defined\n");
-		goto err_out;
-	}
-	mem_base = res->start;
-	mem_size = resource_size(res);
 	irq = platform_get_irq(pdev, 0);
 
-	if (!request_mem_region(mem_base, mem_size, DRV_NAME)) {
-		dev_err(&pdev->dev, "no memory region available\n");
-		err = -EBUSY;
-		goto err_out;
-	}
-
-	err = -ENOMEM;
 	dev = alloc_etherdev(sizeof(*bp));
 	if (!dev)
-		goto err_out_release_mem;
+		return -ENOMEM;
 
 	/* TODO: Actually, we have some interesting features... */
 	dev->features |= 0;
@@ -859,10 +820,10 @@ static int dnet_probe(struct platform_device *pdev)
 
 	spin_lock_init(&bp->lock);
 
-	bp->regs = ioremap(mem_base, mem_size);
-	if (!bp->regs) {
-		dev_err(&pdev->dev, "failed to map registers, aborting.\n");
-		err = -ENOMEM;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	bp->regs = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(bp->regs)) {
+		err = PTR_ERR(bp->regs);
 		goto err_out_free_dev;
 	}
 
@@ -871,7 +832,7 @@ static int dnet_probe(struct platform_device *pdev)
 	if (err) {
 		dev_err(&pdev->dev, "Unable to request IRQ %d (error %d)\n",
 		       irq, err);
-		goto err_out_iounmap;
+		goto err_out_free_dev;
 	}
 
 	dev->netdev_ops = &dnet_netdev_ops;
@@ -908,16 +869,14 @@ static int dnet_probe(struct platform_device *pdev)
 		goto err_out_unregister_netdev;
 
 	dev_info(&pdev->dev, "Dave DNET at 0x%p (0x%08x) irq %d %pM\n",
-	       bp->regs, mem_base, dev->irq, dev->dev_addr);
+	       bp->regs, (unsigned int)res->start, dev->irq, dev->dev_addr);
 	dev_info(&pdev->dev, "has %smdio, %sirq, %sgigabit, %sdma\n",
 	       (bp->capabilities & DNET_HAS_MDIO) ? "" : "no ",
 	       (bp->capabilities & DNET_HAS_IRQ) ? "" : "no ",
 	       (bp->capabilities & DNET_HAS_GIGABIT) ? "" : "no ",
 	       (bp->capabilities & DNET_HAS_DMA) ? "" : "no ");
 	phydev = bp->phy_dev;
-	dev_info(&pdev->dev, "attached PHY driver [%s] "
-	       "(mii_bus:phy_addr=%s, irq=%d)\n",
-	       phydev->drv->name, dev_name(&phydev->dev), phydev->irq);
+	phy_attached_info(phydev);
 
 	return 0;
 
@@ -925,13 +884,8 @@ err_out_unregister_netdev:
 	unregister_netdev(dev);
 err_out_free_irq:
 	free_irq(dev->irq, dev);
-err_out_iounmap:
-	iounmap(bp->regs);
 err_out_free_dev:
 	free_netdev(dev);
-err_out_release_mem:
-	release_mem_region(mem_base, mem_size);
-err_out:
 	return err;
 }
 
@@ -948,11 +902,9 @@ static int dnet_remove(struct platform_device *pdev)
 		if (bp->phy_dev)
 			phy_disconnect(bp->phy_dev);
 		mdiobus_unregister(bp->mii_bus);
-		kfree(bp->mii_bus->irq);
 		mdiobus_free(bp->mii_bus);
 		unregister_netdev(dev);
 		free_irq(dev->irq, dev);
-		iounmap(bp->regs);
 		free_netdev(dev);
 	}
 

@@ -1,5 +1,5 @@
 /*
- *  HID driver for Sony / PS2 / PS3 BD devices.
+ *  HID driver for Sony / PS2 / PS3 / PS4 BD devices.
  *
  *  Copyright (c) 1999 Andreas Gal
  *  Copyright (c) 2000-2005 Vojtech Pavlik <vojtech@suse.cz>
@@ -8,6 +8,7 @@
  *  Copyright (c) 2012 David Dillow <dave@thedillows.org>
  *  Copyright (c) 2006-2013 Jiri Kosina
  *  Copyright (c) 2013 Colin Leitner <colin.leitner@gmail.com>
+ *  Copyright (c) 2014 Frank Praznik <frank.praznik@gmail.com>
  */
 
 /*
@@ -45,43 +46,296 @@
 #define PS3REMOTE                 BIT(4)
 #define DUALSHOCK4_CONTROLLER_USB BIT(5)
 #define DUALSHOCK4_CONTROLLER_BT  BIT(6)
+#define MOTION_CONTROLLER_USB     BIT(7)
+#define MOTION_CONTROLLER_BT      BIT(8)
+#define NAVIGATION_CONTROLLER_USB BIT(9)
+#define NAVIGATION_CONTROLLER_BT  BIT(10)
 
 #define SIXAXIS_CONTROLLER (SIXAXIS_CONTROLLER_USB | SIXAXIS_CONTROLLER_BT)
+#define MOTION_CONTROLLER (MOTION_CONTROLLER_USB | MOTION_CONTROLLER_BT)
+#define NAVIGATION_CONTROLLER (NAVIGATION_CONTROLLER_USB |\
+				NAVIGATION_CONTROLLER_BT)
 #define DUALSHOCK4_CONTROLLER (DUALSHOCK4_CONTROLLER_USB |\
 				DUALSHOCK4_CONTROLLER_BT)
 #define SONY_LED_SUPPORT (SIXAXIS_CONTROLLER | BUZZ_CONTROLLER |\
-				DUALSHOCK4_CONTROLLER)
-#define SONY_BATTERY_SUPPORT (SIXAXIS_CONTROLLER | DUALSHOCK4_CONTROLLER)
-#define SONY_FF_SUPPORT (SIXAXIS_CONTROLLER | DUALSHOCK4_CONTROLLER)
+				DUALSHOCK4_CONTROLLER | MOTION_CONTROLLER |\
+				NAVIGATION_CONTROLLER)
+#define SONY_BATTERY_SUPPORT (SIXAXIS_CONTROLLER | DUALSHOCK4_CONTROLLER |\
+				MOTION_CONTROLLER_BT | NAVIGATION_CONTROLLER)
+#define SONY_FF_SUPPORT (SIXAXIS_CONTROLLER | DUALSHOCK4_CONTROLLER |\
+				MOTION_CONTROLLER)
 
 #define MAX_LEDS 4
 
-static const u8 sixaxis_rdesc_fixup[] = {
-	0x95, 0x13, 0x09, 0x01, 0x81, 0x02, 0x95, 0x0C,
-	0x81, 0x01, 0x75, 0x10, 0x95, 0x04, 0x26, 0xFF,
-	0x03, 0x46, 0xFF, 0x03, 0x09, 0x01, 0x81, 0x02
+/*
+ * The Sixaxis reports both digital and analog values for each button on the
+ * controller except for Start, Select and the PS button.  The controller ends
+ * up reporting 27 axes which causes them to spill over into the multi-touch
+ * axis values.  Additionally, the controller only has 20 actual, physical axes
+ * so there are several unused axes in between the used ones.
+ */
+static __u8 sixaxis_rdesc[] = {
+	0x05, 0x01,         /*  Usage Page (Desktop),               */
+	0x09, 0x04,         /*  Usage (Joystick),                   */
+	0xA1, 0x01,         /*  Collection (Application),           */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x01,         /*          Report ID (1),              */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x01,         /*          Report Count (1),           */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x81, 0x03,         /*          Input (Constant, Variable), */
+	0x75, 0x01,         /*          Report Size (1),            */
+	0x95, 0x13,         /*          Report Count (19),          */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x25, 0x01,         /*          Logical Maximum (1),        */
+	0x35, 0x00,         /*          Physical Minimum (0),       */
+	0x45, 0x01,         /*          Physical Maximum (1),       */
+	0x05, 0x09,         /*          Usage Page (Button),        */
+	0x19, 0x01,         /*          Usage Minimum (01h),        */
+	0x29, 0x13,         /*          Usage Maximum (13h),        */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x01,         /*          Report Size (1),            */
+	0x95, 0x0D,         /*          Report Count (13),          */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x81, 0x03,         /*          Input (Constant, Variable), */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xA1, 0x00,         /*          Collection (Physical),      */
+	0x75, 0x08,         /*              Report Size (8),        */
+	0x95, 0x04,         /*              Report Count (4),       */
+	0x35, 0x00,         /*              Physical Minimum (0),   */
+	0x46, 0xFF, 0x00,   /*              Physical Maximum (255), */
+	0x09, 0x30,         /*              Usage (X),              */
+	0x09, 0x31,         /*              Usage (Y),              */
+	0x09, 0x32,         /*              Usage (Z),              */
+	0x09, 0x35,         /*              Usage (Rz),             */
+	0x81, 0x02,         /*              Input (Variable),       */
+	0xC0,               /*          End Collection,             */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x95, 0x13,         /*          Report Count (19),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x95, 0x0C,         /*          Report Count (12),          */
+	0x81, 0x01,         /*          Input (Constant),           */
+	0x75, 0x10,         /*          Report Size (16),           */
+	0x95, 0x04,         /*          Report Count (4),           */
+	0x26, 0xFF, 0x03,   /*          Logical Maximum (1023),     */
+	0x46, 0xFF, 0x03,   /*          Physical Maximum (1023),    */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x02,         /*          Report ID (2),              */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEE,         /*          Report ID (238),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEF,         /*          Report ID (239),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xC0                /*  End Collection                      */
 };
 
-static const u8 sixaxis_rdesc_fixup2[] = {
-	0x05, 0x01, 0x09, 0x04, 0xa1, 0x01, 0xa1, 0x02,
-	0x85, 0x01, 0x75, 0x08, 0x95, 0x01, 0x15, 0x00,
-	0x26, 0xff, 0x00, 0x81, 0x03, 0x75, 0x01, 0x95,
-	0x13, 0x15, 0x00, 0x25, 0x01, 0x35, 0x00, 0x45,
-	0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x13, 0x81,
-	0x02, 0x75, 0x01, 0x95, 0x0d, 0x06, 0x00, 0xff,
-	0x81, 0x03, 0x15, 0x00, 0x26, 0xff, 0x00, 0x05,
-	0x01, 0x09, 0x01, 0xa1, 0x00, 0x75, 0x08, 0x95,
-	0x04, 0x35, 0x00, 0x46, 0xff, 0x00, 0x09, 0x30,
-	0x09, 0x31, 0x09, 0x32, 0x09, 0x35, 0x81, 0x02,
-	0xc0, 0x05, 0x01, 0x95, 0x13, 0x09, 0x01, 0x81,
-	0x02, 0x95, 0x0c, 0x81, 0x01, 0x75, 0x10, 0x95,
-	0x04, 0x26, 0xff, 0x03, 0x46, 0xff, 0x03, 0x09,
-	0x01, 0x81, 0x02, 0xc0, 0xa1, 0x02, 0x85, 0x02,
-	0x75, 0x08, 0x95, 0x30, 0x09, 0x01, 0xb1, 0x02,
-	0xc0, 0xa1, 0x02, 0x85, 0xee, 0x75, 0x08, 0x95,
-	0x30, 0x09, 0x01, 0xb1, 0x02, 0xc0, 0xa1, 0x02,
-	0x85, 0xef, 0x75, 0x08, 0x95, 0x30, 0x09, 0x01,
-	0xb1, 0x02, 0xc0, 0xc0,
+/* PS/3 Motion controller */
+static __u8 motion_rdesc[] = {
+	0x05, 0x01,         /*  Usage Page (Desktop),               */
+	0x09, 0x04,         /*  Usage (Joystick),                   */
+	0xA1, 0x01,         /*  Collection (Application),           */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x01,         /*          Report ID (1),              */
+	0x75, 0x01,         /*          Report Size (1),            */
+	0x95, 0x15,         /*          Report Count (21),          */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x25, 0x01,         /*          Logical Maximum (1),        */
+	0x35, 0x00,         /*          Physical Minimum (0),       */
+	0x45, 0x01,         /*          Physical Maximum (1),       */
+	0x05, 0x09,         /*          Usage Page (Button),        */
+	0x19, 0x01,         /*          Usage Minimum (01h),        */
+	0x29, 0x15,         /*          Usage Maximum (15h),        */
+	0x81, 0x02,         /*          Input (Variable),           * Buttons */
+	0x95, 0x0B,         /*          Report Count (11),          */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x81, 0x03,         /*          Input (Constant, Variable), * Padding */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0xA1, 0x00,         /*          Collection (Physical),      */
+	0x75, 0x08,         /*              Report Size (8),        */
+	0x95, 0x01,         /*              Report Count (1),       */
+	0x35, 0x00,         /*              Physical Minimum (0),   */
+	0x46, 0xFF, 0x00,   /*              Physical Maximum (255), */
+	0x09, 0x30,         /*              Usage (X),              */
+	0x81, 0x02,         /*              Input (Variable),       * Trigger */
+	0xC0,               /*          End Collection,             */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x07,         /*          Report Count (7),           * skip 7 bytes */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x75, 0x10,         /*          Report Size (16),           */
+	0x46, 0xFF, 0xFF,   /*          Physical Maximum (65535),   */
+	0x27, 0xFF, 0xFF, 0x00, 0x00, /*      Logical Maximum (65535),    */
+	0x95, 0x03,         /*          Report Count (3),           * 3x Accels */
+	0x09, 0x33,         /*              Usage (rX),             */
+	0x09, 0x34,         /*              Usage (rY),             */
+	0x09, 0x35,         /*              Usage (rZ),             */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x95, 0x03,         /*          Report Count (3),           * Skip Accels 2nd frame */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x95, 0x03,         /*          Report Count (3),           * 3x Gyros */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x95, 0x03,         /*          Report Count (3),           * Skip Gyros 2nd frame */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x0C,         /*          Report Size (12),           */
+	0x46, 0xFF, 0x0F,   /*          Physical Maximum (4095),    */
+	0x26, 0xFF, 0x0F,   /*          Logical Maximum (4095),     */
+	0x95, 0x04,         /*          Report Count (4),           * Skip Temp and Magnetometers */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x46, 0xFF, 0x00,   /*          Physical Maximum (255),     */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x95, 0x06,         /*          Report Count (6),           * Skip Timestamp and Extension Bytes */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x91, 0x02,         /*          Output (Variable),          */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x02,         /*          Report ID (2),              */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEE,         /*          Report ID (238),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEF,         /*          Report ID (239),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xC0                /*  End Collection                      */
+};
+
+/* PS/3 Navigation controller */
+static __u8 navigation_rdesc[] = {
+	0x05, 0x01,         /*  Usage Page (Desktop),               */
+	0x09, 0x04,         /*  Usage (Joystik),                    */
+	0xA1, 0x01,         /*  Collection (Application),           */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x01,         /*          Report ID (1),              */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x01,         /*          Report Count (1),           */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x81, 0x03,         /*          Input (Constant, Variable), */
+	0x75, 0x01,         /*          Report Size (1),            */
+	0x95, 0x13,         /*          Report Count (19),          */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x25, 0x01,         /*          Logical Maximum (1),        */
+	0x35, 0x00,         /*          Physical Minimum (0),       */
+	0x45, 0x01,         /*          Physical Maximum (1),       */
+	0x05, 0x09,         /*          Usage Page (Button),        */
+	0x19, 0x01,         /*          Usage Minimum (01h),        */
+	0x29, 0x13,         /*          Usage Maximum (13h),        */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x01,         /*          Report Size (1),            */
+	0x95, 0x0D,         /*          Report Count (13),          */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x81, 0x03,         /*          Input (Constant, Variable), */
+	0x15, 0x00,         /*          Logical Minimum (0),        */
+	0x26, 0xFF, 0x00,   /*          Logical Maximum (255),      */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xA1, 0x00,         /*          Collection (Physical),      */
+	0x75, 0x08,         /*              Report Size (8),        */
+	0x95, 0x02,         /*              Report Count (2),       */
+	0x35, 0x00,         /*              Physical Minimum (0),   */
+	0x46, 0xFF, 0x00,   /*              Physical Maximum (255), */
+	0x09, 0x30,         /*              Usage (X),              */
+	0x09, 0x31,         /*              Usage (Y),              */
+	0x81, 0x02,         /*              Input (Variable),       */
+	0xC0,               /*          End Collection,             */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x95, 0x06,         /*          Report Count (6),           */
+	0x81, 0x03,         /*          Input (Constant, Variable), */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x05,         /*          Report Count (5),           */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x95, 0x01,         /*          Report Count (1),           */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x05, 0x01,         /*          Usage Page (Desktop),       */
+	0x95, 0x01,         /*          Report Count (1),           */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x06, 0x00, 0xFF,   /*          Usage Page (FF00h),         */
+	0x95, 0x1E,         /*          Report Count (24),          */
+	0x81, 0x02,         /*          Input (Variable),           */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0x91, 0x02,         /*          Output (Variable),          */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0x02,         /*          Report ID (2),              */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEE,         /*          Report ID (238),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xA1, 0x02,         /*      Collection (Logical),           */
+	0x85, 0xEF,         /*          Report ID (239),            */
+	0x75, 0x08,         /*          Report Size (8),            */
+	0x95, 0x30,         /*          Report Count (48),          */
+	0x09, 0x01,         /*          Usage (Pointer),            */
+	0xB1, 0x02,         /*          Feature (Variable),         */
+	0xC0,               /*      End Collection,                 */
+	0xC0                /*  End Collection                      */
 };
 
 /*
@@ -127,7 +381,7 @@ static u8 dualshock4_usb_rdesc[] = {
 	0x75, 0x06,         /*      Report Size (6),                */
 	0x95, 0x01,         /*      Report Count (1),               */
 	0x15, 0x00,         /*      Logical Minimum (0),            */
-	0x25, 0x7F,         /*      Logical Maximum (127),          */
+	0x25, 0x3F,         /*      Logical Maximum (63),           */
 	0x81, 0x02,         /*      Input (Variable),               */
 	0x05, 0x01,         /*      Usage Page (Desktop),           */
 	0x09, 0x33,         /*      Usage (Rx),                     */
@@ -151,14 +405,14 @@ static u8 dualshock4_usb_rdesc[] = {
 	0x81, 0x02,         /*      Input (Variable),               */
 	0x19, 0x43,         /*      Usage Minimum (43h),            */
 	0x29, 0x45,         /*      Usage Maximum (45h),            */
-	0x16, 0xFF, 0xBF,   /*      Logical Minimum (-16385),       */
-	0x26, 0x00, 0x40,   /*      Logical Maximum (16384),        */
+	0x16, 0x00, 0xE0,   /*      Logical Minimum (-8192),        */
+	0x26, 0xFF, 0x1F,   /*      Logical Maximum (8191),         */
 	0x95, 0x03,         /*      Report Count (3),               */
 	0x81, 0x02,         /*      Input (Variable),               */
 	0x06, 0x00, 0xFF,   /*      Usage Page (FF00h),             */
 	0x09, 0x21,         /*      Usage (21h),                    */
 	0x15, 0x00,         /*      Logical Minimum (0),            */
-	0x25, 0xFF,         /*      Logical Maximum (255),          */
+	0x26, 0xFF, 0x00,   /*      Logical Maximum (255),          */
 	0x75, 0x08,         /*      Report Size (8),                */
 	0x95, 0x27,         /*      Report Count (39),              */
 	0x81, 0x02,         /*      Input (Variable),               */
@@ -346,11 +600,11 @@ static u8 dualshock4_usb_rdesc[] = {
 
 /*
  * The default behavior of the Dualshock 4 is to send reports using report
- * type 1 when running over Bluetooth. However, as soon as it receives a
- * report of type 17 to set the LEDs or rumble it starts returning it's state
- * in report 17 instead of 1.  Since report 17 is undefined in the default HID
+ * type 1 when running over Bluetooth. However, when feature report 2 is
+ * requested during the controller initialization it starts sending input
+ * reports in report 17.  Since report 17 is undefined in the default HID
  * descriptor the button and axis definitions must be moved to report 17 or
- * the HID layer won't process the received input once a report is sent.
+ * the HID layer won't process the received input.
  */
 static u8 dualshock4_bt_rdesc[] = {
 	0x05, 0x01,         /*  Usage Page (Desktop),               */
@@ -460,8 +714,8 @@ static u8 dualshock4_bt_rdesc[] = {
 	0x81, 0x02,         /*      Input (Variable),               */
 	0x19, 0x43,         /*      Usage Minimum (43h),            */
 	0x29, 0x45,         /*      Usage Maximum (45h),            */
-	0x16, 0xFF, 0xBF,   /*      Logical Minimum (-16385),       */
-	0x26, 0x00, 0x40,   /*      Logical Maximum (16384),        */
+	0x16, 0x00, 0xE0,   /*      Logical Minimum (-8192),        */
+	0x26, 0xFF, 0x1F,   /*      Logical Maximum (8191),         */
 	0x95, 0x03,         /*      Report Count (3),               */
 	0x81, 0x02,         /*      Input (Variable),               */
 	0x06, 0x00, 0xFF,   /*      Usage Page (FF00h),             */
@@ -748,7 +1002,22 @@ union sixaxis_output_report_01 {
 	__u8 buf[36];
 };
 
-static spinlock_t sony_dev_list_lock;
+struct motion_output_report_02 {
+	u8 type, zero;
+	u8 r, g, b;
+	u8 zero2;
+	u8 rumble;
+};
+
+#define DS4_REPORT_0x02_SIZE 37
+#define DS4_REPORT_0x05_SIZE 32
+#define DS4_REPORT_0x11_SIZE 78
+#define DS4_REPORT_0x81_SIZE 7
+#define SIXAXIS_REPORT_0xF2_SIZE 17
+#define SIXAXIS_REPORT_0xF5_SIZE 8
+#define MOTION_REPORT_0x02_SIZE 49
+
+static DEFINE_SPINLOCK(sony_dev_list_lock);
 static LIST_HEAD(sony_device_list);
 static DEFINE_IDA(sony_device_id_allocator);
 
@@ -759,8 +1028,11 @@ struct sony_sc {
 	struct led_classdev *leds[MAX_LEDS];
 	unsigned long quirks;
 	struct work_struct state_worker;
-	struct power_supply battery;
+	void(*send_output_report)(struct sony_sc*);
+	struct power_supply *battery;
+	struct power_supply_desc battery_desc;
 	int device_id;
+	__u8 *output_report_dmabuf;
 
 #ifdef CONFIG_SONY_FF
 	__u8 left;
@@ -773,10 +1045,32 @@ struct sony_sc {
 	__u8 battery_charging;
 	__u8 battery_capacity;
 	__u8 led_state[MAX_LEDS];
+	__u8 resume_led_state[MAX_LEDS];
 	__u8 led_delay_on[MAX_LEDS];
 	__u8 led_delay_off[MAX_LEDS];
 	__u8 led_count;
 };
+
+static __u8 *sixaxis_fixup(struct hid_device *hdev, __u8 *rdesc,
+			     unsigned int *rsize)
+{
+	*rsize = sizeof(sixaxis_rdesc);
+	return sixaxis_rdesc;
+}
+
+static u8 *motion_fixup(struct hid_device *hdev, u8 *rdesc,
+			     unsigned int *rsize)
+{
+	*rsize = sizeof(motion_rdesc);
+	return motion_rdesc;
+}
+
+static u8 *navigation_fixup(struct hid_device *hdev, u8 *rdesc,
+			     unsigned int *rsize)
+{
+	*rsize = sizeof(navigation_rdesc);
+	return navigation_rdesc;
+}
 
 static __u8 *ps3remote_fixup(struct hid_device *hdev, __u8 *rdesc,
 			     unsigned int *rsize)
@@ -819,8 +1113,6 @@ static int ps3remote_mapping(struct hid_device *hdev, struct hid_input *hi,
 	return 1;
 }
 
-
-/* Sony Vaio VGX has wrongly mouse pointer declared as constant */
 static __u8 *sony_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 		unsigned int *rsize)
 {
@@ -847,30 +1139,24 @@ static __u8 *sony_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 	 * the gyroscope values to corresponding axes so we need a
 	 * modified one.
 	 */
-	if ((sc->quirks & DUALSHOCK4_CONTROLLER_USB) && *rsize == 467) {
+	if (sc->quirks & DUALSHOCK4_CONTROLLER_USB) {
 		hid_info(hdev, "Using modified Dualshock 4 report descriptor with gyroscope axes\n");
 		rdesc = dualshock4_usb_rdesc;
 		*rsize = sizeof(dualshock4_usb_rdesc);
-	} else if ((sc->quirks & DUALSHOCK4_CONTROLLER_BT) && *rsize == 357) {
+	} else if (sc->quirks & DUALSHOCK4_CONTROLLER_BT) {
 		hid_info(hdev, "Using modified Dualshock 4 Bluetooth report descriptor\n");
 		rdesc = dualshock4_bt_rdesc;
 		*rsize = sizeof(dualshock4_bt_rdesc);
 	}
 
-	/* The HID descriptor exposed over BT has a trailing zero byte */
-	if ((((sc->quirks & SIXAXIS_CONTROLLER_USB) && *rsize == 148) ||
-			((sc->quirks & SIXAXIS_CONTROLLER_BT) && *rsize == 149)) &&
-			rdesc[83] == 0x75) {
-		hid_info(hdev, "Fixing up Sony Sixaxis report descriptor\n");
-		memcpy((void *)&rdesc[83], (void *)&sixaxis_rdesc_fixup,
-			sizeof(sixaxis_rdesc_fixup));
-	} else if (sc->quirks & SIXAXIS_CONTROLLER_USB &&
-		   *rsize > sizeof(sixaxis_rdesc_fixup2)) {
-		hid_info(hdev, "Sony Sixaxis clone detected. Using original report descriptor (size: %d clone; %d new)\n",
-			 *rsize, (int)sizeof(sixaxis_rdesc_fixup2));
-		*rsize = sizeof(sixaxis_rdesc_fixup2);
-		memcpy(rdesc, &sixaxis_rdesc_fixup2, *rsize);
-	}
+	if (sc->quirks & SIXAXIS_CONTROLLER)
+		return sixaxis_fixup(hdev, rdesc, rsize);
+
+	if (sc->quirks & MOTION_CONTROLLER)
+		return motion_fixup(hdev, rdesc, rsize);
+
+	if (sc->quirks & NAVIGATION_CONTROLLER)
+		return navigation_fixup(hdev, rdesc, rsize);
 
 	if (sc->quirks & PS3REMOTE)
 		return ps3remote_fixup(hdev, rdesc, rsize);
@@ -882,6 +1168,7 @@ static void sixaxis_parse_report(struct sony_sc *sc, __u8 *rd, int size)
 {
 	static const __u8 sixaxis_battery_capacity[] = { 0, 1, 25, 50, 75, 100 };
 	unsigned long flags;
+	int offset;
 	__u8 cable_state, battery_capacity, battery_charging;
 
 	/*
@@ -890,15 +1177,18 @@ static void sixaxis_parse_report(struct sony_sc *sc, __u8 *rd, int size)
 	 * It does not report the actual level while charging so it
 	 * is set to 100% while charging is in progress.
 	 */
-	if (rd[30] >= 0xee) {
+	offset = (sc->quirks & MOTION_CONTROLLER) ? 12 : 30;
+
+	if (rd[offset] >= 0xee) {
 		battery_capacity = 100;
-		battery_charging = !(rd[30] & 0x01);
+		battery_charging = !(rd[offset] & 0x01);
+		cable_state = 1;
 	} else {
-		__u8 index = rd[30] <= 5 ? rd[30] : 5;
+		__u8 index = rd[offset] <= 5 ? rd[offset] : 5;
 		battery_capacity = sixaxis_battery_capacity[index];
 		battery_charging = 0;
+		cable_state = 0;
 	}
-	cable_state = !(rd[31] & 0x04);
 
 	spin_lock_irqsave(&sc->lock, flags);
 	sc->cable_state = cable_state;
@@ -989,11 +1279,27 @@ static int sony_raw_event(struct hid_device *hdev, struct hid_report *report,
 	 * has to be BYTE_SWAPPED before passing up to joystick interface
 	 */
 	if ((sc->quirks & SIXAXIS_CONTROLLER) && rd[0] == 0x01 && size == 49) {
+		/*
+		 * When connected via Bluetooth the Sixaxis occasionally sends
+		 * a report with the second byte 0xff and the rest zeroed.
+		 *
+		 * This report does not reflect the actual state of the
+		 * controller must be ignored to avoid generating false input
+		 * events.
+		 */
+		if (rd[1] == 0xff)
+			return -EINVAL;
+
 		swap(rd[41], rd[42]);
 		swap(rd[43], rd[44]);
 		swap(rd[45], rd[46]);
 		swap(rd[47], rd[48]);
 
+		sixaxis_parse_report(sc, rd, size);
+	} else if ((sc->quirks & MOTION_CONTROLLER_BT) && rd[0] == 0x01 && size == 49) {
+		sixaxis_parse_report(sc, rd, size);
+	} else if ((sc->quirks & NAVIGATION_CONTROLLER) && rd[0] == 0x01 &&
+			size == 49) {
 		sixaxis_parse_report(sc, rd, size);
 	} else if (((sc->quirks & DUALSHOCK4_CONTROLLER_USB) && rd[0] == 0x01 &&
 			size == 64) || ((sc->quirks & DUALSHOCK4_CONTROLLER_BT)
@@ -1040,6 +1346,45 @@ static int sony_mapping(struct hid_device *hdev, struct hid_input *hi,
 	return 0;
 }
 
+static int sony_register_touchpad(struct hid_input *hi, int touch_count,
+					int w, int h)
+{
+	struct input_dev *input_dev = hi->input;
+	int ret;
+
+	ret = input_mt_init_slots(input_dev, touch_count, 0);
+	if (ret < 0)
+		return ret;
+
+	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, w, 0, 0);
+	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, h, 0, 0);
+
+	return 0;
+}
+
+static int sony_input_configured(struct hid_device *hdev,
+					struct hid_input *hidinput)
+{
+	struct sony_sc *sc = hid_get_drvdata(hdev);
+	int ret;
+
+	/*
+	 * The Dualshock 4 touchpad supports 2 touches and has a
+	 * resolution of 1920x942 (44.86 dots/mm).
+	 */
+	if (sc->quirks & DUALSHOCK4_CONTROLLER) {
+		ret = sony_register_touchpad(hidinput, 2, 1920, 942);
+		if (ret) {
+			hid_err(sc->hdev,
+				"Unable to initialize multi-touch slots: %d\n",
+				ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 /*
  * Sending HID_REQ_GET_REPORT changes the operation mode of the ps3 controller
  * to "operational".  Without this, the ps3 controller will not report any
@@ -1047,18 +1392,38 @@ static int sony_mapping(struct hid_device *hdev, struct hid_input *hi,
  */
 static int sixaxis_set_operational_usb(struct hid_device *hdev)
 {
+	const int buf_size =
+		max(SIXAXIS_REPORT_0xF2_SIZE, SIXAXIS_REPORT_0xF5_SIZE);
+	__u8 *buf;
 	int ret;
-	char *buf = kmalloc(18, GFP_KERNEL);
 
+	buf = kmalloc(buf_size, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	ret = hid_hw_raw_request(hdev, 0xf2, buf, 17, HID_FEATURE_REPORT,
-				 HID_REQ_GET_REPORT);
+	ret = hid_hw_raw_request(hdev, 0xf2, buf, SIXAXIS_REPORT_0xF2_SIZE,
+				 HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+	if (ret < 0) {
+		hid_err(hdev, "can't set operational mode: step 1\n");
+		goto out;
+	}
 
+	/*
+	 * Some compatible controllers like the Speedlink Strike FX and
+	 * Gasia need another query plus an USB interrupt to get operational.
+	 */
+	ret = hid_hw_raw_request(hdev, 0xf5, buf, SIXAXIS_REPORT_0xF5_SIZE,
+				 HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+	if (ret < 0) {
+		hid_err(hdev, "can't set operational mode: step 2\n");
+		goto out;
+	}
+
+	ret = hid_hw_output_report(hdev, buf, 1);
 	if (ret < 0)
-		hid_err(hdev, "can't set operational mode\n");
+		hid_err(hdev, "can't set operational mode: step 3\n");
 
+out:
 	kfree(buf);
 
 	return ret;
@@ -1066,9 +1431,20 @@ static int sixaxis_set_operational_usb(struct hid_device *hdev)
 
 static int sixaxis_set_operational_bt(struct hid_device *hdev)
 {
-	unsigned char buf[] = { 0xf4,  0x42, 0x03, 0x00, 0x00 };
-	return hid_hw_raw_request(hdev, buf[0], buf, sizeof(buf),
+	static const __u8 report[] = { 0xf4, 0x42, 0x03, 0x00, 0x00 };
+	__u8 *buf;
+	int ret;
+
+	buf = kmemdup(report, sizeof(report), GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = hid_hw_raw_request(hdev, buf[0], buf, sizeof(report),
 				  HID_FEATURE_REPORT, HID_REQ_SET_REPORT);
+
+	kfree(buf);
+
+	return ret;
 }
 
 /*
@@ -1077,13 +1453,22 @@ static int sixaxis_set_operational_bt(struct hid_device *hdev)
  */
 static int dualshock4_set_operational_bt(struct hid_device *hdev)
 {
-	__u8 buf[37] = { 0 };
+	__u8 *buf;
+	int ret;
 
-	return hid_hw_raw_request(hdev, 0x02, buf, sizeof(buf),
+	buf = kmalloc(DS4_REPORT_0x02_SIZE, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = hid_hw_raw_request(hdev, 0x02, buf, DS4_REPORT_0x02_SIZE,
 				HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+
+	kfree(buf);
+
+	return ret;
 }
 
-static void sixaxis_set_leds_from_id(int id, __u8 values[MAX_LEDS])
+static void sixaxis_set_leds_from_id(struct sony_sc *sc)
 {
 	static const __u8 sixaxis_leds[10][4] = {
 				{ 0x01, 0x00, 0x00, 0x00 },
@@ -1098,16 +1483,18 @@ static void sixaxis_set_leds_from_id(int id, __u8 values[MAX_LEDS])
 				{ 0x01, 0x01, 0x01, 0x01 }
 	};
 
-	BUG_ON(MAX_LEDS < ARRAY_SIZE(sixaxis_leds[0]));
+	int id = sc->device_id;
+
+	BUILD_BUG_ON(MAX_LEDS < ARRAY_SIZE(sixaxis_leds[0]));
 
 	if (id < 0)
 		return;
 
 	id %= 10;
-	memcpy(values, sixaxis_leds[id], sizeof(sixaxis_leds[id]));
+	memcpy(sc->led_state, sixaxis_leds[id], sizeof(sixaxis_leds[id]));
 }
 
-static void dualshock4_set_leds_from_id(int id, __u8 values[MAX_LEDS])
+static void dualshock4_set_leds_from_id(struct sony_sc *sc)
 {
 	/* The first 4 color/index entries match what the PS4 assigns */
 	static const __u8 color_code[7][3] = {
@@ -1120,53 +1507,51 @@ static void dualshock4_set_leds_from_id(int id, __u8 values[MAX_LEDS])
 			/* White  */	{ 0x01, 0x01, 0x01 }
 	};
 
-	BUG_ON(MAX_LEDS < ARRAY_SIZE(color_code[0]));
+	int id = sc->device_id;
+
+	BUILD_BUG_ON(MAX_LEDS < ARRAY_SIZE(color_code[0]));
 
 	if (id < 0)
 		return;
 
 	id %= 7;
-	memcpy(values, color_code[id], sizeof(color_code[id]));
+	memcpy(sc->led_state, color_code[id], sizeof(color_code[id]));
 }
 
-static void buzz_set_leds(struct hid_device *hdev, const __u8 *leds)
+static void buzz_set_leds(struct sony_sc *sc)
 {
+	struct hid_device *hdev = sc->hdev;
 	struct list_head *report_list =
 		&hdev->report_enum[HID_OUTPUT_REPORT].report_list;
 	struct hid_report *report = list_entry(report_list->next,
 		struct hid_report, list);
 	__s32 *value = report->field[0]->value;
 
+	BUILD_BUG_ON(MAX_LEDS < 4);
+
 	value[0] = 0x00;
-	value[1] = leds[0] ? 0xff : 0x00;
-	value[2] = leds[1] ? 0xff : 0x00;
-	value[3] = leds[2] ? 0xff : 0x00;
-	value[4] = leds[3] ? 0xff : 0x00;
+	value[1] = sc->led_state[0] ? 0xff : 0x00;
+	value[2] = sc->led_state[1] ? 0xff : 0x00;
+	value[3] = sc->led_state[2] ? 0xff : 0x00;
+	value[4] = sc->led_state[3] ? 0xff : 0x00;
 	value[5] = 0x00;
 	value[6] = 0x00;
 	hid_hw_request(hdev, report, HID_REQ_SET_REPORT);
 }
 
-static void sony_set_leds(struct sony_sc *sc, const __u8 *leds, int count)
+static void sony_set_leds(struct sony_sc *sc)
 {
-	int n;
-
-	BUG_ON(count > MAX_LEDS);
-
-	if (sc->quirks & BUZZ_CONTROLLER && count == 4) {
-		buzz_set_leds(sc->hdev, leds);
-	} else {
-		for (n = 0; n < count; n++)
-			sc->led_state[n] = leds[n];
+	if (!(sc->quirks & BUZZ_CONTROLLER))
 		schedule_work(&sc->state_worker);
-	}
+	else
+		buzz_set_leds(sc);
 }
 
 static void sony_led_set_brightness(struct led_classdev *led,
 				    enum led_brightness value)
 {
 	struct device *dev = led->dev->parent;
-	struct hid_device *hdev = container_of(dev, struct hid_device, dev);
+	struct hid_device *hdev = to_hid_device(dev);
 	struct sony_sc *drv_data;
 
 	int n;
@@ -1199,8 +1584,7 @@ static void sony_led_set_brightness(struct led_classdev *led,
 			drv_data->led_delay_on[n] = 0;
 			drv_data->led_delay_off[n] = 0;
 
-			sony_set_leds(drv_data, drv_data->led_state,
-					drv_data->led_count);
+			sony_set_leds(drv_data);
 			break;
 		}
 	}
@@ -1209,7 +1593,7 @@ static void sony_led_set_brightness(struct led_classdev *led,
 static enum led_brightness sony_led_get_brightness(struct led_classdev *led)
 {
 	struct device *dev = led->dev->parent;
-	struct hid_device *hdev = container_of(dev, struct hid_device, dev);
+	struct hid_device *hdev = to_hid_device(dev);
 	struct sony_sc *drv_data;
 
 	int n;
@@ -1232,7 +1616,7 @@ static int sony_led_blink_set(struct led_classdev *led, unsigned long *delay_on,
 				unsigned long *delay_off)
 {
 	struct device *dev = led->dev->parent;
-	struct hid_device *hdev = container_of(dev, struct hid_device, dev);
+	struct hid_device *hdev = to_hid_device(dev);
 	struct sony_sc *drv_data = hid_get_drvdata(hdev);
 	int n;
 	__u8 new_on, new_off;
@@ -1306,8 +1690,7 @@ static int sony_leds_init(struct sony_sc *sc)
 	const char *name_fmt;
 	static const char * const ds4_name_str[] = { "red", "green", "blue",
 						  "global" };
-	__u8 initial_values[MAX_LEDS] = { 0 };
-	__u8 max_brightness[MAX_LEDS] = { 1 };
+	__u8 max_brightness[MAX_LEDS] = { [0 ... (MAX_LEDS - 1)] = 1 };
 	__u8 use_hw_blink[MAX_LEDS] = { 0 };
 
 	BUG_ON(!(sc->quirks & SONY_LED_SUPPORT));
@@ -1321,16 +1704,31 @@ static int sony_leds_init(struct sony_sc *sc)
 		if (!hid_validate_values(hdev, HID_OUTPUT_REPORT, 0, 0, 7))
 			return -ENODEV;
 	} else if (sc->quirks & DUALSHOCK4_CONTROLLER) {
-		dualshock4_set_leds_from_id(sc->device_id, initial_values);
-		initial_values[3] = 1;
+		dualshock4_set_leds_from_id(sc);
+		sc->led_state[3] = 1;
 		sc->led_count = 4;
 		memset(max_brightness, 255, 3);
 		use_hw_blink[3] = 1;
 		use_ds4_names = 1;
 		name_len = 0;
 		name_fmt = "%s:%s";
+	} else if (sc->quirks & MOTION_CONTROLLER) {
+		sc->led_count = 3;
+		memset(max_brightness, 255, 3);
+		use_ds4_names = 1;
+		name_len = 0;
+		name_fmt = "%s:%s";
+	} else if (sc->quirks & NAVIGATION_CONTROLLER) {
+		static const __u8 navigation_leds[4] = {0x01, 0x00, 0x00, 0x00};
+
+		memcpy(sc->led_state, navigation_leds, sizeof(navigation_leds));
+		sc->led_count = 1;
+		memset(use_hw_blink, 1, 4);
+		use_ds4_names = 0;
+		name_len = strlen("::sony#");
+		name_fmt = "%s::sony%d";
 	} else {
-		sixaxis_set_leds_from_id(sc->device_id, initial_values);
+		sixaxis_set_leds_from_id(sc);
 		sc->led_count = 4;
 		memset(use_hw_blink, 1, 4);
 		use_ds4_names = 0;
@@ -1343,7 +1741,7 @@ static int sony_leds_init(struct sony_sc *sc)
 	 * only relevant if the driver is loaded after somebody actively set the
 	 * LEDs to on
 	 */
-	sony_set_leds(sc, initial_values, sc->led_count);
+	sony_set_leds(sc);
 
 	name_sz = strlen(dev_name(&hdev->dev)) + name_len + 1;
 
@@ -1366,7 +1764,7 @@ static int sony_leds_init(struct sony_sc *sc)
 		else
 			snprintf(name, name_sz, name_fmt, dev_name(&hdev->dev), n + 1);
 		led->name = name;
-		led->brightness = initial_values[n];
+		led->brightness = sc->led_state[n];
 		led->max_brightness = max_brightness[n];
 		led->brightness_get = sony_led_get_brightness;
 		led->brightness_set = sony_led_set_brightness;
@@ -1393,11 +1791,9 @@ error_leds:
 	return ret;
 }
 
-static void sixaxis_state_worker(struct work_struct *work)
+static void sixaxis_send_output_report(struct sony_sc *sc)
 {
-	struct sony_sc *sc = container_of(work, struct sony_sc, state_worker);
-	int n;
-	union sixaxis_output_report_01 report = {
+	static const union sixaxis_output_report_01 default_report = {
 		.buf = {
 			0x01,
 			0x00, 0xff, 0x00, 0xff, 0x00,
@@ -1409,20 +1805,26 @@ static void sixaxis_state_worker(struct work_struct *work)
 			0x00, 0x00, 0x00, 0x00, 0x00
 		}
 	};
+	struct sixaxis_output_report *report =
+		(struct sixaxis_output_report *)sc->output_report_dmabuf;
+	int n;
+
+	/* Initialize the report with default values */
+	memcpy(report, &default_report, sizeof(struct sixaxis_output_report));
 
 #ifdef CONFIG_SONY_FF
-	report.data.rumble.right_motor_on = sc->right ? 1 : 0;
-	report.data.rumble.left_motor_force = sc->left;
+	report->rumble.right_motor_on = sc->right ? 1 : 0;
+	report->rumble.left_motor_force = sc->left;
 #endif
 
-	report.data.leds_bitmap |= sc->led_state[0] << 1;
-	report.data.leds_bitmap |= sc->led_state[1] << 2;
-	report.data.leds_bitmap |= sc->led_state[2] << 3;
-	report.data.leds_bitmap |= sc->led_state[3] << 4;
+	report->leds_bitmap |= sc->led_state[0] << 1;
+	report->leds_bitmap |= sc->led_state[1] << 2;
+	report->leds_bitmap |= sc->led_state[2] << 3;
+	report->leds_bitmap |= sc->led_state[3] << 4;
 
 	/* Set flag for all leds off, required for 3rd party INTEC controller */
-	if ((report.data.leds_bitmap & 0x1E) == 0)
-		report.data.leds_bitmap |= 0x20;
+	if ((report->leds_bitmap & 0x1E) == 0)
+		report->leds_bitmap |= 0x20;
 
 	/*
 	 * The LEDs in the report are indexed in reverse order to their
@@ -1435,30 +1837,31 @@ static void sixaxis_state_worker(struct work_struct *work)
 	 */
 	for (n = 0; n < 4; n++) {
 		if (sc->led_delay_on[n] || sc->led_delay_off[n]) {
-			report.data.led[3 - n].duty_off = sc->led_delay_off[n];
-			report.data.led[3 - n].duty_on = sc->led_delay_on[n];
+			report->led[3 - n].duty_off = sc->led_delay_off[n];
+			report->led[3 - n].duty_on = sc->led_delay_on[n];
 		}
 	}
 
-	hid_hw_raw_request(sc->hdev, report.data.report_id, report.buf,
-			sizeof(report), HID_OUTPUT_REPORT, HID_REQ_SET_REPORT);
+	hid_hw_raw_request(sc->hdev, report->report_id, (__u8 *)report,
+			sizeof(struct sixaxis_output_report),
+			HID_OUTPUT_REPORT, HID_REQ_SET_REPORT);
 }
 
-static void dualshock4_state_worker(struct work_struct *work)
+static void dualshock4_send_output_report(struct sony_sc *sc)
 {
-	struct sony_sc *sc = container_of(work, struct sony_sc, state_worker);
 	struct hid_device *hdev = sc->hdev;
+	__u8 *buf = sc->output_report_dmabuf;
 	int offset;
 
-	__u8 buf[78] = { 0 };
-
 	if (sc->quirks & DUALSHOCK4_CONTROLLER_USB) {
+		memset(buf, 0, DS4_REPORT_0x05_SIZE);
 		buf[0] = 0x05;
 		buf[1] = 0xFF;
 		offset = 4;
 	} else {
+		memset(buf, 0, DS4_REPORT_0x11_SIZE);
 		buf[0] = 0x11;
-		buf[1] = 0xB0;
+		buf[1] = 0x80;
 		buf[3] = 0x0F;
 		offset = 6;
 	}
@@ -1484,10 +1887,67 @@ static void dualshock4_state_worker(struct work_struct *work)
 	buf[offset++] = sc->led_delay_off[3];
 
 	if (sc->quirks & DUALSHOCK4_CONTROLLER_USB)
-		hid_hw_output_report(hdev, buf, 32);
+		hid_hw_output_report(hdev, buf, DS4_REPORT_0x05_SIZE);
 	else
-		hid_hw_raw_request(hdev, 0x11, buf, 78,
+		hid_hw_raw_request(hdev, 0x11, buf, DS4_REPORT_0x11_SIZE,
 				HID_OUTPUT_REPORT, HID_REQ_SET_REPORT);
+}
+
+static void motion_send_output_report(struct sony_sc *sc)
+{
+	struct hid_device *hdev = sc->hdev;
+	struct motion_output_report_02 *report =
+		(struct motion_output_report_02 *)sc->output_report_dmabuf;
+
+	memset(report, 0, MOTION_REPORT_0x02_SIZE);
+
+	report->type = 0x02; /* set leds */
+	report->r = sc->led_state[0];
+	report->g = sc->led_state[1];
+	report->b = sc->led_state[2];
+
+#ifdef CONFIG_SONY_FF
+	report->rumble = max(sc->right, sc->left);
+#endif
+
+	hid_hw_output_report(hdev, (__u8 *)report, MOTION_REPORT_0x02_SIZE);
+}
+
+static inline void sony_send_output_report(struct sony_sc *sc)
+{
+	if (sc->send_output_report)
+		sc->send_output_report(sc);
+}
+
+static void sony_state_worker(struct work_struct *work)
+{
+	struct sony_sc *sc = container_of(work, struct sony_sc, state_worker);
+	sc->send_output_report(sc);
+}
+
+static int sony_allocate_output_report(struct sony_sc *sc)
+{
+	if ((sc->quirks & SIXAXIS_CONTROLLER) ||
+			(sc->quirks & NAVIGATION_CONTROLLER))
+		sc->output_report_dmabuf =
+			kmalloc(sizeof(union sixaxis_output_report_01),
+				GFP_KERNEL);
+	else if (sc->quirks & DUALSHOCK4_CONTROLLER_BT)
+		sc->output_report_dmabuf = kmalloc(DS4_REPORT_0x11_SIZE,
+						GFP_KERNEL);
+	else if (sc->quirks & DUALSHOCK4_CONTROLLER_USB)
+		sc->output_report_dmabuf = kmalloc(DS4_REPORT_0x05_SIZE,
+						GFP_KERNEL);
+	else if (sc->quirks & MOTION_CONTROLLER)
+		sc->output_report_dmabuf = kmalloc(MOTION_REPORT_0x02_SIZE,
+						GFP_KERNEL);
+	else
+		return 0;
+
+	if (!sc->output_report_dmabuf)
+		return -ENOMEM;
+
+	return 0;
 }
 
 #ifdef CONFIG_SONY_FF
@@ -1529,7 +1989,7 @@ static int sony_battery_get_property(struct power_supply *psy,
 				     enum power_supply_property psp,
 				     union power_supply_propval *val)
 {
-	struct sony_sc *sc = container_of(psy, struct sony_sc, battery);
+	struct sony_sc *sc = power_supply_get_drvdata(psy);
 	unsigned long flags;
 	int ret = 0;
 	u8 battery_charging, battery_capacity, cable_state;
@@ -1568,6 +2028,7 @@ static int sony_battery_get_property(struct power_supply *psy,
 
 static int sony_battery_probe(struct sony_sc *sc)
 {
+	struct power_supply_config psy_cfg = { .drv_data = sc, };
 	struct hid_device *hdev = sc->hdev;
 	int ret;
 
@@ -1577,59 +2038,42 @@ static int sony_battery_probe(struct sony_sc *sc)
 	 */
 	sc->battery_capacity = 100;
 
-	sc->battery.properties = sony_battery_props;
-	sc->battery.num_properties = ARRAY_SIZE(sony_battery_props);
-	sc->battery.get_property = sony_battery_get_property;
-	sc->battery.type = POWER_SUPPLY_TYPE_BATTERY;
-	sc->battery.use_for_apm = 0;
-	sc->battery.name = kasprintf(GFP_KERNEL, "sony_controller_battery_%pMR",
-				     sc->mac_address);
-	if (!sc->battery.name)
+	sc->battery_desc.properties = sony_battery_props;
+	sc->battery_desc.num_properties = ARRAY_SIZE(sony_battery_props);
+	sc->battery_desc.get_property = sony_battery_get_property;
+	sc->battery_desc.type = POWER_SUPPLY_TYPE_BATTERY;
+	sc->battery_desc.use_for_apm = 0;
+	sc->battery_desc.name = kasprintf(GFP_KERNEL,
+					  "sony_controller_battery_%pMR",
+					  sc->mac_address);
+	if (!sc->battery_desc.name)
 		return -ENOMEM;
 
-	ret = power_supply_register(&hdev->dev, &sc->battery);
-	if (ret) {
+	sc->battery = power_supply_register(&hdev->dev, &sc->battery_desc,
+					    &psy_cfg);
+	if (IS_ERR(sc->battery)) {
+		ret = PTR_ERR(sc->battery);
 		hid_err(hdev, "Unable to register battery device\n");
 		goto err_free;
 	}
 
-	power_supply_powers(&sc->battery, &hdev->dev);
+	power_supply_powers(sc->battery, &hdev->dev);
 	return 0;
 
 err_free:
-	kfree(sc->battery.name);
-	sc->battery.name = NULL;
+	kfree(sc->battery_desc.name);
+	sc->battery_desc.name = NULL;
 	return ret;
 }
 
 static void sony_battery_remove(struct sony_sc *sc)
 {
-	if (!sc->battery.name)
+	if (!sc->battery_desc.name)
 		return;
 
-	power_supply_unregister(&sc->battery);
-	kfree(sc->battery.name);
-	sc->battery.name = NULL;
-}
-
-static int sony_register_touchpad(struct sony_sc *sc, int touch_count,
-					int w, int h)
-{
-	struct hid_input *hidinput = list_entry(sc->hdev->inputs.next,
-						struct hid_input, list);
-	struct input_dev *input_dev = hidinput->input;
-	int ret;
-
-	ret = input_mt_init_slots(input_dev, touch_count, 0);
-	if (ret < 0) {
-		hid_err(sc->hdev, "Unable to initialize multi-touch slots\n");
-		return ret;
-	}
-
-	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, w, 0, 0);
-	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, h, 0, 0);
-
-	return 0;
+	power_supply_unregister(sc->battery);
+	kfree(sc->battery_desc.name);
+	sc->battery_desc.name = NULL;
 }
 
 /*
@@ -1698,9 +2142,12 @@ static int sony_get_bt_devaddr(struct sony_sc *sc)
 
 static int sony_check_add(struct sony_sc *sc)
 {
+	__u8 *buf = NULL;
 	int n, ret;
 
 	if ((sc->quirks & DUALSHOCK4_CONTROLLER_BT) ||
+	    (sc->quirks & MOTION_CONTROLLER_BT) ||
+	    (sc->quirks & NAVIGATION_CONTROLLER_BT) ||
 	    (sc->quirks & SIXAXIS_CONTROLLER_BT)) {
 		/*
 		 * sony_get_bt_devaddr() attempts to parse the Bluetooth MAC
@@ -1713,36 +2160,45 @@ static int sony_check_add(struct sony_sc *sc)
 			return 0;
 		}
 	} else if (sc->quirks & DUALSHOCK4_CONTROLLER_USB) {
-		__u8 buf[7];
+		buf = kmalloc(DS4_REPORT_0x81_SIZE, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
 
 		/*
 		 * The MAC address of a DS4 controller connected via USB can be
 		 * retrieved with feature report 0x81. The address begins at
 		 * offset 1.
 		 */
-		ret = hid_hw_raw_request(sc->hdev, 0x81, buf, sizeof(buf),
-				HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+		ret = hid_hw_raw_request(sc->hdev, 0x81, buf,
+				DS4_REPORT_0x81_SIZE, HID_FEATURE_REPORT,
+				HID_REQ_GET_REPORT);
 
-		if (ret != 7) {
+		if (ret != DS4_REPORT_0x81_SIZE) {
 			hid_err(sc->hdev, "failed to retrieve feature report 0x81 with the DualShock 4 MAC address\n");
-			return ret < 0 ? ret : -EINVAL;
+			ret = ret < 0 ? ret : -EINVAL;
+			goto out_free;
 		}
 
 		memcpy(sc->mac_address, &buf[1], sizeof(sc->mac_address));
-	} else if (sc->quirks & SIXAXIS_CONTROLLER_USB) {
-		__u8 buf[18];
+	} else if ((sc->quirks & SIXAXIS_CONTROLLER_USB) ||
+			(sc->quirks & NAVIGATION_CONTROLLER_USB)) {
+		buf = kmalloc(SIXAXIS_REPORT_0xF2_SIZE, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
 
 		/*
 		 * The MAC address of a Sixaxis controller connected via USB can
 		 * be retrieved with feature report 0xf2. The address begins at
 		 * offset 4.
 		 */
-		ret = hid_hw_raw_request(sc->hdev, 0xf2, buf, sizeof(buf),
-				HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+		ret = hid_hw_raw_request(sc->hdev, 0xf2, buf,
+				SIXAXIS_REPORT_0xF2_SIZE, HID_FEATURE_REPORT,
+				HID_REQ_GET_REPORT);
 
-		if (ret != 18) {
+		if (ret != SIXAXIS_REPORT_0xF2_SIZE) {
 			hid_err(sc->hdev, "failed to retrieve feature report 0xf2 with the Sixaxis MAC address\n");
-			return ret < 0 ? ret : -EINVAL;
+			ret = ret < 0 ? ret : -EINVAL;
+			goto out_free;
 		}
 
 		/*
@@ -1755,7 +2211,13 @@ static int sony_check_add(struct sony_sc *sc)
 		return 0;
 	}
 
-	return sony_check_add_dev_list(sc);
+	ret = sony_check_add_dev_list(sc);
+
+out_free:
+
+	kfree(buf);
+
+	return ret;
 }
 
 static int sony_set_device_id(struct sony_sc *sc)
@@ -1790,11 +2252,13 @@ static void sony_release_device_id(struct sony_sc *sc)
 	}
 }
 
-static inline void sony_init_work(struct sony_sc *sc,
-					void (*worker)(struct work_struct *))
+static inline void sony_init_output_report(struct sony_sc *sc,
+				void(*send_output_report)(struct sony_sc*))
 {
+	sc->send_output_report = send_output_report;
+
 	if (!sc->worker_initialized)
-		INIT_WORK(&sc->state_worker, worker);
+		INIT_WORK(&sc->state_worker, sony_state_worker);
 
 	sc->worker_initialized = 1;
 }
@@ -1818,6 +2282,8 @@ static int sony_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		return -ENOMEM;
 	}
 
+	spin_lock_init(&sc->lock);
+
 	sc->quirks = quirks;
 	hid_set_drvdata(hdev, sc);
 	sc->hdev = hdev;
@@ -1830,9 +2296,7 @@ static int sony_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	if (sc->quirks & VAIO_RDESC_CONSTANT)
 		connect_mask |= HID_CONNECT_HIDDEV_FORCE;
-	else if (sc->quirks & SIXAXIS_CONTROLLER_USB)
-		connect_mask |= HID_CONNECT_HIDDEV_FORCE;
-	else if (sc->quirks & SIXAXIS_CONTROLLER_BT)
+	else if (sc->quirks & SIXAXIS_CONTROLLER)
 		connect_mask |= HID_CONNECT_HIDDEV_FORCE;
 
 	ret = hid_hw_start(hdev, connect_mask);
@@ -1847,7 +2311,14 @@ static int sony_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		goto err_stop;
 	}
 
-	if (sc->quirks & SIXAXIS_CONTROLLER_USB) {
+	ret = sony_allocate_output_report(sc);
+	if (ret < 0) {
+		hid_err(hdev, "failed to allocate the output report buffer\n");
+		goto err_stop;
+	}
+
+	if ((sc->quirks & SIXAXIS_CONTROLLER_USB) ||
+			(sc->quirks & NAVIGATION_CONTROLLER_USB)) {
 		/*
 		 * The Sony Sixaxis does not handle HID Output Reports on the
 		 * Interrupt EP like it could, so we need to force HID Output
@@ -1861,15 +2332,16 @@ static int sony_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		hdev->quirks |= HID_QUIRK_NO_OUTPUT_REPORTS_ON_INTR_EP;
 		hdev->quirks |= HID_QUIRK_SKIP_OUTPUT_REPORT_ID;
 		ret = sixaxis_set_operational_usb(hdev);
-		sony_init_work(sc, sixaxis_state_worker);
-	} else if (sc->quirks & SIXAXIS_CONTROLLER_BT) {
+		sony_init_output_report(sc, sixaxis_send_output_report);
+	} else if ((sc->quirks & SIXAXIS_CONTROLLER_BT) ||
+			(sc->quirks & NAVIGATION_CONTROLLER_BT)) {
 		/*
 		 * The Sixaxis wants output reports sent on the ctrl endpoint
 		 * when connected via Bluetooth.
 		 */
 		hdev->quirks |= HID_QUIRK_NO_OUTPUT_REPORTS_ON_INTR_EP;
 		ret = sixaxis_set_operational_bt(hdev);
-		sony_init_work(sc, sixaxis_state_worker);
+		sony_init_output_report(sc, sixaxis_send_output_report);
 	} else if (sc->quirks & DUALSHOCK4_CONTROLLER) {
 		if (sc->quirks & DUALSHOCK4_CONTROLLER_BT) {
 			/*
@@ -1883,15 +2355,10 @@ static int sony_probe(struct hid_device *hdev, const struct hid_device_id *id)
 				goto err_stop;
 			}
 		}
-		/*
-		 * The Dualshock 4 touchpad supports 2 touches and has a
-		 * resolution of 1920x940.
-		 */
-		ret = sony_register_touchpad(sc, 2, 1920, 940);
-		if (ret < 0)
-			goto err_stop;
 
-		sony_init_work(sc, dualshock4_state_worker);
+		sony_init_output_report(sc, dualshock4_send_output_report);
+	} else if (sc->quirks & MOTION_CONTROLLER) {
+		sony_init_output_report(sc, motion_send_output_report);
 	} else {
 		ret = 0;
 	}
@@ -1937,6 +2404,7 @@ err_stop:
 	if (sc->quirks & SONY_BATTERY_SUPPORT)
 		sony_battery_remove(sc);
 	sony_cancel_work_sync(sc);
+	kfree(sc->output_report_dmabuf);
 	sony_remove_dev_list(sc);
 	sony_release_device_id(sc);
 	hid_hw_stop(hdev);
@@ -1957,6 +2425,8 @@ static void sony_remove(struct hid_device *hdev)
 
 	sony_cancel_work_sync(sc);
 
+	kfree(sc->output_report_dmabuf);
+
 	sony_remove_dev_list(sc);
 
 	sony_release_device_id(sc);
@@ -1964,11 +2434,67 @@ static void sony_remove(struct hid_device *hdev)
 	hid_hw_stop(hdev);
 }
 
+#ifdef CONFIG_PM
+
+static int sony_suspend(struct hid_device *hdev, pm_message_t message)
+{
+	/*
+	 * On suspend save the current LED state,
+	 * stop running force-feedback and blank the LEDS.
+         */
+	if (SONY_LED_SUPPORT || SONY_FF_SUPPORT) {
+		struct sony_sc *sc = hid_get_drvdata(hdev);
+
+#ifdef CONFIG_SONY_FF
+		sc->left = sc->right = 0;
+#endif
+
+		memcpy(sc->resume_led_state, sc->led_state,
+			sizeof(sc->resume_led_state));
+		memset(sc->led_state, 0, sizeof(sc->led_state));
+
+		sony_send_output_report(sc);
+	}
+
+	return 0;
+}
+
+static int sony_resume(struct hid_device *hdev)
+{
+	/* Restore the state of controller LEDs on resume */
+	if (SONY_LED_SUPPORT) {
+		struct sony_sc *sc = hid_get_drvdata(hdev);
+
+		memcpy(sc->led_state, sc->resume_led_state,
+			sizeof(sc->led_state));
+
+		/*
+		 * The Sixaxis and navigation controllers on USB need to be
+		 * reinitialized on resume or they won't behave properly.
+		 */
+		if ((sc->quirks & SIXAXIS_CONTROLLER_USB) ||
+			(sc->quirks & NAVIGATION_CONTROLLER_USB))
+			sixaxis_set_operational_usb(sc->hdev);
+
+		sony_set_leds(sc);
+	}
+
+	return 0;
+}
+
+#endif
+
 static const struct hid_device_id sony_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_PS3_CONTROLLER),
 		.driver_data = SIXAXIS_CONTROLLER_USB },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_NAVIGATION_CONTROLLER),
-		.driver_data = SIXAXIS_CONTROLLER_USB },
+		.driver_data = NAVIGATION_CONTROLLER_USB },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_NAVIGATION_CONTROLLER),
+		.driver_data = NAVIGATION_CONTROLLER_BT },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_MOTION_CONTROLLER),
+		.driver_data = MOTION_CONTROLLER_USB },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_MOTION_CONTROLLER),
+		.driver_data = MOTION_CONTROLLER_BT },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_PS3_CONTROLLER),
 		.driver_data = SIXAXIS_CONTROLLER_BT },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_VAIO_VGX_MOUSE),
@@ -1987,6 +2513,9 @@ static const struct hid_device_id sony_devices[] = {
 	/* Logitech Harmony Adapter for PS3 */
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, USB_DEVICE_ID_LOGITECH_HARMONY_PS3),
 		.driver_data = PS3REMOTE },
+	/* SMK-Link PS3 BD Remote Control */
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SMK, USB_DEVICE_ID_SMK_PS3_BDREMOTE),
+		.driver_data = PS3REMOTE },
 	/* Sony Dualshock 4 controllers for PS4 */
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_PS4_CONTROLLER),
 		.driver_data = DUALSHOCK4_CONTROLLER_USB },
@@ -1997,13 +2526,20 @@ static const struct hid_device_id sony_devices[] = {
 MODULE_DEVICE_TABLE(hid, sony_devices);
 
 static struct hid_driver sony_driver = {
-	.name          = "sony",
-	.id_table      = sony_devices,
-	.input_mapping = sony_mapping,
-	.probe         = sony_probe,
-	.remove        = sony_remove,
-	.report_fixup  = sony_report_fixup,
-	.raw_event     = sony_raw_event
+	.name             = "sony",
+	.id_table         = sony_devices,
+	.input_mapping    = sony_mapping,
+	.input_configured = sony_input_configured,
+	.probe            = sony_probe,
+	.remove           = sony_remove,
+	.report_fixup     = sony_report_fixup,
+	.raw_event        = sony_raw_event,
+
+#ifdef CONFIG_PM
+	.suspend          = sony_suspend,
+	.resume	          = sony_resume,
+	.reset_resume     = sony_resume,
+#endif
 };
 
 static int __init sony_init(void)
@@ -2017,8 +2553,8 @@ static void __exit sony_exit(void)
 {
 	dbg_hid("Sony:%s\n", __func__);
 
-	ida_destroy(&sony_device_id_allocator);
 	hid_unregister_driver(&sony_driver);
+	ida_destroy(&sony_device_id_allocator);
 }
 module_init(sony_init);
 module_exit(sony_exit);

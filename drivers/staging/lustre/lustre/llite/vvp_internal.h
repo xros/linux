@@ -26,6 +26,8 @@
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
+ *
+ * Copyright (c) 2013, 2015, Intel Corporation.
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
@@ -39,8 +41,7 @@
 #ifndef VVP_INTERNAL_H
 #define VVP_INTERNAL_H
 
-
-#include <cl_object.h>
+#include "../include/cl_object.h"
 #include "llite_internal.h"
 
 int	       vvp_io_init     (const struct lu_env *env,

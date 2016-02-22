@@ -168,21 +168,16 @@ static struct apic apic_flat =  {
 	.disable_esr			= 0,
 	.dest_logical			= APIC_DEST_LOGICAL,
 	.check_apicid_used		= NULL,
-	.check_apicid_present		= NULL,
 
 	.vector_allocation_domain	= flat_vector_allocation_domain,
 	.init_apic_ldr			= flat_init_apic_ldr,
 
 	.ioapic_phys_id_map		= NULL,
 	.setup_apic_routing		= NULL,
-	.multi_timer_check		= NULL,
 	.cpu_present_to_apicid		= default_cpu_present_to_apicid,
 	.apicid_to_cpu_present		= NULL,
-	.setup_portio_remap		= NULL,
 	.check_phys_apicid_present	= default_check_phys_apicid_present,
-	.enable_apic_mode		= NULL,
 	.phys_pkg_id			= flat_phys_pkg_id,
-	.mps_oem_check			= NULL,
 
 	.get_apic_id			= flat_get_apic_id,
 	.set_apic_id			= set_apic_id,
@@ -190,16 +185,13 @@ static struct apic apic_flat =  {
 
 	.cpu_mask_to_apicid_and		= flat_cpu_mask_to_apicid_and,
 
+	.send_IPI			= default_send_IPI_single,
 	.send_IPI_mask			= flat_send_IPI_mask,
 	.send_IPI_mask_allbutself	= flat_send_IPI_mask_allbutself,
 	.send_IPI_allbutself		= flat_send_IPI_allbutself,
 	.send_IPI_all			= flat_send_IPI_all,
 	.send_IPI_self			= apic_send_IPI_self,
 
-	.trampoline_phys_low		= DEFAULT_TRAMPOLINE_PHYS_LOW,
-	.trampoline_phys_high		= DEFAULT_TRAMPOLINE_PHYS_HIGH,
-	.wait_for_init_deassert		= false,
-	.smp_callin_clear_local_apic	= NULL,
 	.inquire_remote_apic		= default_inquire_remote_apic,
 
 	.read				= native_apic_mem_read,
@@ -239,17 +231,6 @@ static int physflat_acpi_madt_oem_check(char *oem_id, char *oem_table_id)
 	return 0;
 }
 
-static void physflat_send_IPI_mask(const struct cpumask *cpumask, int vector)
-{
-	default_send_IPI_mask_sequence_phys(cpumask, vector);
-}
-
-static void physflat_send_IPI_mask_allbutself(const struct cpumask *cpumask,
-					      int vector)
-{
-	default_send_IPI_mask_allbutself_phys(cpumask, vector);
-}
-
 static void physflat_send_IPI_allbutself(int vector)
 {
 	default_send_IPI_mask_allbutself_phys(cpu_online_mask, vector);
@@ -257,7 +238,7 @@ static void physflat_send_IPI_allbutself(int vector)
 
 static void physflat_send_IPI_all(int vector)
 {
-	physflat_send_IPI_mask(cpu_online_mask, vector);
+	default_send_IPI_mask_sequence_phys(cpu_online_mask, vector);
 }
 
 static int physflat_probe(void)
@@ -283,7 +264,6 @@ static struct apic apic_physflat =  {
 	.disable_esr			= 0,
 	.dest_logical			= 0,
 	.check_apicid_used		= NULL,
-	.check_apicid_present		= NULL,
 
 	.vector_allocation_domain	= default_vector_allocation_domain,
 	/* not needed, but shouldn't hurt: */
@@ -291,14 +271,10 @@ static struct apic apic_physflat =  {
 
 	.ioapic_phys_id_map		= NULL,
 	.setup_apic_routing		= NULL,
-	.multi_timer_check		= NULL,
 	.cpu_present_to_apicid		= default_cpu_present_to_apicid,
 	.apicid_to_cpu_present		= NULL,
-	.setup_portio_remap		= NULL,
 	.check_phys_apicid_present	= default_check_phys_apicid_present,
-	.enable_apic_mode		= NULL,
 	.phys_pkg_id			= flat_phys_pkg_id,
-	.mps_oem_check			= NULL,
 
 	.get_apic_id			= flat_get_apic_id,
 	.set_apic_id			= set_apic_id,
@@ -306,16 +282,13 @@ static struct apic apic_physflat =  {
 
 	.cpu_mask_to_apicid_and		= default_cpu_mask_to_apicid_and,
 
-	.send_IPI_mask			= physflat_send_IPI_mask,
-	.send_IPI_mask_allbutself	= physflat_send_IPI_mask_allbutself,
+	.send_IPI			= default_send_IPI_single_phys,
+	.send_IPI_mask			= default_send_IPI_mask_sequence_phys,
+	.send_IPI_mask_allbutself	= default_send_IPI_mask_allbutself_phys,
 	.send_IPI_allbutself		= physflat_send_IPI_allbutself,
 	.send_IPI_all			= physflat_send_IPI_all,
 	.send_IPI_self			= apic_send_IPI_self,
 
-	.trampoline_phys_low		= DEFAULT_TRAMPOLINE_PHYS_LOW,
-	.trampoline_phys_high		= DEFAULT_TRAMPOLINE_PHYS_HIGH,
-	.wait_for_init_deassert		= false,
-	.smp_callin_clear_local_apic	= NULL,
 	.inquire_remote_apic		= default_inquire_remote_apic,
 
 	.read				= native_apic_mem_read,

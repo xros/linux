@@ -52,9 +52,6 @@ static int ir_nec_decode(struct rc_dev *dev, struct ir_raw_event ev)
 	u8 address, not_address, command, not_command;
 	bool send_32bits = false;
 
-	if (!rc_protocols_enabled(dev, RC_BIT_NEC))
-		return 0;
-
 	if (!is_timing_event(ev)) {
 		if (ev.reset)
 			data->state = STATE_INACTIVE;
@@ -189,7 +186,7 @@ static int ir_nec_decode(struct rc_dev *dev, struct ir_raw_event ev)
 		if (data->is_nec_x)
 			data->necx_repeat = true;
 
-		rc_keydown(dev, scancode, 0);
+		rc_keydown(dev, RC_TYPE_NEC, scancode, 0);
 		data->state = STATE_INACTIVE;
 		return 0;
 	}

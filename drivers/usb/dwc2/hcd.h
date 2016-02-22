@@ -107,6 +107,7 @@ struct dwc2_qh;
  * @qh:                 QH for the transfer being processed by this channel
  * @hc_list_entry:      For linking to list of host channels
  * @desc_list_addr:     Current QH's descriptor list DMA address
+ * @desc_list_sz:       Current QH's descriptor list size
  *
  * This structure represents the state of a single host channel when acting in
  * host mode. It contains the data items needed to transfer packets to an
@@ -159,6 +160,7 @@ struct dwc2_host_chan {
 	struct dwc2_qh *qh;
 	struct list_head hc_list_entry;
 	dma_addr_t desc_list_addr;
+	u32 desc_list_sz;
 };
 
 struct dwc2_hcd_pipe_info {
@@ -243,13 +245,15 @@ enum dwc2_transaction_type {
  * @ntd:                Actual number of transfer descriptors in a list
  * @dw_align_buf:       Used instead of original buffer if its physical address
  *                      is not dword-aligned
- * @dw_align_buf_dma:   DMA address for align_buf
+ * @dw_align_buf_size:  Size of dw_align_buf
+ * @dw_align_buf_dma:   DMA address for dw_align_buf
  * @qtd_list:           List of QTDs for this QH
  * @channel:            Host channel currently processing transfers for this QH
  * @qh_list_entry:      Entry for QH in either the periodic or non-periodic
  *                      schedule
  * @desc_list:          List of transfer descriptors
  * @desc_list_dma:      Physical address of desc_list
+ * @desc_list_sz:       Size of descriptors list
  * @n_bytes:            Xfer Bytes array. Each element corresponds to a transfer
  *                      descriptor and indicates original XferSize value for the
  *                      descriptor
@@ -276,12 +280,14 @@ struct dwc2_qh {
 	u16 start_split_frame;
 	u16 ntd;
 	u8 *dw_align_buf;
+	int dw_align_buf_size;
 	dma_addr_t dw_align_buf_dma;
 	struct list_head qtd_list;
 	struct dwc2_host_chan *channel;
 	struct list_head qh_list_entry;
 	struct dwc2_hcd_dma_desc *desc_list;
 	dma_addr_t desc_list_dma;
+	u32 desc_list_sz;
 	u32 *n_bytes;
 	unsigned tt_buffer_dirty:1;
 };
@@ -338,6 +344,8 @@ struct dwc2_qtd {
 	u8 isoc_split_pos;
 	u16 isoc_frame_index;
 	u16 isoc_split_offset;
+	u16 isoc_td_last;
+	u16 isoc_td_first;
 	u32 ssplit_out_xfer_count;
 	u8 error_count;
 	u8 n_desc;
@@ -369,22 +377,10 @@ static inline struct usb_hcd *dwc2_hsotg_to_hcd(struct dwc2_hsotg *hsotg)
  */
 static inline void disable_hc_int(struct dwc2_hsotg *hsotg, int chnum, u32 intr)
 {
-	u32 mask = readl(hsotg->regs + HCINTMSK(chnum));
+	u32 mask = dwc2_readl(hsotg->regs + HCINTMSK(chnum));
 
 	mask &= ~intr;
-	writel(mask, hsotg->regs + HCINTMSK(chnum));
-}
-
-/*
- * Returns the mode of operation, host or device
- */
-static inline int dwc2_is_host_mode(struct dwc2_hsotg *hsotg)
-{
-	return (readl(hsotg->regs + GINTSTS) & GINTSTS_CURMODE_HOST) != 0;
-}
-static inline int dwc2_is_device_mode(struct dwc2_hsotg *hsotg)
-{
-	return (readl(hsotg->regs + GINTSTS) & GINTSTS_CURMODE_HOST) == 0;
+	dwc2_writel(mask, hsotg->regs + HCINTMSK(chnum));
 }
 
 /*
@@ -393,7 +389,7 @@ static inline int dwc2_is_device_mode(struct dwc2_hsotg *hsotg)
  */
 static inline u32 dwc2_read_hprt0(struct dwc2_hsotg *hsotg)
 {
-	u32 hprt0 = readl(hsotg->regs + HPRT0);
+	u32 hprt0 = dwc2_readl(hsotg->regs + HPRT0);
 
 	hprt0 &= ~(HPRT0_ENA | HPRT0_CONNDET | HPRT0_ENACHG | HPRT0_OVRCURRCHG);
 	return hprt0;
@@ -449,13 +445,8 @@ static inline u8 dwc2_hcd_is_pipe_out(struct dwc2_hcd_pipe_info *pipe)
 	return !dwc2_hcd_is_pipe_in(pipe);
 }
 
-extern int dwc2_hcd_init(struct dwc2_hsotg *hsotg, int irq,
-			 const struct dwc2_core_params *params);
+extern int dwc2_hcd_init(struct dwc2_hsotg *hsotg, int irq);
 extern void dwc2_hcd_remove(struct dwc2_hsotg *hsotg);
-extern void dwc2_set_parameters(struct dwc2_hsotg *hsotg,
-				const struct dwc2_core_params *params);
-extern void dwc2_set_all_params(struct dwc2_core_params *params, int value);
-extern int dwc2_get_hwparams(struct dwc2_hsotg *hsotg);
 
 /* Transaction Execution Functions */
 extern enum dwc2_transaction_type dwc2_hcd_select_transactions(
@@ -466,6 +457,9 @@ extern void dwc2_hcd_queue_transactions(struct dwc2_hsotg *hsotg,
 /* Schedule Queue Functions */
 /* Implemented in hcd_queue.c */
 extern void dwc2_hcd_init_usecs(struct dwc2_hsotg *hsotg);
+extern struct dwc2_qh *dwc2_hcd_qh_create(struct dwc2_hsotg *hsotg,
+					  struct dwc2_hcd_urb *urb,
+					  gfp_t mem_flags);
 extern void dwc2_hcd_qh_free(struct dwc2_hsotg *hsotg, struct dwc2_qh *qh);
 extern int dwc2_hcd_qh_add(struct dwc2_hsotg *hsotg, struct dwc2_qh *qh);
 extern void dwc2_hcd_qh_unlink(struct dwc2_hsotg *hsotg, struct dwc2_qh *qh);
@@ -474,7 +468,7 @@ extern void dwc2_hcd_qh_deactivate(struct dwc2_hsotg *hsotg, struct dwc2_qh *qh,
 
 extern void dwc2_hcd_qtd_init(struct dwc2_qtd *qtd, struct dwc2_hcd_urb *urb);
 extern int dwc2_hcd_qtd_add(struct dwc2_hsotg *hsotg, struct dwc2_qtd *qtd,
-			    struct dwc2_qh **qh, gfp_t mem_flags);
+			    struct dwc2_qh *qh);
 
 /* Unlinks and frees a QTD */
 static inline void dwc2_hcd_qtd_unlink_and_free(struct dwc2_hsotg *hsotg,
@@ -535,6 +529,19 @@ static inline bool dbg_perio(void) { return false; }
 #define dwc2_max_packet(wmaxpacketsize) ((wmaxpacketsize) & 0x07ff)
 
 /*
+ * Returns true if frame1 index is greater than frame2 index. The comparison
+ * is done modulo FRLISTEN_64_SIZE. This accounts for the rollover of the
+ * frame number when the max index frame number is reached.
+ */
+static inline bool dwc2_frame_idx_num_gt(u16 fr_idx1, u16 fr_idx2)
+{
+	u16 diff = fr_idx1 - fr_idx2;
+	u16 sign = diff & (FRLISTEN_64_SIZE >> 1);
+
+	return diff && !sign;
+}
+
+/*
  * Returns true if frame1 is less than or equal to frame2. The comparison is
  * done modulo HFNUM_MAX_FRNUM. This accounts for the rollover of the
  * frame number when the max frame number is reached.
@@ -580,7 +587,8 @@ static inline u16 dwc2_micro_frame_num(u16 frame)
  */
 static inline u32 dwc2_read_core_intr(struct dwc2_hsotg *hsotg)
 {
-	return readl(hsotg->regs + GINTSTS) & readl(hsotg->regs + GINTMSK);
+	return dwc2_readl(hsotg->regs + GINTSTS) &
+	       dwc2_readl(hsotg->regs + GINTMSK);
 }
 
 static inline u32 dwc2_hcd_urb_get_status(struct dwc2_hcd_urb *dwc2_urb)
@@ -666,9 +674,6 @@ extern irqreturn_t dwc2_handle_hcd_intr(struct dwc2_hsotg *hsotg);
  */
 extern void dwc2_hcd_stop(struct dwc2_hsotg *hsotg);
 
-extern void dwc2_hcd_start(struct dwc2_hsotg *hsotg);
-extern void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg);
-
 /**
  * dwc2_hcd_is_b_host() - Returns 1 if core currently is acting as B host,
  * and 0 otherwise
@@ -676,13 +681,6 @@ extern void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg);
  * @hsotg: The DWC2 HCD
  */
 extern int dwc2_hcd_is_b_host(struct dwc2_hsotg *hsotg);
-
-/**
- * dwc2_hcd_get_frame_number() - Returns current frame number
- *
- * @hsotg: The DWC2 HCD
- */
-extern int dwc2_hcd_get_frame_number(struct dwc2_hsotg *hsotg);
 
 /**
  * dwc2_hcd_dump_state() - Dumps hsotg state
@@ -742,7 +740,7 @@ do {									\
 			   qtd_list_entry);				\
 	if (usb_pipeint(_qtd_->urb->pipe) &&				\
 	    (_qh_)->start_split_frame != 0 && !_qtd_->complete_split) {	\
-		_hfnum_.d32 = readl((_hcd_)->regs + HFNUM);		\
+		_hfnum_.d32 = dwc2_readl((_hcd_)->regs + HFNUM);	\
 		switch (_hfnum_.b.frnum & 0x7) {			\
 		case 7:							\
 			(_hcd_)->hfnum_7_samples_##_letter_++;		\

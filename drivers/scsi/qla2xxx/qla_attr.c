@@ -484,7 +484,8 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		    start == (ha->flt_region_fw * 4))
 			valid = 1;
 		else if (IS_QLA24XX_TYPE(ha) || IS_QLA25XX(ha)
-			|| IS_CNA_CAPABLE(ha) || IS_QLA2031(ha))
+			|| IS_CNA_CAPABLE(ha) || IS_QLA2031(ha)
+			|| IS_QLA27XX(ha))
 			valid = 1;
 		if (!valid) {
 			ql_log(ql_log_warn, vha, 0x7065,
@@ -737,7 +738,7 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 		ql_log(ql_log_info, vha, 0x706f,
 		    "Issuing MPI reset.\n");
 
-		if (IS_QLA83XX(ha)) {
+		if (IS_QLA83XX(ha) || IS_QLA27XX(ha)) {
 			uint32_t idc_control;
 
 			qla83xx_idc_lock(vha, 0);
@@ -823,6 +824,41 @@ static struct bin_attribute sysfs_reset_attr = {
 };
 
 static ssize_t
+qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
+			struct bin_attribute *bin_attr,
+			char *buf, loff_t off, size_t count)
+{
+	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
+	    struct device, kobj)));
+	int type;
+	int rval = 0;
+	port_id_t did;
+
+	type = simple_strtol(buf, NULL, 10);
+
+	did.b.domain = (type & 0x00ff0000) >> 16;
+	did.b.area = (type & 0x0000ff00) >> 8;
+	did.b.al_pa = (type & 0x000000ff);
+
+	ql_log(ql_log_info, vha, 0x70e3, "portid=%02x%02x%02x done\n",
+	    did.b.domain, did.b.area, did.b.al_pa);
+
+	ql_log(ql_log_info, vha, 0x70e4, "%s: %d\n", __func__, type);
+
+	rval = qla24xx_els_dcmd_iocb(vha, ELS_DCMD_LOGO, did);
+	return count;
+}
+
+static struct bin_attribute sysfs_issue_logo_attr = {
+	.attr = {
+		.name = "issue_logo",
+		.mode = S_IWUSR,
+	},
+	.size = 0,
+	.write = qla2x00_issue_logo,
+};
+
+static ssize_t
 qla2x00_sysfs_read_xgmac_stats(struct file *filp, struct kobject *kobj,
 		       struct bin_attribute *bin_attr,
 		       char *buf, loff_t off, size_t count)
@@ -883,7 +919,6 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 	    struct device, kobj)));
 	struct qla_hw_data *ha = vha->hw;
 	int rval;
-	uint16_t actual_size;
 
 	if (!capable(CAP_SYS_ADMIN) || off != 0 || count > DCBX_TLV_DATA_SIZE)
 		return 0;
@@ -900,7 +935,6 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 	}
 
 do_read:
-	actual_size = 0;
 	memset(ha->dcbx_tlv, 0, DCBX_TLV_DATA_SIZE);
 
 	rval = qla2x00_get_dcbx_params(vha, ha->dcbx_tlv_dma,
@@ -938,6 +972,7 @@ static struct sysfs_entry {
 	{ "vpd", &sysfs_vpd_attr, 1 },
 	{ "sfp", &sysfs_sfp_attr, 1 },
 	{ "reset", &sysfs_reset_attr, },
+	{ "issue_logo", &sysfs_issue_logo_attr, },
 	{ "xgmac_stats", &sysfs_xgmac_stats_attr, 3 },
 	{ "dcbx_tlv", &sysfs_dcbx_tlv_attr, 3 },
 	{ NULL },
@@ -987,6 +1022,8 @@ qla2x00_free_sysfs_attr(scsi_qla_host_t *vha, bool stop_beacon)
 			continue;
 		if (iter->is4GBp_only == 3 && !(IS_CNA_CAPABLE(vha->hw)))
 			continue;
+		if (iter->is4GBp_only == 0x27 && !IS_QLA27XX(vha->hw))
+			continue;
 
 		sysfs_remove_bin_file(&host->shost_gendev.kobj,
 		    iter->attr);
@@ -1014,7 +1051,7 @@ qla2x00_fw_version_show(struct device *dev,
 	char fw_str[128];
 
 	return scnprintf(buf, PAGE_SIZE, "%s\n",
-	    ha->isp_ops->fw_version_str(vha, fw_str));
+	    ha->isp_ops->fw_version_str(vha, fw_str, sizeof(fw_str)));
 }
 
 static ssize_t
@@ -1076,8 +1113,7 @@ qla2x00_model_desc_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-	return scnprintf(buf, PAGE_SIZE, "%s\n",
-	    vha->hw->model_desc ? vha->hw->model_desc : "");
+	return scnprintf(buf, PAGE_SIZE, "%s\n", vha->hw->model_desc);
 }
 
 static ssize_t
@@ -1345,7 +1381,8 @@ qla2x00_mpi_version_show(struct device *dev, struct device_attribute *attr,
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
 
-	if (!IS_QLA81XX(ha) && !IS_QLA8031(ha) && !IS_QLA8044(ha))
+	if (!IS_QLA81XX(ha) && !IS_QLA8031(ha) && !IS_QLA8044(ha) &&
+	    !IS_QLA27XX(ha))
 		return scnprintf(buf, PAGE_SIZE, "\n");
 
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d.%02d (%x)\n",
@@ -1440,7 +1477,7 @@ qla2x00_fw_state_show(struct device *dev, struct device_attribute *attr,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	int rval = QLA_FUNCTION_FAILED;
-	uint16_t state[5];
+	uint16_t state[6];
 	uint32_t pstate;
 
 	if (IS_QLAFX00(vha->hw)) {
@@ -1456,8 +1493,8 @@ qla2x00_fw_state_show(struct device *dev, struct device_attribute *attr,
 	if (rval != QLA_SUCCESS)
 		memset(state, -1, sizeof(state));
 
-	return scnprintf(buf, PAGE_SIZE, "0x%x 0x%x 0x%x 0x%x 0x%x\n", state[0],
-	    state[1], state[2], state[3], state[4]);
+	return scnprintf(buf, PAGE_SIZE, "0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+	    state[0], state[1], state[2], state[3], state[4], state[5]);
 }
 
 static ssize_t
@@ -1534,6 +1571,20 @@ qla2x00_allow_cna_fw_dump_store(struct device *dev,
 	return strlen(buf);
 }
 
+static ssize_t
+qla2x00_pep_version_show(struct device *dev, struct device_attribute *attr,
+	char *buf)
+{
+	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
+	struct qla_hw_data *ha = vha->hw;
+
+	if (!IS_QLA27XX(ha))
+		return scnprintf(buf, PAGE_SIZE, "\n");
+
+	return scnprintf(buf, PAGE_SIZE, "%d.%02d.%02d\n",
+	    ha->pep_version[0], ha->pep_version[1], ha->pep_version[2]);
+}
+
 static DEVICE_ATTR(driver_version, S_IRUGO, qla2x00_drvr_version_show, NULL);
 static DEVICE_ATTR(fw_version, S_IRUGO, qla2x00_fw_version_show, NULL);
 static DEVICE_ATTR(serial_num, S_IRUGO, qla2x00_serial_num_show, NULL);
@@ -1578,6 +1629,7 @@ static DEVICE_ATTR(fw_dump_size, S_IRUGO, qla2x00_fw_dump_size_show, NULL);
 static DEVICE_ATTR(allow_cna_fw_dump, S_IRUGO | S_IWUSR,
 		   qla2x00_allow_cna_fw_dump_show,
 		   qla2x00_allow_cna_fw_dump_store);
+static DEVICE_ATTR(pep_version, S_IRUGO, qla2x00_pep_version_show, NULL);
 
 struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_driver_version,
@@ -1611,6 +1663,7 @@ struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_diag_megabytes,
 	&dev_attr_fw_dump_size,
 	&dev_attr_allow_cna_fw_dump,
+	&dev_attr_pep_version,
 	NULL,
 };
 
@@ -1924,7 +1977,8 @@ qla2x00_get_host_symbolic_name(struct Scsi_Host *shost)
 {
 	scsi_qla_host_t *vha = shost_priv(shost);
 
-	qla2x00_get_sym_node_name(vha, fc_host_symbolic_name(shost));
+	qla2x00_get_sym_node_name(vha, fc_host_symbolic_name(shost),
+	    sizeof(fc_host_symbolic_name(shost)));
 }
 
 static void

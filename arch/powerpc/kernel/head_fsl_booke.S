@@ -613,34 +613,36 @@ END_FTR_SECTION_IFSET(CPU_FTR_EMB_HV)
 	mfspr	r10, SPRN_SPRG_RSCRATCH0
 	b	InstructionStorage
 
+/* Define SPE handlers for e200 and e500v2 */
 #ifdef CONFIG_SPE
 	/* SPE Unavailable */
 	START_EXCEPTION(SPEUnavailable)
-	NORMAL_EXCEPTION_PROLOG(SPE_ALTIVEC_UNAVAIL)
+	NORMAL_EXCEPTION_PROLOG(SPE_UNAVAIL)
 	beq	1f
 	bl	load_up_spe
 	b	fast_exception_return
 1:	addi	r3,r1,STACK_FRAME_OVERHEAD
 	EXC_XFER_EE_LITE(0x2010, KernelSPE)
-#else
-	EXCEPTION(0x2020, SPE_ALTIVEC_UNAVAIL, SPEUnavailable, \
+#elif defined(CONFIG_SPE_POSSIBLE)
+	EXCEPTION(0x2020, SPE_UNAVAIL, SPEUnavailable, \
 		  unknown_exception, EXC_XFER_EE)
-#endif /* CONFIG_SPE */
+#endif /* CONFIG_SPE_POSSIBLE */
 
 	/* SPE Floating Point Data */
 #ifdef CONFIG_SPE
-	EXCEPTION(0x2030, SPE_FP_DATA_ALTIVEC_ASSIST, SPEFloatingPointData,
+	EXCEPTION(0x2030, SPE_FP_DATA, SPEFloatingPointData,
 		  SPEFloatingPointException, EXC_XFER_EE)
 
 	/* SPE Floating Point Round */
 	EXCEPTION(0x2050, SPE_FP_ROUND, SPEFloatingPointRound, \
 		  SPEFloatingPointRoundException, EXC_XFER_EE)
-#else
-	EXCEPTION(0x2040, SPE_FP_DATA_ALTIVEC_ASSIST, SPEFloatingPointData,
+#elif defined(CONFIG_SPE_POSSIBLE)
+	EXCEPTION(0x2040, SPE_FP_DATA, SPEFloatingPointData,
 		  unknown_exception, EXC_XFER_EE)
 	EXCEPTION(0x2050, SPE_FP_ROUND, SPEFloatingPointRound, \
 		  unknown_exception, EXC_XFER_EE)
-#endif /* CONFIG_SPE */
+#endif /* CONFIG_SPE_POSSIBLE */
+
 
 	/* Performance Monitor */
 	EXCEPTION(0x2060, PERFORMANCE_MONITOR, PerformanceMonitor, \
@@ -855,29 +857,6 @@ _GLOBAL(load_up_spe)
 	oris	r5,r5,MSR_SPE@h
 	mtmsr	r5			/* enable use of SPE now */
 	isync
-/*
- * For SMP, we don't do lazy SPE switching because it just gets too
- * horrendously complex, especially when a task switches from one CPU
- * to another.  Instead we call giveup_spe in switch_to.
- */
-#ifndef CONFIG_SMP
-	lis	r3,last_task_used_spe@ha
-	lwz	r4,last_task_used_spe@l(r3)
-	cmpi	0,r4,0
-	beq	1f
-	addi	r4,r4,THREAD	/* want THREAD of last_task_used_spe */
-	SAVE_32EVRS(0,r10,r4,THREAD_EVR0)
-	evxor	evr10, evr10, evr10	/* clear out evr10 */
-	evmwumiaa evr10, evr10, evr10	/* evr10 <- ACC = 0 * 0 + ACC */
-	li	r5,THREAD_ACC
-	evstddx	evr10, r4, r5		/* save off accumulator */
-	lwz	r5,PT_REGS(r4)
-	lwz	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r10,MSR_SPE@h
-	andc	r4,r4,r10	/* disable SPE for previous task */
-	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#endif /* !CONFIG_SMP */
 	/* enable use of SPE after return */
 	oris	r9,r9,MSR_SPE@h
 	mfspr	r5,SPRN_SPRG_THREAD	/* current task's THREAD (phys) */
@@ -887,10 +866,6 @@ _GLOBAL(load_up_spe)
 	evlddx	evr4,r10,r5
 	evmra	evr4,evr4
 	REST_32EVRS(0,r10,r5,THREAD_EVR0)
-#ifndef CONFIG_SMP
-	subi	r4,r5,THREAD
-	stw	r4,last_task_used_spe@l(r3)
-#endif /* !CONFIG_SMP */
 	blr
 
 /*
@@ -947,6 +922,7 @@ get_phys_addr:
  * Global functions
  */
 
+#ifdef CONFIG_E200
 /* Adjust or setup IVORs for e200 */
 _GLOBAL(__setup_e200_ivors)
 	li	r3,DebugDebug@l
@@ -959,7 +935,10 @@ _GLOBAL(__setup_e200_ivors)
 	mtspr	SPRN_IVOR34,r3
 	sync
 	blr
+#endif
 
+#ifdef CONFIG_E500
+#ifndef CONFIG_PPC_E500MC
 /* Adjust or setup IVORs for e500v1/v2 */
 _GLOBAL(__setup_e500_ivors)
 	li	r3,DebugCrit@l
@@ -974,7 +953,7 @@ _GLOBAL(__setup_e500_ivors)
 	mtspr	SPRN_IVOR35,r3
 	sync
 	blr
-
+#else
 /* Adjust or setup IVORs for e500mc */
 _GLOBAL(__setup_e500mc_ivors)
 	li	r3,DebugDebug@l
@@ -1000,19 +979,15 @@ _GLOBAL(__setup_ehv_ivors)
 	mtspr	SPRN_IVOR41,r3
 	sync
 	blr
+#endif /* CONFIG_PPC_E500MC */
+#endif /* CONFIG_E500 */
 
 #ifdef CONFIG_SPE
 /*
- * extern void giveup_spe(struct task_struct *prev)
+ * extern void __giveup_spe(struct task_struct *prev)
  *
  */
-_GLOBAL(giveup_spe)
-	mfmsr	r5
-	oris	r5,r5,MSR_SPE@h
-	mtmsr	r5			/* enable use of SPE now */
-	isync
-	cmpi	0,r3,0
-	beqlr-				/* if no previous owner, done */
+_GLOBAL(__giveup_spe)
 	addi	r3,r3,THREAD		/* want THREAD of task */
 	lwz	r5,PT_REGS(r3)
 	cmpi	0,r5,0
@@ -1027,11 +1002,6 @@ _GLOBAL(giveup_spe)
 	andc	r4,r4,r3		/* disable SPE for previous task */
 	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
 1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	lis	r4,last_task_used_spe@ha
-	stw	r5,last_task_used_spe@l(r4)
-#endif /* !CONFIG_SMP */
 	blr
 #endif /* CONFIG_SPE */
 

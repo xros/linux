@@ -709,11 +709,21 @@ static int get_vpd_params(struct adapter *adapter, struct vpd_params *p)
 			return ret;
 	}
 
-	p->cclk = simple_strtoul(vpd.cclk_data, NULL, 10);
-	p->mclk = simple_strtoul(vpd.mclk_data, NULL, 10);
-	p->uclk = simple_strtoul(vpd.uclk_data, NULL, 10);
-	p->mdc = simple_strtoul(vpd.mdc_data, NULL, 10);
-	p->mem_timing = simple_strtoul(vpd.mt_data, NULL, 10);
+	ret = kstrtouint(vpd.cclk_data, 10, &p->cclk);
+	if (ret)
+		return ret;
+	ret = kstrtouint(vpd.mclk_data, 10, &p->mclk);
+	if (ret)
+		return ret;
+	ret = kstrtouint(vpd.uclk_data, 10, &p->uclk);
+	if (ret)
+		return ret;
+	ret = kstrtouint(vpd.mdc_data, 10, &p->mdc);
+	if (ret)
+		return ret;
+	ret = kstrtouint(vpd.mt_data, 10, &p->mem_timing);
+	if (ret)
+		return ret;
 	memcpy(p->sn, vpd.sn_data, SERNUM_LEN);
 
 	/* Old eeproms didn't have port information */
@@ -723,13 +733,17 @@ static int get_vpd_params(struct adapter *adapter, struct vpd_params *p)
 	} else {
 		p->port_type[0] = hex_to_bin(vpd.port0_data[0]);
 		p->port_type[1] = hex_to_bin(vpd.port1_data[0]);
-		p->xauicfg[0] = simple_strtoul(vpd.xaui0cfg_data, NULL, 16);
-		p->xauicfg[1] = simple_strtoul(vpd.xaui1cfg_data, NULL, 16);
+		ret = kstrtou16(vpd.xaui0cfg_data, 16, &p->xauicfg[0]);
+		if (ret)
+			return ret;
+		ret = kstrtou16(vpd.xaui1cfg_data, 16, &p->xauicfg[1]);
+		if (ret)
+			return ret;
 	}
 
-	for (i = 0; i < 6; i++)
-		p->eth_base[i] = hex_to_bin(vpd.na_data[2 * i]) * 16 +
-				 hex_to_bin(vpd.na_data[2 * i + 1]);
+	ret = hex2bin(p->eth_base, vpd.na_data, 6);
+	if (ret < 0)
+		return -EINVAL;
 	return 0;
 }
 
@@ -840,7 +854,7 @@ static int flash_wait_op(struct adapter *adapter, int attempts, int delay)
  *	Read the specified number of 32-bit words from the serial flash.
  *	If @byte_oriented is set the read data is stored as a byte array
  *	(i.e., big-endian), otherwise as 32-bit words in the platform's
- *	natural endianess.
+ *	natural endianness.
  */
 static int t3_read_flash(struct adapter *adapter, unsigned int addr,
 			 unsigned int nwords, u32 *data, int byte_oriented)

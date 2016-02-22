@@ -2,7 +2,7 @@
 # Makefile for ACPICA Core interpreter
 #
 
-ccflags-y			:= -Os
+ccflags-y			:= -Os -DBUILDING_ACPICA
 ccflags-$(CONFIG_ACPI_DEBUG)	+= -DACPI_DEBUG_OUTPUT
 
 # use acpi.o to put all files here into acpi.o modparam namespace
@@ -11,6 +11,7 @@ obj-y	+= acpi.o
 acpi-y :=		\
 	dsargs.o	\
 	dscontrol.o	\
+	dsdebug.o	\
 	dsfield.o	\
 	dsinit.o	\
 	dsmethod.o	\
@@ -49,6 +50,7 @@ acpi-y +=		\
 	exdump.o	\
 	exfield.o	\
 	exfldio.o	\
+	exmisc.o	\
 	exmutex.o	\
 	exnames.o	\
 	exoparg1.o	\
@@ -56,7 +58,6 @@ acpi-y +=		\
 	exoparg3.o	\
 	exoparg6.o	\
 	exprep.o	\
-	exmisc.o	\
 	exregion.o	\
 	exresnte.o	\
 	exresolv.o	\
@@ -65,6 +66,7 @@ acpi-y +=		\
 	exstoren.o	\
 	exstorob.o	\
 	exsystem.o	\
+	extrace.o	\
 	exutils.o
 
 acpi-y +=		\
@@ -122,7 +124,6 @@ acpi-y +=		\
 	rsaddr.o	\
 	rscalc.o	\
 	rscreate.o	\
-	rsdump.o	\
 	rsdumpinfo.o	\
 	rsinfo.o	\
 	rsio.o		\
@@ -157,12 +158,14 @@ acpi-y +=		\
 	uterror.o	\
 	uteval.o	\
 	utglobal.o	\
+	uthex.o		\
 	utids.o		\
 	utinit.o	\
 	utlock.o	\
 	utmath.o	\
 	utmisc.o	\
 	utmutex.o	\
+	utnonansi.o	\
 	utobject.o	\
 	utosi.o		\
 	utownerid.o	\
@@ -175,5 +178,26 @@ acpi-y +=		\
 	utxferror.o	\
 	utxfmutex.o
 
-acpi-$(ACPI_FUTURE_USAGE) += uttrack.o utcache.o
+acpi-$(CONFIG_ACPI_DEBUGGER) +=	\
+	dbcmds.o		\
+	dbconvert.o		\
+	dbdisply.o		\
+	dbexec.o		\
+	dbhistry.o		\
+	dbinput.o		\
+	dbmethod.o		\
+	dbnames.o		\
+	dbobject.o		\
+	dbstats.o		\
+	dbutils.o		\
+	dbxface.o		\
+	rsdump.o		\
+
+acpi-$(ACPI_FUTURE_USAGE) +=	\
+	dbfileio.o		\
+	dbtest.o		\
+	utcache.o		\
+	utprint.o		\
+	uttrack.o		\
+	utuuid.o
 

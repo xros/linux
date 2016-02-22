@@ -31,20 +31,20 @@
  * General Public License for more details.
  */
 
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/device.h>
-#include <linux/slab.h>
-#include <linux/delay.h>
-#include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/init.h>
+#include <linux/io.h>
+#include <linux/module.h>
+#include <linux/slab.h>
 
 #include <sound/core.h>
+#include <sound/dmaengine_pcm.h>
+#include <sound/initval.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
-#include <sound/initval.h>
 #include <sound/soc.h>
-#include <sound/dmaengine_pcm.h>
 
 /* Clock registers */
 #define BCM2835_CLK_PCMCTL_REG  0x00
@@ -862,11 +862,12 @@ static const struct of_device_id bcm2835_i2s_of_match[] = {
 	{},
 };
 
+MODULE_DEVICE_TABLE(of, bcm2835_i2s_of_match);
+
 static struct platform_driver bcm2835_i2s_driver = {
 	.probe		= bcm2835_i2s_probe,
 	.driver		= {
 		.name	= "bcm2835-i2s",
-		.owner	= THIS_MODULE,
 		.of_match_table = bcm2835_i2s_of_match,
 	},
 };

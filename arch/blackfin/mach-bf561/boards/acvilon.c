@@ -44,6 +44,7 @@
 #include <linux/spi/flash.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/gpio.h>
 #include <linux/jiffies.h>
 #include <linux/i2c-pca-platform.h>
 #include <linux/delay.h>
@@ -266,7 +267,7 @@ static struct mtd_partition bfin_plat_nand_partitions[] = {
 static void bfin_plat_nand_cmd_ctrl(struct mtd_info *mtd, int cmd,
 				    unsigned int ctrl)
 {
-	struct nand_chip *this = mtd->priv;
+	struct nand_chip *this = mtd_to_nand(mtd);
 
 	if (cmd == NAND_CMD_NONE)
 		return;

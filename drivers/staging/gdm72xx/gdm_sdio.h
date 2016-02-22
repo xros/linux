@@ -11,11 +11,11 @@
  * GNU General Public License for more details.
  */
 
-#ifndef __GDM_SDIO_H__
-#define __GDM_SDIO_H__
+#ifndef __GDM72XX_GDM_SDIO_H__
+#define __GDM72XX_GDM_SDIO_H__
 
 #include <linux/types.h>
-#include <linux/time.h>
+#include <linux/ktime.h>
 
 #define MAX_NR_SDU_BUF  64
 
@@ -32,7 +32,7 @@ struct tx_cxt {
 	struct list_head	free_list;
 	struct list_head	sdu_list;
 	struct list_head	hci_list;
-	struct timeval		sdu_stamp;
+	ktime_t			sdu_stamp;
 	u8			*sdu_buf;
 	spinlock_t		lock;
 	int			can_send;
@@ -60,4 +60,4 @@ struct sdiowm_dev {
 	struct work_struct	ws;
 };
 
-#endif /* __GDM_SDIO_H__ */
+#endif /* __GDM72XX_GDM_SDIO_H__ */

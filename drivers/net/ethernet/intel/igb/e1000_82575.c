@@ -1,5 +1,5 @@
 /* Intel(R) Gigabit Ethernet Linux driver
- * Copyright(c) 2007-2014 Intel Corporation.
+ * Copyright(c) 2007-2015 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -45,8 +45,6 @@ static s32  igb_get_cfg_done_82575(struct e1000_hw *);
 static s32  igb_init_hw_82575(struct e1000_hw *);
 static s32  igb_phy_hw_reset_sgmii_82575(struct e1000_hw *);
 static s32  igb_read_phy_reg_sgmii_82575(struct e1000_hw *, u32, u16 *);
-static s32  igb_read_phy_reg_82580(struct e1000_hw *, u32, u16 *);
-static s32  igb_write_phy_reg_82580(struct e1000_hw *, u32, u16);
 static s32  igb_reset_hw_82575(struct e1000_hw *);
 static s32  igb_reset_hw_82580(struct e1000_hw *);
 static s32  igb_set_d0_lplu_state_82575(struct e1000_hw *, bool);
@@ -139,10 +137,6 @@ static s32 igb_check_for_link_media_swap(struct e1000_hw *hw)
 	if (ret_val)
 		return ret_val;
 
-	/* reset page to 0 */
-	ret_val = phy->ops.write_reg(hw, E1000_M88E1112_PAGE_ADDR, 0);
-	if (ret_val)
-		return ret_val;
 
 	if (data & E1000_M88E1112_STATUS_LINK)
 		port = E1000_MEDIA_PORT_OTHER;
@@ -151,8 +145,20 @@ static s32 igb_check_for_link_media_swap(struct e1000_hw *hw)
 	if (port && (hw->dev_spec._82575.media_port != port)) {
 		hw->dev_spec._82575.media_port = port;
 		hw->dev_spec._82575.media_changed = true;
+	}
+
+	if (port == E1000_MEDIA_PORT_COPPER) {
+		/* reset page to 0 */
+		ret_val = phy->ops.write_reg(hw, E1000_M88E1112_PAGE_ADDR, 0);
+		if (ret_val)
+			return ret_val;
+		igb_check_for_link_82575(hw);
 	} else {
-		ret_val = igb_check_for_link_82575(hw);
+		igb_check_for_link_82575(hw);
+		/* reset page to 0 */
+		ret_val = phy->ops.write_reg(hw, E1000_M88E1112_PAGE_ADDR, 0);
+		if (ret_val)
+			return ret_val;
 	}
 
 	return 0;
@@ -197,13 +203,10 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 		case e1000_82580:
 		case e1000_i350:
 		case e1000_i354:
-			phy->ops.read_reg = igb_read_phy_reg_82580;
-			phy->ops.write_reg = igb_write_phy_reg_82580;
-			break;
 		case e1000_i210:
 		case e1000_i211:
-			phy->ops.read_reg = igb_read_phy_reg_gs40g;
-			phy->ops.write_reg = igb_write_phy_reg_gs40g;
+			phy->ops.read_reg = igb_read_phy_reg_82580;
+			phy->ops.write_reg = igb_write_phy_reg_82580;
 			break;
 		default:
 			phy->ops.read_reg = igb_read_phy_reg_igp;
@@ -223,6 +226,7 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 	/* Verify phy id and set remaining function pointers */
 	switch (phy->id) {
 	case M88E1543_E_PHY_ID:
+	case M88E1512_E_PHY_ID:
 	case I347AT4_E_PHY_ID:
 	case M88E1112_E_PHY_ID:
 	case M88E1111_I_PHY_ID:
@@ -235,7 +239,7 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 		else
 			phy->ops.get_cable_length = igb_get_cable_length_m88;
 		phy->ops.force_speed_duplex = igb_phy_force_speed_duplex_m88;
-		/* Check if this PHY is confgured for media swap. */
+		/* Check if this PHY is configured for media swap. */
 		if (phy->id == M88E1112_E_PHY_ID) {
 			u16 data;
 
@@ -257,6 +261,16 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 			    data == E1000_M88E1112_AUTO_COPPER_BASEX)
 				hw->mac.ops.check_for_link =
 						igb_check_for_link_media_swap;
+		}
+		if (phy->id == M88E1512_E_PHY_ID) {
+			ret_val = igb_initialize_M88E1512_phy(hw);
+			if (ret_val)
+				goto out;
+		}
+		if (phy->id == M88E1543_E_PHY_ID) {
+			ret_val = igb_initialize_M88E1543_phy(hw);
+			if (ret_val)
+				goto out;
 		}
 		break;
 	case IGP03E1000_E_PHY_ID:
@@ -280,6 +294,7 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 	case I210_I_PHY_ID:
 		phy->type		= e1000_phy_i210;
 		phy->ops.check_polarity	= igb_check_polarity_m88;
+		phy->ops.get_cfg_done	= igb_get_cfg_done_i210;
 		phy->ops.get_phy_info	= igb_get_phy_info_m88;
 		phy->ops.get_cable_length = igb_get_cable_length_m88_gen2;
 		phy->ops.set_d0_lplu_state = igb_set_d0_lplu_state_82580;
@@ -579,7 +594,6 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
 		break;
 	default:
 		return -E1000_ERR_MAC_INIT;
-		break;
 	}
 
 	/* Set media type */
@@ -837,7 +851,6 @@ static s32 igb_get_phy_id_82575(struct e1000_hw *hw)
 		default:
 			ret_val = -E1000_ERR_PHY;
 			goto out;
-			break;
 		}
 		ret_val = igb_get_phy_id(hw);
 		goto out;
@@ -891,6 +904,7 @@ out:
  **/
 static s32 igb_phy_hw_reset_sgmii_82575(struct e1000_hw *hw)
 {
+	struct e1000_phy_info *phy = &hw->phy;
 	s32 ret_val;
 
 	/* This isn't a true "hard" reset, but is the only reset
@@ -907,7 +921,13 @@ static s32 igb_phy_hw_reset_sgmii_82575(struct e1000_hw *hw)
 		goto out;
 
 	ret_val = igb_phy_sw_reset(hw);
+	if (ret_val)
+		goto out;
 
+	if (phy->id == M88E1512_E_PHY_ID)
+		ret_val = igb_initialize_M88E1512_phy(hw);
+	if (phy->id == M88E1543_E_PHY_ID)
+		ret_val = igb_initialize_M88E1543_phy(hw);
 out:
 	return ret_val;
 }
@@ -1127,7 +1147,7 @@ static s32 igb_acquire_swfw_sync_82575(struct e1000_hw *hw, u16 mask)
 	u32 swmask = mask;
 	u32 fwmask = mask << 16;
 	s32 ret_val = 0;
-	s32 i = 0, timeout = 200; /* FIXME: find real value to use here */
+	s32 i = 0, timeout = 200;
 
 	while (i < timeout) {
 		if (igb_get_hw_semaphore(hw)) {
@@ -1481,6 +1501,13 @@ static s32 igb_init_hw_82575(struct e1000_hw *hw)
 	s32 ret_val;
 	u16 i, rar_count = mac->rar_entry_count;
 
+	if ((hw->mac.type >= e1000_i210) &&
+	    !(igb_get_flash_presence_i210(hw))) {
+		ret_val = igb_pll_workaround_i210(hw);
+		if (ret_val)
+			return ret_val;
+	}
+
 	/* Initialize identification LED */
 	ret_val = igb_id_led_init(hw);
 	if (ret_val) {
@@ -1574,6 +1601,7 @@ static s32 igb_setup_copper_link_82575(struct e1000_hw *hw)
 		case I347AT4_E_PHY_ID:
 		case M88E1112_E_PHY_ID:
 		case M88E1543_E_PHY_ID:
+		case M88E1512_E_PHY_ID:
 		case I210_I_PHY_ID:
 			ret_val = igb_copper_link_setup_m88_gen2(hw);
 			break;
@@ -1895,8 +1923,8 @@ static void igb_clear_hw_cntrs_82575(struct e1000_hw *hw)
  *  igb_rx_fifo_flush_82575 - Clean rx fifo after RX enable
  *  @hw: pointer to the HW structure
  *
- *  After rx enable if managability is enabled then there is likely some
- *  bad data at the start of the fifo and possibly in the DMA fifo.  This
+ *  After rx enable if manageability is enabled then there is likely some
+ *  bad data at the start of the fifo and possibly in the DMA fifo. This
  *  function clears the fifos and flushes any packets that came in as rx was
  *  being enabled.
  **/
@@ -1904,6 +1932,11 @@ void igb_rx_fifo_flush_82575(struct e1000_hw *hw)
 {
 	u32 rctl, rlpml, rxdctl[4], rfctl, temp_rctl, rx_enabled;
 	int i, ms_wait;
+
+	/* disable IPv6 options as per hardware errata */
+	rfctl = rd32(E1000_RFCTL);
+	rfctl |= E1000_RFCTL_IPV6_EX_DIS;
+	wr32(E1000_RFCTL, rfctl);
 
 	if (hw->mac.type != e1000_82575 ||
 	    !(rd32(E1000_MANC) & E1000_MANC_RCV_TCO_EN))
@@ -1932,7 +1965,6 @@ void igb_rx_fifo_flush_82575(struct e1000_hw *hw)
 	 * incoming packets are rejected.  Set enable and wait 2ms so that
 	 * any packet that was coming in as RCTL.EN was set is flushed
 	 */
-	rfctl = rd32(E1000_RFCTL);
 	wr32(E1000_RFCTL, rfctl & ~E1000_RFCTL_LEF);
 
 	rlpml = rd32(E1000_RLPML);
@@ -2116,7 +2148,7 @@ void igb_vmdq_set_replication_pf(struct e1000_hw *hw, bool enable)
  *  Reads the MDI control register in the PHY at offset and stores the
  *  information read to data.
  **/
-static s32 igb_read_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 *data)
+s32 igb_read_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 *data)
 {
 	s32 ret_val;
 
@@ -2140,7 +2172,7 @@ out:
  *
  *  Writes data to MDI control register in the PHY at offset.
  **/
-static s32 igb_write_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 data)
+s32 igb_write_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 data)
 {
 	s32 ret_val;
 
@@ -2543,11 +2575,13 @@ s32 igb_read_emi_reg(struct e1000_hw *hw, u16 addr, u16 *data)
 /**
  *  igb_set_eee_i350 - Enable/disable EEE support
  *  @hw: pointer to the HW structure
+ *  @adv1G: boolean flag enabling 1G EEE advertisement
+ *  @adv100m: boolean flag enabling 100M EEE advertisement
  *
  *  Enable/disable EEE based on setting in dev_spec structure.
  *
  **/
-s32 igb_set_eee_i350(struct e1000_hw *hw)
+s32 igb_set_eee_i350(struct e1000_hw *hw, bool adv1G, bool adv100M)
 {
 	u32 ipcnfg, eeer;
 
@@ -2561,7 +2595,16 @@ s32 igb_set_eee_i350(struct e1000_hw *hw)
 	if (!(hw->dev_spec._82575.eee_disable)) {
 		u32 eee_su = rd32(E1000_EEE_SU);
 
-		ipcnfg |= (E1000_IPCNFG_EEE_1G_AN | E1000_IPCNFG_EEE_100M_AN);
+		if (adv100M)
+			ipcnfg |= E1000_IPCNFG_EEE_100M_AN;
+		else
+			ipcnfg &= ~E1000_IPCNFG_EEE_100M_AN;
+
+		if (adv1G)
+			ipcnfg |= E1000_IPCNFG_EEE_1G_AN;
+		else
+			ipcnfg &= ~E1000_IPCNFG_EEE_1G_AN;
+
 		eeer |= (E1000_EEER_TX_LPI_EN | E1000_EEER_RX_LPI_EN |
 			E1000_EEER_LPI_FC);
 
@@ -2588,18 +2631,21 @@ out:
 /**
  *  igb_set_eee_i354 - Enable/disable EEE support
  *  @hw: pointer to the HW structure
+ *  @adv1G: boolean flag enabling 1G EEE advertisement
+ *  @adv100m: boolean flag enabling 100M EEE advertisement
  *
  *  Enable/disable EEE legacy mode based on setting in dev_spec structure.
  *
  **/
-s32 igb_set_eee_i354(struct e1000_hw *hw)
+s32 igb_set_eee_i354(struct e1000_hw *hw, bool adv1G, bool adv100M)
 {
 	struct e1000_phy_info *phy = &hw->phy;
 	s32 ret_val = 0;
 	u16 phy_data;
 
 	if ((hw->phy.media_type != e1000_media_type_copper) ||
-	    (phy->id != M88E1543_E_PHY_ID))
+	    ((phy->id != M88E1543_E_PHY_ID) &&
+	     (phy->id != M88E1512_E_PHY_ID)))
 		goto out;
 
 	if (!hw->dev_spec._82575.eee_disable) {
@@ -2631,8 +2677,16 @@ s32 igb_set_eee_i354(struct e1000_hw *hw)
 		if (ret_val)
 			goto out;
 
-		phy_data |= E1000_EEE_ADV_100_SUPPORTED |
-			    E1000_EEE_ADV_1000_SUPPORTED;
+		if (adv100M)
+			phy_data |= E1000_EEE_ADV_100_SUPPORTED;
+		else
+			phy_data &= ~E1000_EEE_ADV_100_SUPPORTED;
+
+		if (adv1G)
+			phy_data |= E1000_EEE_ADV_1000_SUPPORTED;
+		else
+			phy_data &= ~E1000_EEE_ADV_1000_SUPPORTED;
+
 		ret_val = igb_write_xmdio_reg(hw, E1000_EEE_ADV_ADDR_I354,
 						E1000_EEE_ADV_DEV_I354,
 						phy_data);
@@ -2671,7 +2725,8 @@ s32 igb_get_eee_status_i354(struct e1000_hw *hw, bool *status)
 
 	/* Check if EEE is supported on this device. */
 	if ((hw->phy.media_type != e1000_media_type_copper) ||
-	    (phy->id != M88E1543_E_PHY_ID))
+	    ((phy->id != M88E1543_E_PHY_ID) &&
+	     (phy->id != M88E1512_E_PHY_ID)))
 		goto out;
 
 	ret_val = igb_read_xmdio_reg(hw, E1000_PCS_STATUS_ADDR_I354,

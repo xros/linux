@@ -22,7 +22,8 @@
  */
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, Intel Corporation.
+ *
+ * Copyright (c) 2012, 2015 Intel Corporation.
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
@@ -102,13 +103,13 @@ struct cfs_cpt_table {
 static inline cpumask_t *
 cfs_cpt_cpumask(struct cfs_cpt_table *cptab, int cpt)
 {
-       return NULL;
+	return NULL;
 }
 
 static inline int
 cfs_cpt_table_print(struct cfs_cpt_table *cptab, char *buf, int len)
 {
-       return 0;
+	return 0;
 }
 #endif /* CONFIG_SMP */
 

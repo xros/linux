@@ -58,9 +58,6 @@ static int ir_sanyo_decode(struct rc_dev *dev, struct ir_raw_event ev)
 	u32 scancode;
 	u8 address, command, not_command;
 
-	if (!rc_protocols_enabled(dev, RC_BIT_SANYO))
-		return 0;
-
 	if (!is_timing_event(ev)) {
 		if (ev.reset) {
 			IR_dprintk(1, "SANYO event reset received. reset to state 0\n");
@@ -167,7 +164,7 @@ static int ir_sanyo_decode(struct rc_dev *dev, struct ir_raw_event ev)
 
 		scancode = address << 8 | command;
 		IR_dprintk(1, "SANYO scancode: 0x%06x\n", scancode);
-		rc_keydown(dev, scancode, 0);
+		rc_keydown(dev, RC_TYPE_SANYO, scancode, 0);
 		data->state = STATE_INACTIVE;
 		return 0;
 	}

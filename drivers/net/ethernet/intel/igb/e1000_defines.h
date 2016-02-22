@@ -46,14 +46,15 @@
 #define E1000_CTRL_EXT_SDP3_DIR  0x00000800 /* SDP3 Data direction */
 
 /* Physical Func Reset Done Indication */
-#define E1000_CTRL_EXT_PFRSTD    0x00004000
-#define E1000_CTRL_EXT_LINK_MODE_MASK 0x00C00000
-#define E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES  0x00C00000
-#define E1000_CTRL_EXT_LINK_MODE_1000BASE_KX  0x00400000
-#define E1000_CTRL_EXT_LINK_MODE_SGMII   0x00800000
-#define E1000_CTRL_EXT_LINK_MODE_GMII   0x00000000
-#define E1000_CTRL_EXT_EIAME          0x01000000
-#define E1000_CTRL_EXT_IRCA           0x00000001
+#define E1000_CTRL_EXT_PFRSTD	0x00004000
+#define E1000_CTRL_EXT_SDLPE	0X00040000  /* SerDes Low Power Enable */
+#define E1000_CTRL_EXT_LINK_MODE_MASK	0x00C00000
+#define E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES	0x00C00000
+#define E1000_CTRL_EXT_LINK_MODE_1000BASE_KX	0x00400000
+#define E1000_CTRL_EXT_LINK_MODE_SGMII	0x00800000
+#define E1000_CTRL_EXT_LINK_MODE_GMII	0x00000000
+#define E1000_CTRL_EXT_EIAME	0x01000000
+#define E1000_CTRL_EXT_IRCA		0x00000001
 /* Interrupt delay cancellation */
 /* Driver loaded bit for FW */
 #define E1000_CTRL_EXT_DRV_LOAD       0x10000000
@@ -62,6 +63,7 @@
 /* packet buffer parity error detection enabled */
 /* descriptor FIFO parity error detection enable */
 #define E1000_CTRL_EXT_PBA_CLR		0x80000000 /* PBA Clear */
+#define E1000_CTRL_EXT_PHYPDEN		0x00100000
 #define E1000_I2CCMD_REG_ADDR_SHIFT	16
 #define E1000_I2CCMD_PHY_ADDR_SHIFT	24
 #define E1000_I2CCMD_OPCODE_READ	0x08000000
@@ -342,7 +344,8 @@
 #define E1000_RXCSUM_PCSD      0x00002000   /* packet checksum disabled */
 
 /* Header split receive */
-#define E1000_RFCTL_LEF        0x00040000
+#define E1000_RFCTL_IPV6_EX_DIS         0x00010000
+#define E1000_RFCTL_LEF                 0x00040000
 
 /* Collision related configuration parameters */
 #define E1000_COLLISION_THRESHOLD       15
@@ -601,6 +604,10 @@
 #define E1000_M88E1112_MAC_CTRL_1_MODE_SHIFT	7
 #define E1000_M88E1112_PAGE_ADDR		0x16
 #define E1000_M88E1112_STATUS			0x01
+#define E1000_M88E1512_CFG_REG_1		0x0010
+#define E1000_M88E1512_CFG_REG_2		0x0011
+#define E1000_M88E1512_CFG_REG_3		0x0007
+#define E1000_M88E1512_MODE			0x0014
 
 /* PCI Express Control */
 #define E1000_GCR_CMPL_TMOUT_MASK       0x0000F000
@@ -858,6 +865,7 @@
 #define M88_VENDOR           0x0141
 #define I210_I_PHY_ID        0x01410C00
 #define M88E1543_E_PHY_ID    0x01410EA0
+#define M88E1512_E_PHY_ID    0x01410DD0
 
 /* M88E1000 Specific Registers */
 #define M88E1000_PHY_SPEC_CTRL     0x10  /* PHY Specific Control Register */
@@ -919,7 +927,10 @@
 
 /* Intel i347-AT4 Registers */
 
-#define I347AT4_PCDL                   0x10 /* PHY Cable Diagnostics Length */
+#define I347AT4_PCDL0                  0x10 /* Pair 0 PHY Cable Diagnostics Length */
+#define I347AT4_PCDL1                  0x11 /* Pair 1 PHY Cable Diagnostics Length */
+#define I347AT4_PCDL2                  0x12 /* Pair 2 PHY Cable Diagnostics Length */
+#define I347AT4_PCDL3                  0x13 /* Pair 3 PHY Cable Diagnostics Length */
 #define I347AT4_PCDC                   0x15 /* PHY Cable Diagnostics Control */
 #define I347AT4_PAGE_SELECT            0x16
 
@@ -982,6 +993,7 @@
 #define E1000_M88E1543_PAGE_ADDR	0x16       /* Page Offset Register */
 #define E1000_M88E1543_EEE_CTRL_1	0x0
 #define E1000_M88E1543_EEE_CTRL_1_MS	0x0001     /* EEE Master/Slave */
+#define E1000_M88E1543_FIBER_CTRL	0x0
 #define E1000_EEE_ADV_DEV_I354		7
 #define E1000_EEE_ADV_ADDR_I354		60
 #define E1000_EEE_ADV_100_SUPPORTED	(1 << 1)   /* 100BaseTx EEE Supported */

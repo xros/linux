@@ -618,12 +618,10 @@ static void release_buffer_page(struct buffer_head *bh)
 
 static void reiserfs_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 {
-	char b[BDEVNAME_SIZE];
-
 	if (buffer_journaled(bh)) {
 		reiserfs_warning(NULL, "clm-2084",
-				 "pinned buffer %lu:%s sent to disk",
-				 bh->b_blocknr, bdevname(bh->b_bdev, b));
+				 "pinned buffer %lu:%pg sent to disk",
+				 bh->b_blocknr, bh->b_bdev);
 	}
 	if (uptodate)
 		set_buffer_uptodate(bh);
@@ -699,11 +697,13 @@ static int add_to_chunk(struct buffer_chunk *chunk, struct buffer_head *bh,
 	chunk->bh[chunk->nr++] = bh;
 	if (chunk->nr >= CHUNK_SIZE) {
 		ret = 1;
-		if (lock)
+		if (lock) {
 			spin_unlock(lock);
-		fn(chunk);
-		if (lock)
+			fn(chunk);
 			spin_lock(lock);
+		} else {
+			fn(chunk);
+		}
 	}
 	return ret;
 }
@@ -1947,8 +1947,6 @@ static int do_journal_release(struct reiserfs_transaction_handle *th,
 		}
 	}
 
-	/* wait for all commits to finish */
-	cancel_delayed_work(&SB_JOURNAL(sb)->j_work);
 
 	/*
 	 * We must release the write lock here because
@@ -1956,8 +1954,14 @@ static int do_journal_release(struct reiserfs_transaction_handle *th,
 	 */
 	reiserfs_write_unlock(sb);
 
+	/*
+	 * Cancel flushing of old commits. Note that neither of these works
+	 * will be requeued because superblock is being shutdown and doesn't
+	 * have MS_ACTIVE set.
+	 */
 	cancel_delayed_work_sync(&REISERFS_SB(sb)->old_work);
-	flush_workqueue(REISERFS_SB(sb)->commit_wq);
+	/* wait for all commits to finish */
+	cancel_delayed_work_sync(&SB_JOURNAL(sb)->j_work);
 
 	free_journal_ram(sb);
 
@@ -2381,11 +2385,10 @@ static int journal_read(struct super_block *sb)
 	int replay_count = 0;
 	int continue_replay = 1;
 	int ret;
-	char b[BDEVNAME_SIZE];
 
 	cur_dblock = SB_ONDISK_JOURNAL_1st_BLOCK(sb);
-	reiserfs_info(sb, "checking transaction log (%s)\n",
-		      bdevname(journal->j_dev_bd, b));
+	reiserfs_info(sb, "checking transaction log (%pg)\n",
+		      journal->j_dev_bd);
 	start = get_seconds();
 
 	/*
@@ -2645,8 +2648,8 @@ static int journal_init_dev(struct super_block *super,
 
 	set_blocksize(journal->j_dev_bd, super->s_blocksize);
 	reiserfs_info(super,
-		      "journal_init_dev: journal device: %s\n",
-		      bdevname(journal->j_dev_bd, b));
+		      "journal_init_dev: journal device: %pg\n",
+		      journal->j_dev_bd);
 	return 0;
 }
 
@@ -2718,7 +2721,6 @@ int journal_init(struct super_block *sb, const char *j_dev_name,
 	struct reiserfs_journal_header *jh;
 	struct reiserfs_journal *journal;
 	struct reiserfs_journal_list *jl;
-	char b[BDEVNAME_SIZE];
 	int ret;
 
 	journal = SB_JOURNAL(sb) = vzalloc(sizeof(struct reiserfs_journal));
@@ -2766,7 +2768,7 @@ int journal_init(struct super_block *sb, const char *j_dev_name,
 
 	if (journal_init_dev(sb, journal, j_dev_name) != 0) {
 		reiserfs_warning(sb, "sh-462",
-				 "unable to initialize jornal device");
+				 "unable to initialize journal device");
 		goto free_and_return;
 	}
 
@@ -2788,10 +2790,10 @@ int journal_init(struct super_block *sb, const char *j_dev_name,
 	    && (le32_to_cpu(jh->jh_journal.jp_journal_magic) !=
 		sb_jp_journal_magic(rs))) {
 		reiserfs_warning(sb, "sh-460",
-				 "journal header magic %x (device %s) does "
+				 "journal header magic %x (device %pg) does "
 				 "not match to magic found in super block %x",
 				 jh->jh_journal.jp_journal_magic,
-				 bdevname(journal->j_dev_bd, b),
+				 journal->j_dev_bd,
 				 sb_jp_journal_magic(rs));
 		brelse(bhjh);
 		goto free_and_return;
@@ -2812,10 +2814,10 @@ int journal_init(struct super_block *sb, const char *j_dev_name,
 		journal->j_max_trans_age = commit_max_age;
 	}
 
-	reiserfs_info(sb, "journal params: device %s, size %u, "
+	reiserfs_info(sb, "journal params: device %pg, size %u, "
 		      "journal first block %u, max trans len %u, max batch %u, "
 		      "max commit age %u, max trans age %u\n",
-		      bdevname(journal->j_dev_bd, b),
+		      journal->j_dev_bd,
 		      SB_ONDISK_JOURNAL_SIZE(sb),
 		      SB_ONDISK_JOURNAL_1st_BLOCK(sb),
 		      journal->j_trans_max,
@@ -4292,9 +4294,15 @@ static int do_journal_end(struct reiserfs_transaction_handle *th, int flags)
 	if (flush) {
 		flush_commit_list(sb, jl, 1);
 		flush_journal_list(sb, jl, 1);
-	} else if (!(jl->j_state & LIST_COMMIT_PENDING))
-		queue_delayed_work(REISERFS_SB(sb)->commit_wq,
-				   &journal->j_work, HZ / 10);
+	} else if (!(jl->j_state & LIST_COMMIT_PENDING)) {
+		/*
+		 * Avoid queueing work when sb is being shut down. Transaction
+		 * will be flushed on journal shutdown.
+		 */
+		if (sb->s_flags & MS_ACTIVE)
+			queue_delayed_work(REISERFS_SB(sb)->commit_wq,
+					   &journal->j_work, HZ / 10);
+	}
 
 	/*
 	 * if the next transaction has any chance of wrapping, flush

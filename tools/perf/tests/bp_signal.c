@@ -25,6 +25,7 @@
 #include "tests.h"
 #include "debug.h"
 #include "perf.h"
+#include "cloexec.h"
 
 static int fd1;
 static int fd2;
@@ -78,7 +79,8 @@ static int bp_event(void *fn, int setup_signal)
 	pe.exclude_kernel = 1;
 	pe.exclude_hv = 1;
 
-	fd = sys_perf_event_open(&pe, 0, -1, -1, 0);
+	fd = sys_perf_event_open(&pe, 0, -1, -1,
+				 perf_event_open_cloexec_flag());
 	if (fd < 0) {
 		pr_debug("failed opening event %llx\n", pe.config);
 		return TEST_FAIL;
@@ -109,7 +111,7 @@ static long long bp_count(int fd)
 	return count;
 }
 
-int test__bp_signal(void)
+int test__bp_signal(int subtest __maybe_unused)
 {
 	struct sigaction sa;
 	long long count1, count2;

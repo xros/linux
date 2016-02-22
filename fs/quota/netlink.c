@@ -1,7 +1,5 @@
-
 #include <linux/cred.h>
 #include <linux/init.h>
-#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/quotaops.h>
 #include <linux/sched.h>
@@ -32,8 +30,7 @@ static struct genl_family quota_genl_family = {
 
 /**
  * quota_send_warning - Send warning to userspace about exceeded quota
- * @type: The quota type: USRQQUOTA, GRPQUOTA,...
- * @id: The user or group id of the quota that was exceeded
+ * @qid: The kernel internal quota identifier.
  * @dev: The device on which the fs is mounted (sb->s_dev)
  * @warntype: The type of the warning: QUOTA_NL_...
  *
@@ -106,5 +103,4 @@ static int __init quota_init(void)
 		       "VFS: Failed to create quota netlink interface.\n");
 	return 0;
 };
-
-module_init(quota_init);
+fs_initcall(quota_init);

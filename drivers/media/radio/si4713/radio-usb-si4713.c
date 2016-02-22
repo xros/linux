@@ -31,7 +31,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-event.h>
-#include <media/si4713.h>
+#include <linux/platform_data/media/si4713.h>
 
 #include "si4713.h"
 
@@ -492,7 +492,6 @@ static int usb_si4713_probe(struct usb_interface *intf,
 	radio->vdev.vfl_dir = VFL_DIR_TX;
 
 	video_set_drvdata(&radio->vdev, radio);
-	set_bit(V4L2_FL_USE_FH_PRIO, &radio->vdev.flags);
 
 	retval = video_register_device(&radio->vdev, VFL_TYPE_RADIO, -1);
 	if (retval < 0) {

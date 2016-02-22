@@ -12,10 +12,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  *
  * File: baseband.h
  *
@@ -33,7 +29,6 @@
 #ifndef __BASEBAND_H__
 #define __BASEBAND_H__
 
-#include "tether.h"
 #include "device.h"
 
 #define PREAMBLE_LONG   0
@@ -88,18 +83,18 @@ struct vnt_phy_field {
 	__le16 len;
 } __packed;
 
-unsigned int BBuGetFrameTime(u8 preamble_type, u8 pkt_type,
+unsigned int vnt_get_frame_time(u8 preamble_type, u8 pkt_type,
 	unsigned int frame_length, u16 tx_rate);
 
-void BBvCalculateParameter(struct vnt_private *, u32 frame_length,
+void vnt_get_phy_field(struct vnt_private *, u32 frame_length,
 	u16 tx_rate, u8 pkt_type, struct vnt_phy_field *);
 
-void BBvSetShortSlotTime(struct vnt_private *);
-void BBvSetVGAGainOffset(struct vnt_private *, u8 byData);
-void BBvSetAntennaMode(struct vnt_private *, u8 byAntennaMode);
-int BBbVT3184Init(struct vnt_private *);
-void BBvSetDeepSleep(struct vnt_private *);
-void BBvExitDeepSleep(struct vnt_private *);
-void BBvUpdatePreEDThreshold(struct vnt_private *, int scanning);
+void vnt_set_short_slot_time(struct vnt_private *);
+void vnt_set_vga_gain_offset(struct vnt_private *, u8);
+void vnt_set_antenna_mode(struct vnt_private *, u8);
+int vnt_vt3184_init(struct vnt_private *);
+void vnt_set_deep_sleep(struct vnt_private *);
+void vnt_exit_deep_sleep(struct vnt_private *);
+void vnt_update_pre_ed_threshold(struct vnt_private *, int scanning);
 
 #endif /* __BASEBAND_H__ */

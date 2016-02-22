@@ -15,32 +15,6 @@
 #include "lib.h"
 
 
-int pick_online_cpu(void)
-{
-	cpu_set_t mask;
-	int cpu;
-
-	CPU_ZERO(&mask);
-
-	if (sched_getaffinity(0, sizeof(mask), &mask)) {
-		perror("sched_getaffinity");
-		return -1;
-	}
-
-	/* We prefer a primary thread, but skip 0 */
-	for (cpu = 8; cpu < CPU_SETSIZE; cpu += 8)
-		if (CPU_ISSET(cpu, &mask))
-			return cpu;
-
-	/* Search for anything, but in reverse */
-	for (cpu = CPU_SETSIZE - 1; cpu >= 0; cpu--)
-		if (CPU_ISSET(cpu, &mask))
-			return cpu;
-
-	printf("No cpus in affinity mask?!\n");
-	return -1;
-}
-
 int bind_to_cpu(int cpu)
 {
 	cpu_set_t mask;
@@ -177,8 +151,8 @@ struct addr_range libc, vdso;
 
 int parse_proc_maps(void)
 {
+	unsigned long start, end;
 	char execute, name[128];
-	uint64_t start, end;
 	FILE *f;
 	int rc;
 
@@ -250,3 +224,4 @@ out_close:
 out:
 	return rc;
 }
+

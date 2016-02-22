@@ -152,7 +152,7 @@ static void lcdc_write(unsigned int val, unsigned int addr)
 
 struct da8xx_fb_par {
 	struct device		*dev;
-	resource_size_t p_palette_base;
+	dma_addr_t		p_palette_base;
 	unsigned char *v_palette_base;
 	dma_addr_t		vram_phys;
 	unsigned long		vram_size;
@@ -419,7 +419,7 @@ static void lcd_cfg_horizontal_sync(int back_porch, int pulse_width,
 {
 	u32 reg;
 
-	reg = lcdc_read(LCD_RASTER_TIMING_0_REG) & 0xf;
+	reg = lcdc_read(LCD_RASTER_TIMING_0_REG) & 0x3ff;
 	reg |= (((back_porch-1) & 0xff) << 24)
 	    | (((front_porch-1) & 0xff) << 16)
 	    | (((pulse_width-1) & 0x3f) << 10);
@@ -1428,7 +1428,7 @@ static int fb_probe(struct platform_device *device)
 
 	par->vram_virt = dma_alloc_coherent(NULL,
 					    par->vram_size,
-					    (resource_size_t *) &par->vram_phys,
+					    &par->vram_phys,
 					    GFP_KERNEL | GFP_DMA);
 	if (!par->vram_virt) {
 		dev_err(&device->dev,
@@ -1447,18 +1447,15 @@ static int fb_probe(struct platform_device *device)
 		da8xx_fb_fix.line_length - 1;
 
 	/* allocate palette buffer */
-	par->v_palette_base = dma_alloc_coherent(NULL,
-					       PALETTE_SIZE,
-					       (resource_size_t *)
-					       &par->p_palette_base,
-					       GFP_KERNEL | GFP_DMA);
+	par->v_palette_base = dma_zalloc_coherent(NULL, PALETTE_SIZE,
+						  &par->p_palette_base,
+						  GFP_KERNEL | GFP_DMA);
 	if (!par->v_palette_base) {
 		dev_err(&device->dev,
 			"GLCD: kmalloc for palette buffer failed\n");
 		ret = -EINVAL;
 		goto err_release_fb_mem;
 	}
-	memset(par->v_palette_base, 0, PALETTE_SIZE);
 
 	par->irq = platform_get_irq(device, 0);
 	if (par->irq < 0) {
@@ -1662,7 +1659,6 @@ static struct platform_driver da8xx_fb_driver = {
 	.remove = fb_remove,
 	.driver = {
 		   .name = DRIVER_NAME,
-		   .owner = THIS_MODULE,
 		   .pm	= &fb_pm_ops,
 		   },
 };

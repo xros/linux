@@ -12,15 +12,16 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
+#include <asm/memory.h>
 #include <asm/v7m.h>
 #include "proc-macros.S"
 
 ENTRY(cpu_v7m_proc_init)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_proc_init)
 
 ENTRY(cpu_v7m_proc_fin)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_proc_fin)
 
 /*
@@ -34,7 +35,7 @@ ENDPROC(cpu_v7m_proc_fin)
  */
 	.align	5
 ENTRY(cpu_v7m_reset)
-	mov	pc, r0
+	ret	r0
 ENDPROC(cpu_v7m_reset)
 
 /*
@@ -46,18 +47,18 @@ ENDPROC(cpu_v7m_reset)
  */
 ENTRY(cpu_v7m_do_idle)
 	wfi
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_do_idle)
 
 ENTRY(cpu_v7m_dcache_clean_area)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_dcache_clean_area)
 
 /*
  * There is no MMU, so here is nothing to do.
  */
 ENTRY(cpu_v7m_switch_mm)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_switch_mm)
 
 .globl	cpu_v7m_suspend_size
@@ -65,11 +66,11 @@ ENDPROC(cpu_v7m_switch_mm)
 
 #ifdef CONFIG_ARM_CPU_SUSPEND
 ENTRY(cpu_v7m_do_suspend)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_do_suspend)
 
 ENTRY(cpu_v7m_do_resume)
-	mov	pc, lr
+	ret	lr
 ENDPROC(cpu_v7m_do_resume)
 #endif
 
@@ -97,19 +98,19 @@ __v7m_setup:
 	mov	r5, #0x00800000
 	str	r5, [r0, V7M_SCB_SHPR3]	@ set PendSV priority
 
-	@ SVC to run the kernel in this mode
-	adr	r1, BSYM(1f)
+	@ SVC to switch to handler mode. Notice that this requires sp to
+	@ point to writeable memory because the processor saves
+	@ some registers to the stack.
+	badr	r1, 1f
 	ldr	r5, [r12, #11 * 4]	@ read the SVC vector entry
 	str	r1, [r12, #11 * 4]	@ write the temporary SVC vector entry
 	mov	r6, lr			@ save LR
-	mov	r7, sp			@ save SP
-	ldr	sp, =__v7m_setup_stack_top
+	ldr	sp, =init_thread_union + THREAD_START_SP
 	cpsie	i
 	svc	#0
 1:	cpsid	i
 	str	r5, [r12, #11 * 4]	@ restore the original SVC vector entry
 	mov	lr, r6			@ restore LR
-	mov	sp, r7			@ restore SP
 
 	@ Special-purpose control register
 	mov	r1, #1
@@ -120,13 +121,8 @@ __v7m_setup:
 	ldr	r12, [r0, V7M_SCB_CCR]	@ system control register
 	orr	r12, #V7M_SCB_CCR_STKALIGN
 	str	r12, [r0, V7M_SCB_CCR]
-	mov	pc, lr
+	ret	lr
 ENDPROC(__v7m_setup)
-
-	.align 2
-__v7m_setup_stack:
-	.space	4 * 8				@ 8 registers
-__v7m_setup_stack_top:
 
 	define_processor_functions v7m, dabort=nommu_early_abort, pabort=legacy_pabort, nommu=1
 
@@ -135,7 +131,7 @@ __v7m_setup_stack_top:
 	string cpu_elf_name "v7m"
 	string cpu_v7m_name "ARMv7-M"
 
-	.section ".proc.info.init", #alloc, #execinstr
+	.section ".proc.info.init", #alloc
 
 	/*
 	 * Match any ARMv7-M processor core.
@@ -146,7 +142,7 @@ __v7m_proc_info:
 	.long	0x000f0000		@ Mask for ID
 	.long   0			@ proc_info_list.__cpu_mm_mmu_flags
 	.long   0			@ proc_info_list.__cpu_io_mmu_flags
-	b	__v7m_setup		@ proc_info_list.__cpu_flush
+	initfn	__v7m_setup, __v7m_proc_info	@ proc_info_list.__cpu_flush
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_HALF|HWCAP_THUMB|HWCAP_FAST_MULT

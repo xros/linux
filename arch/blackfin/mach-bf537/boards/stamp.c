@@ -404,7 +404,7 @@ static struct mtd_partition bfin_plat_nand_partitions[] = {
 #define BFIN_NAND_PLAT_ALE 1
 static void bfin_plat_nand_cmd_ctrl(struct mtd_info *mtd, int cmd, unsigned int ctrl)
 {
-	struct nand_chip *this = mtd->priv;
+	struct nand_chip *this = mtd_to_nand(mtd);
 
 	if (cmd == NAND_CMD_NONE)
 		return;
@@ -2462,7 +2462,6 @@ static struct platform_device bfin_sport0_device = {
 #define PATA_INT	IRQ_PF5
 static struct pata_platform_info bfin_pata_platform_data = {
 	.ioport_shift = 1,
-	.irq_flags = IRQF_TRIGGER_HIGH,
 };
 
 static struct resource bfin_pata_resources[] = {
@@ -2479,7 +2478,7 @@ static struct resource bfin_pata_resources[] = {
 	{
 		.start = PATA_INT,
 		.end = PATA_INT,
-		.flags = IORESOURCE_IRQ,
+		.flags = IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHLEVEL,
 	},
 };
 #elif defined(CF_IDE_NAND_CARD_USE_CF_IN_COMMON_MEMORY_MODE)

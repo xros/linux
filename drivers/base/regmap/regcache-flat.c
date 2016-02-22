@@ -10,9 +10,9 @@
  * published by the Free Software Foundation.
  */
 
-#include <linux/slab.h>
 #include <linux/device.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 
 #include "internal.h"
 
@@ -21,7 +21,7 @@ static int regcache_flat_init(struct regmap *map)
 	int i;
 	unsigned int *cache;
 
-	map->cache = kzalloc(sizeof(unsigned int) * (map->max_register + 1),
+	map->cache = kcalloc(map->max_register + 1, sizeof(unsigned int),
 			     GFP_KERNEL);
 	if (!map->cache)
 		return -ENOMEM;

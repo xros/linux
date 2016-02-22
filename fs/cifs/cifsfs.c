@@ -207,6 +207,18 @@ cifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return 0;
 }
 
+static long cifs_fallocate(struct file *file, int mode, loff_t off, loff_t len)
+{
+	struct cifs_sb_info *cifs_sb = CIFS_FILE_SB(file);
+	struct cifs_tcon *tcon = cifs_sb_master_tcon(cifs_sb);
+	struct TCP_Server_Info *server = tcon->ses->server;
+
+	if (server->ops->fallocate)
+		return server->ops->fallocate(file, tcon, mode, off, len);
+
+	return -EOPNOTSUPP;
+}
+
 static int cifs_permission(struct inode *inode, int mask)
 {
 	struct cifs_sb_info *cifs_sb;
@@ -313,8 +325,11 @@ cifs_show_address(struct seq_file *s, struct TCP_Server_Info *server)
 static void
 cifs_show_security(struct seq_file *s, struct cifs_ses *ses)
 {
-	if (ses->sectype == Unspecified)
+	if (ses->sectype == Unspecified) {
+		if (ses->user_name == NULL)
+			seq_puts(s, ",sec=none");
 		return;
+	}
 
 	seq_puts(s, ",sec=");
 
@@ -382,17 +397,17 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 	struct sockaddr *srcaddr;
 	srcaddr = (struct sockaddr *)&tcon->ses->server->srcaddr;
 
-	seq_printf(s, ",vers=%s", tcon->ses->server->vals->version_string);
+	seq_show_option(s, "vers", tcon->ses->server->vals->version_string);
 	cifs_show_security(s, tcon->ses);
 	cifs_show_cache_flavor(s, cifs_sb);
 
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MULTIUSER)
 		seq_puts(s, ",multiuser");
 	else if (tcon->ses->user_name)
-		seq_printf(s, ",username=%s", tcon->ses->user_name);
+		seq_show_option(s, "username", tcon->ses->user_name);
 
 	if (tcon->ses->domainName)
-		seq_printf(s, ",domain=%s", tcon->ses->domainName);
+		seq_show_option(s, "domain", tcon->ses->domainName);
 
 	if (srcaddr->sa_family != AF_UNSPEC) {
 		struct sockaddr_in *saddr4;
@@ -439,6 +454,10 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 		seq_puts(s, ",nocase");
 	if (tcon->retry)
 		seq_puts(s, ",hard");
+	if (tcon->use_persistent)
+		seq_puts(s, ",persistenthandles");
+	else if (tcon->use_resilient)
+		seq_puts(s, ",resilienthandles");
 	if (tcon->unix_ext)
 		seq_puts(s, ",unix");
 	else
@@ -457,6 +476,8 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 		seq_puts(s, ",nouser_xattr");
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR)
 		seq_puts(s, ",mapchars");
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SFM_CHR)
+		seq_puts(s, ",mapposix");
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL)
 		seq_puts(s, ",sfu");
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_BRL)
@@ -486,6 +507,8 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 
 	seq_printf(s, ",rsize=%u", cifs_sb->rsize);
 	seq_printf(s, ",wsize=%u", cifs_sb->wsize);
+	seq_printf(s, ",echo_interval=%lu",
+			tcon->ses->server->echo_interval / HZ);
 	/* convert actimeo and display it in seconds */
 	seq_printf(s, ",actimeo=%lu", cifs_sb->actimeo / HZ);
 
@@ -595,7 +618,7 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 	p = s = full_path;
 
 	do {
-		struct inode *dir = dentry->d_inode;
+		struct inode *dir = d_inode(dentry);
 		struct dentry *child;
 
 		if (!dir) {
@@ -619,9 +642,9 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 		while (*s && *s != sep)
 			s++;
 
-		mutex_lock(&dir->i_mutex);
+		inode_lock(dir);
 		child = lookup_one_len(p, dentry, s - p);
-		mutex_unlock(&dir->i_mutex);
+		inode_unlock(dir);
 		dput(dentry);
 		dentry = child;
 	} while (!IS_ERR(dentry));
@@ -731,6 +754,9 @@ cifs_loose_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t rc;
 	struct inode *inode = file_inode(iocb->ki_filp);
 
+	if (iocb->ki_filp->f_flags & O_DIRECT)
+		return cifs_user_readv(iocb, iter);
+
 	rc = cifs_revalidate_mapping(inode);
 	if (rc)
 		return rc;
@@ -744,6 +770,18 @@ static ssize_t cifs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	struct cifsInodeInfo *cinode = CIFS_I(inode);
 	ssize_t written;
 	int rc;
+
+	if (iocb->ki_filp->f_flags & O_DIRECT) {
+		written = cifs_user_writev(iocb, from);
+		if (written > 0 && CIFS_CACHE_READ(cinode)) {
+			cifs_zap_mapping(inode);
+			cifs_dbg(FYI,
+				 "Set no oplock for inode=%p after a write operation\n",
+				 inode);
+			cinode->oplock = 0;
+		}
+		return written;
+	}
 
 	written = cifs_get_writer(cinode);
 	if (written)
@@ -800,7 +838,8 @@ static loff_t cifs_llseek(struct file *file, loff_t offset, int whence)
 	return generic_file_llseek(file, offset, whence);
 }
 
-static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
+static int
+cifs_setlease(struct file *file, long arg, struct file_lock **lease, void **priv)
 {
 	/*
 	 * Note that this is called by vfs setlease with i_lock held to
@@ -812,10 +851,11 @@ static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 	if (!(S_ISREG(inode->i_mode)))
 		return -EINVAL;
 
-	/* check if file is oplocked */
-	if (((arg == F_RDLCK) && CIFS_CACHE_READ(CIFS_I(inode))) ||
+	/* Check if file is oplocked if this is request for new lease */
+	if (arg == F_UNLCK ||
+	    ((arg == F_RDLCK) && CIFS_CACHE_READ(CIFS_I(inode))) ||
 	    ((arg == F_WRLCK) && CIFS_CACHE_WRITE(CIFS_I(inode))))
-		return generic_setlease(file, arg, lease);
+		return generic_setlease(file, arg, lease, priv);
 	else if (tlink_tcon(cfile->tlink)->local_lease &&
 		 !CIFS_CACHE_READ(CIFS_I(inode)))
 		/*
@@ -826,7 +866,7 @@ static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 		 * knows that the file won't be changed on the server by anyone
 		 * else.
 		 */
-		return generic_setlease(file, arg, lease);
+		return generic_setlease(file, arg, lease, priv);
 	else
 		return -EAGAIN;
 }
@@ -848,7 +888,7 @@ const struct inode_operations cifs_dir_inode_ops = {
 	.link = cifs_hardlink,
 	.mkdir = cifs_mkdir,
 	.rmdir = cifs_rmdir,
-	.rename = cifs_rename,
+	.rename2 = cifs_rename2,
 	.permission = cifs_permission,
 /*	revalidate:cifs_revalidate,   */
 	.setattr = cifs_setattr,
@@ -877,8 +917,7 @@ const struct inode_operations cifs_file_inode_ops = {
 
 const struct inode_operations cifs_symlink_inode_ops = {
 	.readlink = generic_readlink,
-	.follow_link = cifs_follow_link,
-	.put_link = kfree_put_link,
+	.get_link = cifs_get_link,
 	.permission = cifs_permission,
 	/* BB add the following two eventually */
 	/* revalidate: cifs_revalidate,
@@ -891,9 +930,60 @@ const struct inode_operations cifs_symlink_inode_ops = {
 #endif
 };
 
+static int cifs_clone_file_range(struct file *src_file, loff_t off,
+		struct file *dst_file, loff_t destoff, u64 len)
+{
+	struct inode *src_inode = file_inode(src_file);
+	struct inode *target_inode = file_inode(dst_file);
+	struct cifsFileInfo *smb_file_src = src_file->private_data;
+	struct cifsFileInfo *smb_file_target = dst_file->private_data;
+	struct cifs_tcon *target_tcon = tlink_tcon(smb_file_target->tlink);
+	unsigned int xid;
+	int rc;
+
+	cifs_dbg(FYI, "clone range\n");
+
+	xid = get_xid();
+
+	if (!src_file->private_data || !dst_file->private_data) {
+		rc = -EBADF;
+		cifs_dbg(VFS, "missing cifsFileInfo on copy range src file\n");
+		goto out;
+	}
+
+	/*
+	 * Note: cifs case is easier than btrfs since server responsible for
+	 * checks for proper open modes and file type and if it wants
+	 * server could even support copy of range where source = target
+	 */
+	lock_two_nondirectories(target_inode, src_inode);
+
+	if (len == 0)
+		len = src_inode->i_size - off;
+
+	cifs_dbg(FYI, "about to flush pages\n");
+	/* should we flush first and last page first */
+	truncate_inode_pages_range(&target_inode->i_data, destoff,
+				   PAGE_CACHE_ALIGN(destoff + len)-1);
+
+	if (target_tcon->ses->server->ops->duplicate_extents)
+		rc = target_tcon->ses->server->ops->duplicate_extents(xid,
+			smb_file_src, smb_file_target, off, len, destoff);
+	else
+		rc = -EOPNOTSUPP;
+
+	/* force revalidate of size and timestamps of target file now
+	   that target is updated on the server */
+	CIFS_I(target_inode)->time = 0;
+	/* although unlocking in the reverse order from locking is not
+	   strictly necessary here it is a little cleaner to be consistent */
+	unlock_two_nondirectories(src_inode, target_inode);
+out:
+	free_xid(xid);
+	return rc;
+}
+
 const struct file_operations cifs_file_ops = {
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_loose_read_iter,
 	.write_iter = cifs_file_write_iter,
 	.open = cifs_open,
@@ -904,15 +994,13 @@ const struct file_operations cifs_file_ops = {
 	.mmap  = cifs_file_mmap,
 	.splice_read = generic_file_splice_read,
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_file_strict_ops = {
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_strict_readv,
 	.write_iter = cifs_strict_writev,
 	.open = cifs_open,
@@ -923,16 +1011,15 @@ const struct file_operations cifs_file_strict_ops = {
 	.mmap = cifs_file_strict_mmap,
 	.splice_read = generic_file_splice_read,
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
+	.clone_file_range = cifs_clone_file_range,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_file_direct_ops = {
 	/* BB reevaluate whether they can be done with directio, no cache */
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_user_readv,
 	.write_iter = cifs_user_writev,
 	.open = cifs_open,
@@ -942,16 +1029,14 @@ const struct file_operations cifs_file_direct_ops = {
 	.flush = cifs_flush,
 	.mmap = cifs_file_mmap,
 	.splice_read = generic_file_splice_read,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl  = cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
 	.llseek = cifs_llseek,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_file_nobrl_ops = {
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_loose_read_iter,
 	.write_iter = cifs_file_write_iter,
 	.open = cifs_open,
@@ -961,15 +1046,13 @@ const struct file_operations cifs_file_nobrl_ops = {
 	.mmap  = cifs_file_mmap,
 	.splice_read = generic_file_splice_read,
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_file_strict_nobrl_ops = {
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_strict_readv,
 	.write_iter = cifs_strict_writev,
 	.open = cifs_open,
@@ -979,16 +1062,14 @@ const struct file_operations cifs_file_strict_nobrl_ops = {
 	.mmap = cifs_file_strict_mmap,
 	.splice_read = generic_file_splice_read,
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_file_direct_nobrl_ops = {
 	/* BB reevaluate whether they can be done with directio, no cache */
-	.read = new_sync_read,
-	.write = new_sync_write,
 	.read_iter = cifs_user_readv,
 	.write_iter = cifs_user_writev,
 	.open = cifs_open,
@@ -997,11 +1078,11 @@ const struct file_operations cifs_file_direct_nobrl_ops = {
 	.flush = cifs_flush,
 	.mmap = cifs_file_mmap,
 	.splice_read = generic_file_splice_read,
-#ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl  = cifs_ioctl,
-#endif /* CONFIG_CIFS_POSIX */
+	.clone_file_range = cifs_clone_file_range,
 	.llseek = cifs_llseek,
 	.setlease = cifs_setlease,
+	.fallocate = cifs_fallocate,
 };
 
 const struct file_operations cifs_dir_ops = {
@@ -1009,6 +1090,7 @@ const struct file_operations cifs_dir_ops = {
 	.release = cifs_closedir,
 	.read    = generic_read_dir,
 	.unlocked_ioctl  = cifs_ioctl,
+	.clone_file_range = cifs_clone_file_range,
 	.llseek = generic_file_llseek,
 };
 
@@ -1027,7 +1109,7 @@ cifs_init_inodecache(void)
 	cifs_inode_cachep = kmem_cache_create("cifs_inode_cache",
 					      sizeof(struct cifsInodeInfo),
 					      0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD),
+						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
 					      cifs_init_once);
 	if (cifs_inode_cachep == NULL)
 		return -ENOMEM;

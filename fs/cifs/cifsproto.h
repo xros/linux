@@ -36,6 +36,7 @@ extern struct smb_hdr *cifs_buf_get(void);
 extern void cifs_buf_release(void *);
 extern struct smb_hdr *cifs_small_buf_get(void);
 extern void cifs_small_buf_release(void *);
+extern void free_rsp_buf(int, void *);
 extern void cifs_rqst_page_to_kvec(struct smb_rqst *rqst, unsigned int idx,
 					struct kvec *iov);
 extern int smb_send(struct TCP_Server_Info *, struct smb_hdr *,
@@ -89,6 +90,9 @@ extern struct mid_q_entry *cifs_setup_async_request(struct TCP_Server_Info *,
 						struct smb_rqst *);
 extern int cifs_check_receive(struct mid_q_entry *mid,
 			struct TCP_Server_Info *server, bool log_error);
+extern int cifs_wait_mtu_credits(struct TCP_Server_Info *server,
+				 unsigned int size, unsigned int *num,
+				 unsigned int *credits);
 extern int SendReceive2(const unsigned int /* xid */ , struct cifs_ses *,
 			struct kvec *, int /* nvec to send */,
 			int * /* type of buf returned */ , const int flags);
@@ -98,7 +102,7 @@ extern int SendReceiveBlockingLock(const unsigned int xid,
 			struct smb_hdr *out_buf,
 			int *bytes_returned);
 extern int cifs_reconnect(struct TCP_Server_Info *server);
-extern int checkSMB(char *buf, unsigned int length);
+extern int checkSMB(char *buf, unsigned int len, struct TCP_Server_Info *srvr);
 extern bool is_valid_oplock_break(char *, struct TCP_Server_Info *);
 extern bool backup_cred(struct cifs_sb_info *);
 extern bool is_size_safe_to_change(struct cifsInodeInfo *, __u64 eof);
@@ -357,11 +361,11 @@ extern int CIFSUnixCreateHardLink(const unsigned int xid,
 extern int CIFSUnixCreateSymLink(const unsigned int xid,
 			struct cifs_tcon *tcon,
 			const char *fromName, const char *toName,
-			const struct nls_table *nls_codepage);
+			const struct nls_table *nls_codepage, int remap);
 extern int CIFSSMBUnixQuerySymLink(const unsigned int xid,
 			struct cifs_tcon *tcon,
 			const unsigned char *searchName, char **syminfo,
-			const struct nls_table *nls_codepage);
+			const struct nls_table *nls_codepage, int remap);
 extern int CIFSSMBQuerySymLink(const unsigned int xid, struct cifs_tcon *tcon,
 			       __u16 fid, char **symlinkinfo,
 			       const struct nls_table *nls_codepage);
@@ -435,7 +439,8 @@ extern int setup_ntlm_response(struct cifs_ses *, const struct nls_table *);
 extern int setup_ntlmv2_rsp(struct cifs_ses *, const struct nls_table *);
 extern void cifs_crypto_shash_release(struct TCP_Server_Info *);
 extern int calc_seckey(struct cifs_ses *);
-extern int generate_smb3signingkey(struct cifs_ses *);
+extern int generate_smb30signingkey(struct cifs_ses *);
+extern int generate_smb311signingkey(struct cifs_ses *);
 
 #ifdef CONFIG_CIFS_WEAK_PW_HASH
 extern int calc_lanman_hash(const char *password, const char *cryptkey,

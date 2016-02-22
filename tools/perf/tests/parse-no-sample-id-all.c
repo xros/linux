@@ -7,6 +7,7 @@
 #include "evlist.h"
 #include "header.h"
 #include "util.h"
+#include "debug.h"
 
 static int process_event(struct perf_evlist **pevlist, union perf_event *event)
 {
@@ -66,7 +67,7 @@ struct test_attr_event {
  *
  * Return: %0 on success, %-1 if the test fails.
  */
-int test__parse_no_sample_id_all(void)
+int test__parse_no_sample_id_all(int subtest __maybe_unused)
 {
 	int err;
 

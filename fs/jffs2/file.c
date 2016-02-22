@@ -39,10 +39,10 @@ int jffs2_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 	if (ret)
 		return ret;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	/* Trigger GC to flush any pending writes for this inode */
 	jffs2_flush_wbuf_gc(c, inode->i_ino);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	return 0;
 }
@@ -51,9 +51,7 @@ const struct file_operations jffs2_file_operations =
 {
 	.llseek =	generic_file_llseek,
 	.open =		generic_file_open,
- 	.read =		new_sync_read,
  	.read_iter =	generic_file_read_iter,
- 	.write =	new_sync_write,
  	.write_iter =	generic_file_write_iter,
 	.unlocked_ioctl=jffs2_ioctl,
 	.mmap =		generic_file_readonly_mmap,

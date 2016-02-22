@@ -177,9 +177,6 @@ static void hfa384x_usbin_rx(wlandevice_t *wlandev, struct sk_buff *skb);
 
 static void hfa384x_usbin_info(wlandevice_t *wlandev, hfa384x_usbin_t *usbin);
 
-static void
-hfa384x_usbout_tx(wlandevice_t *wlandev, hfa384x_usbout_t *usbout);
-
 static void hfa384x_usbin_ctlx(hfa384x_t *hw, hfa384x_usbin_t *usbin,
 			       int urb_status);
 
@@ -382,7 +379,7 @@ done:
 *
 * Arguments:
 *	hw		device struct
-*	tx_urb		URB of data for tranmission
+*	tx_urb		URB of data for transmission
 *	memflags	memory allocation flags
 *
 * Returns:
@@ -557,17 +554,13 @@ void hfa384x_create(hfa384x_t *hw, struct usb_device *usb)
 	INIT_WORK(&hw->link_bh, prism2sta_processing_defer);
 	INIT_WORK(&hw->usb_work, hfa384x_usb_defer);
 
-	init_timer(&hw->throttle);
-	hw->throttle.function = hfa384x_usb_throttlefn;
-	hw->throttle.data = (unsigned long)hw;
+	setup_timer(&hw->throttle, hfa384x_usb_throttlefn, (unsigned long)hw);
 
-	init_timer(&hw->resptimer);
-	hw->resptimer.function = hfa384x_usbctlx_resptimerfn;
-	hw->resptimer.data = (unsigned long)hw;
+	setup_timer(&hw->resptimer, hfa384x_usbctlx_resptimerfn,
+		    (unsigned long)hw);
 
-	init_timer(&hw->reqtimer);
-	hw->reqtimer.function = hfa384x_usbctlx_reqtimerfn;
-	hw->reqtimer.data = (unsigned long)hw;
+	setup_timer(&hw->reqtimer, hfa384x_usbctlx_reqtimerfn,
+		    (unsigned long)hw);
 
 	usb_init_urb(&hw->rx_urb);
 	usb_init_urb(&hw->tx_urb);
@@ -577,9 +570,8 @@ void hfa384x_create(hfa384x_t *hw, struct usb_device *usb)
 	hw->state = HFA384x_STATE_INIT;
 
 	INIT_WORK(&hw->commsqual_bh, prism2sta_commsqual_defer);
-	init_timer(&hw->commsqual_timer);
-	hw->commsqual_timer.data = (unsigned long)hw;
-	hw->commsqual_timer.function = prism2sta_commsqual_timer;
+	setup_timer(&hw->commsqual_timer, prism2sta_commsqual_timer,
+		    (unsigned long)hw);
 }
 
 /*----------------------------------------------------------------
@@ -624,11 +616,10 @@ static hfa384x_usbctlx_t *usbctlx_alloc(void)
 {
 	hfa384x_usbctlx_t *ctlx;
 
-	ctlx = kmalloc(sizeof(*ctlx), in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
-	if (ctlx != NULL) {
-		memset(ctlx, 0, sizeof(*ctlx));
+	ctlx = kzalloc(sizeof(*ctlx),
+		       in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+	if (ctlx != NULL)
 		init_completion(&ctlx->done);
-	}
 
 	return ctlx;
 }
@@ -1200,7 +1191,7 @@ int hfa384x_cmd_download(hfa384x_t *hw, u16 mode, u16 lowaddr,
 ----------------------------------------------------------------*/
 int hfa384x_corereset(hfa384x_t *hw, int holdtime, int settletime, int genesis)
 {
-	int result = 0;
+	int result;
 
 	result = usb_reset_device(hw->usb);
 	if (result < 0) {
@@ -2391,7 +2382,7 @@ int hfa384x_drvr_ramdl_write(hfa384x_t *hw, u32 daddr, void *buf, u32 len)
 *	0		success
 *	>0		f/w reported error - f/w status code
 *	<0		driver reported error
-*	-ETIMEDOUT	timout waiting for the cmd regs to become
+*	-ETIMEDOUT	timeout waiting for the cmd regs to become
 *			available, or waiting for the control reg
 *			to indicate the Aux port is enabled.
 *	-ENODATA	the buffer does NOT contain a valid PDA.
@@ -3158,8 +3149,8 @@ static void hfa384x_usbin_callback(struct urb *urb)
 
 		/* Check for short packet */
 		if (urb->actual_length == 0) {
-			++(wlandev->linux_stats.rx_errors);
-			++(wlandev->linux_stats.rx_length_errors);
+			wlandev->netdev->stats.rx_errors++;
+			wlandev->netdev->stats.rx_length_errors++;
 			action = RESUBMIT;
 		}
 		break;
@@ -3169,7 +3160,7 @@ static void hfa384x_usbin_callback(struct urb *urb)
 			    wlandev->netdev->name);
 		if (!test_and_set_bit(WORK_RX_HALT, &hw->usb_flags))
 			schedule_work(&hw->usb_work);
-		++(wlandev->linux_stats.rx_errors);
+		wlandev->netdev->stats.rx_errors++;
 		action = ABORT;
 		break;
 
@@ -3180,12 +3171,12 @@ static void hfa384x_usbin_callback(struct urb *urb)
 		    !timer_pending(&hw->throttle)) {
 			mod_timer(&hw->throttle, jiffies + THROTTLE_JIFFIES);
 		}
-		++(wlandev->linux_stats.rx_errors);
+		wlandev->netdev->stats.rx_errors++;
 		action = ABORT;
 		break;
 
 	case -EOVERFLOW:
-		++(wlandev->linux_stats.rx_over_errors);
+		wlandev->netdev->stats.rx_over_errors++;
 		action = RESUBMIT;
 		break;
 
@@ -3204,7 +3195,7 @@ static void hfa384x_usbin_callback(struct urb *urb)
 	default:
 		pr_debug("urb status=%d, transfer flags=0x%x\n",
 			 urb->status, urb->transfer_flags);
-		++(wlandev->linux_stats.rx_errors);
+		wlandev->netdev->stats.rx_errors++;
 		action = RESUBMIT;
 		break;
 	}
@@ -3346,7 +3337,7 @@ retry:
 		if (unlocked_usbctlx_cancel_async(hw, ctlx) == 0)
 			run_queue = 1;
 	} else {
-		const u16 intype = (usbin->type & ~cpu_to_le16(0x8000));
+		const __le16 intype = (usbin->type & ~cpu_to_le16(0x8000));
 
 		/*
 		 * Check that our message is what we're expecting ...
@@ -3474,7 +3465,7 @@ static void hfa384x_usbin_rx(wlandevice_t *wlandev, struct sk_buff *skb)
 		/* If exclude and we receive an unencrypted, drop it */
 		if ((wlandev->hostwep & HOSTWEP_EXCLUDEUNENCRYPTED) &&
 		    !WLAN_GET_FC_ISWEP(fc)) {
-			goto done;
+			break;
 		}
 
 		data_len = le16_to_cpu(usbin->rxfrm.desc.data_len);
@@ -3510,7 +3501,7 @@ static void hfa384x_usbin_rx(wlandevice_t *wlandev, struct sk_buff *skb)
 		rxmeta->signal = usbin->rxfrm.desc.signal - hw->dbmadjust;
 		rxmeta->noise = usbin->rxfrm.desc.silence - hw->dbmadjust;
 
-		prism2sta_ev_rx(wlandev, skb);
+		p80211netdev_rx(wlandev, skb);
 
 		break;
 
@@ -3528,12 +3519,8 @@ static void hfa384x_usbin_rx(wlandevice_t *wlandev, struct sk_buff *skb)
 		netdev_warn(hw->wlandev->netdev, "Received frame on unsupported port=%d\n",
 			    HFA384x_RXSTATUS_MACPORT_GET(
 				    usbin->rxfrm.desc.status));
-		goto done;
 		break;
 	}
-
-done:
-	return;
 }
 
 /*----------------------------------------------------------------
@@ -3587,12 +3574,8 @@ static void hfa384x_int_rxmonitor(wlandevice_t *wlandev,
 	}
 
 	skb = dev_alloc_skb(skblen);
-	if (skb == NULL) {
-		netdev_err(hw->wlandev->netdev,
-			   "alloc_skb failed trying to allocate %d bytes\n",
-			   skblen);
+	if (skb == NULL)
 		return;
-	}
 
 	/* only prepend the prism header if in the right mode */
 	if ((wlandev->netdev->type == ARPHRD_IEEE80211_PRISM) &&
@@ -3642,9 +3625,7 @@ static void hfa384x_int_rxmonitor(wlandevice_t *wlandev,
 	}
 
 	/* pass it back up */
-	prism2sta_ev_rx(wlandev, skb);
-
-	return;
+	p80211netdev_rx(wlandev, skb);
 }
 
 /*----------------------------------------------------------------
@@ -3690,7 +3671,6 @@ static void hfa384x_usbin_info(wlandevice_t *wlandev, hfa384x_usbin_t *usbin)
 static void hfa384x_usbout_callback(struct urb *urb)
 {
 	wlandevice_t *wlandev = urb->context;
-	hfa384x_usbout_t *usbout = urb->transfer_buffer;
 
 #ifdef DEBUG_USB
 	dbprint_urb(urb);
@@ -3699,19 +3679,20 @@ static void hfa384x_usbout_callback(struct urb *urb)
 	if (wlandev && wlandev->netdev) {
 		switch (urb->status) {
 		case 0:
-			hfa384x_usbout_tx(wlandev, usbout);
+			prism2sta_ev_alloc(wlandev);
 			break;
 
 		case -EPIPE:
 			{
 				hfa384x_t *hw = wlandev->priv;
+
 				netdev_warn(hw->wlandev->netdev,
 					    "%s tx pipe stalled: requesting reset\n",
 					    wlandev->netdev->name);
 				if (!test_and_set_bit
 				    (WORK_TX_HALT, &hw->usb_flags))
 					schedule_work(&hw->usb_work);
-				++(wlandev->linux_stats.tx_errors);
+				wlandev->netdev->stats.tx_errors++;
 				break;
 			}
 
@@ -3727,7 +3708,7 @@ static void hfa384x_usbout_callback(struct urb *urb)
 					mod_timer(&hw->throttle,
 						  jiffies + THROTTLE_JIFFIES);
 				}
-				++(wlandev->linux_stats.tx_errors);
+				wlandev->netdev->stats.tx_errors++;
 				netif_stop_queue(wlandev->netdev);
 				break;
 			}
@@ -3740,7 +3721,7 @@ static void hfa384x_usbout_callback(struct urb *urb)
 		default:
 			netdev_info(wlandev->netdev, "unknown urb->status=%d\n",
 				    urb->status);
-			++(wlandev->linux_stats.tx_errors);
+			wlandev->netdev->stats.tx_errors++;
 			break;
 		}		/* switch */
 	}
@@ -4053,30 +4034,6 @@ static int hfa384x_usbctlx_submit(hfa384x_t *hw, hfa384x_usbctlx_t *ctlx)
 }
 
 /*----------------------------------------------------------------
-* hfa384x_usbout_tx
-*
-* At this point we have finished a send of a frame.  Mark the URB
-* as available and call ev_alloc to notify higher layers we're
-* ready for more.
-*
-* Arguments:
-*	wlandev		wlan device
-*	usbout		ptr to the usb transfer buffer
-*
-* Returns:
-*	nothing
-*
-* Side effects:
-*
-* Call context:
-*	interrupt
-----------------------------------------------------------------*/
-static void hfa384x_usbout_tx(wlandevice_t *wlandev, hfa384x_usbout_t *usbout)
-{
-	prism2sta_ev_alloc(wlandev);
-}
-
-/*----------------------------------------------------------------
 * hfa384x_isgood_pdrcore
 *
 * Quick check of PDR codes.
@@ -4126,20 +4083,17 @@ static int hfa384x_isgood_pdrcode(u16 pdrcode)
 	case HFA384x_PDR_HFA3861_MANF_TESTI:
 		/* code is OK */
 		return 1;
-		break;
 	default:
 		if (pdrcode < 0x1000) {
 			/* code is OK, but we don't know exactly what it is */
 			pr_debug("Encountered unknown PDR#=0x%04x, assuming it's ok.\n",
 				 pdrcode);
 			return 1;
-		} else {
-			/* bad code */
-			pr_debug("Encountered unknown PDR#=0x%04x, (>=0x1000), assuming it's bad.\n",
-				 pdrcode);
-			return 0;
 		}
 		break;
 	}
-	return 0;		/* avoid compiler warnings */
+	/* bad code */
+	pr_debug("Encountered unknown PDR#=0x%04x, (>=0x1000), assuming it's bad.\n",
+		 pdrcode);
+	return 0;
 }

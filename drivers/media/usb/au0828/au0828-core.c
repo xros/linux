@@ -19,23 +19,28 @@
  *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include "au0828.h"
+
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-common.h>
 #include <linux/mutex.h>
 
-#include "au0828.h"
+/* Due to enum tuner_pad_index */
+#include <media/tuner.h>
 
 /*
  * 1 = General debug messages
  * 2 = USB handling
  * 4 = I2C related
  * 8 = Bridge related
+ * 16 = IR related
  */
 int au0828_debug;
 module_param_named(debug, au0828_debug, int, 0644);
-MODULE_PARM_DESC(debug, "enable debug messages");
+MODULE_PARM_DESC(debug,
+		 "set debug bitmask: 1=general, 2=USB, 4=I2C, 8=bridge, 16=IR");
 
 static unsigned int disable_usb_speed_check;
 module_param(disable_usb_speed_check, int, 0444);
@@ -88,7 +93,7 @@ static int send_control_msg(struct au0828_dev *dev, u16 request, u32 value,
 		status = min(status, 0);
 
 		if (status < 0) {
-			printk(KERN_ERR "%s() Failed sending control message, error %d.\n",
+			pr_err("%s() Failed sending control message, error %d.\n",
 				__func__, status);
 		}
 
@@ -113,7 +118,7 @@ static int recv_control_msg(struct au0828_dev *dev, u16 request, u32 value,
 		status = min(status, 0);
 
 		if (status < 0) {
-			printk(KERN_ERR "%s() Failed receiving control message, error %d.\n",
+			pr_err("%s() Failed receiving control message, error %d.\n",
 				__func__, status);
 		}
 
@@ -125,8 +130,23 @@ static int recv_control_msg(struct au0828_dev *dev, u16 request, u32 value,
 	return status;
 }
 
+static void au0828_unregister_media_device(struct au0828_dev *dev)
+{
+
+#ifdef CONFIG_MEDIA_CONTROLLER
+	if (dev->media_dev) {
+		media_device_unregister(dev->media_dev);
+		media_device_cleanup(dev->media_dev);
+		kfree(dev->media_dev);
+		dev->media_dev = NULL;
+	}
+#endif
+}
+
 static void au0828_usb_release(struct au0828_dev *dev)
 {
+	au0828_unregister_media_device(dev);
+
 	/* I2C */
 	au0828_i2c_unregister(dev);
 
@@ -134,6 +154,20 @@ static void au0828_usb_release(struct au0828_dev *dev)
 }
 
 #ifdef CONFIG_VIDEO_AU0828_V4L2
+
+static void au0828_usb_v4l2_media_release(struct au0828_dev *dev)
+{
+#ifdef CONFIG_MEDIA_CONTROLLER
+	int i;
+
+	for (i = 0; i < AU0828_MAX_INPUT; i++) {
+		if (AUVI_INPUT(i).type == AU0828_VMUX_UNDEFINED)
+			return;
+		media_device_unregister_entity(&dev->input_ent[i]);
+	}
+#endif
+}
+
 static void au0828_usb_v4l2_release(struct v4l2_device *v4l2_dev)
 {
 	struct au0828_dev *dev =
@@ -141,6 +175,7 @@ static void au0828_usb_v4l2_release(struct v4l2_device *v4l2_dev)
 
 	v4l2_ctrl_handler_free(&dev->v4l2_ctrl_hdl);
 	v4l2_device_unregister(&dev->v4l2_dev);
+	au0828_usb_v4l2_media_release(dev);
 	au0828_usb_release(dev);
 }
 #endif
@@ -151,6 +186,15 @@ static void au0828_usb_disconnect(struct usb_interface *interface)
 
 	dprintk(1, "%s()\n", __func__);
 
+	/* there is a small window after disconnect, before
+	   dev->usbdev is NULL, for poll (e.g: IR) try to access
+	   the device and fill the dmesg with error messages.
+	   Set the status so poll routines can check and avoid
+	   access after disconnect.
+	*/
+	dev->dev_state = DEV_DISCONNECTED;
+
+	au0828_rc_unregister(dev);
 	/* Digital TV */
 	au0828_dvb_unregister(dev);
 
@@ -163,10 +207,121 @@ static void au0828_usb_disconnect(struct usb_interface *interface)
 		au0828_analog_unregister(dev);
 		v4l2_device_disconnect(&dev->v4l2_dev);
 		v4l2_device_put(&dev->v4l2_dev);
+		/*
+		 * No need to call au0828_usb_release() if V4L2 is enabled,
+		 * as this is already called via au0828_usb_v4l2_release()
+		 */
 		return;
 	}
 #endif
 	au0828_usb_release(dev);
+}
+
+static int au0828_media_device_init(struct au0828_dev *dev,
+				    struct usb_device *udev)
+{
+#ifdef CONFIG_MEDIA_CONTROLLER
+	struct media_device *mdev;
+
+	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	if (!mdev)
+		return -ENOMEM;
+
+	mdev->dev = &udev->dev;
+
+	if (!dev->board.name)
+		strlcpy(mdev->model, "unknown au0828", sizeof(mdev->model));
+	else
+		strlcpy(mdev->model, dev->board.name, sizeof(mdev->model));
+	if (udev->serial)
+		strlcpy(mdev->serial, udev->serial, sizeof(mdev->serial));
+	strcpy(mdev->bus_info, udev->devpath);
+	mdev->hw_revision = le16_to_cpu(udev->descriptor.bcdDevice);
+	mdev->driver_version = LINUX_VERSION_CODE;
+
+	media_device_init(mdev);
+
+	dev->media_dev = mdev;
+#endif
+	return 0;
+}
+
+
+static int au0828_create_media_graph(struct au0828_dev *dev)
+{
+#ifdef CONFIG_MEDIA_CONTROLLER
+	struct media_device *mdev = dev->media_dev;
+	struct media_entity *entity;
+	struct media_entity *tuner = NULL, *decoder = NULL;
+	int i, ret;
+
+	if (!mdev)
+		return 0;
+
+	media_device_for_each_entity(entity, mdev) {
+		switch (entity->function) {
+		case MEDIA_ENT_F_TUNER:
+			tuner = entity;
+			break;
+		case MEDIA_ENT_F_ATV_DECODER:
+			decoder = entity;
+			break;
+		}
+	}
+
+	/* Analog setup, using tuner as a link */
+
+	/* Something bad happened! */
+	if (!decoder)
+		return -EINVAL;
+
+	if (tuner) {
+		ret = media_create_pad_link(tuner, TUNER_PAD_IF_OUTPUT,
+					    decoder, 0,
+					    MEDIA_LNK_FL_ENABLED);
+		if (ret)
+			return ret;
+	}
+	ret = media_create_pad_link(decoder, 1, &dev->vdev.entity, 0,
+				    MEDIA_LNK_FL_ENABLED);
+	if (ret)
+		return ret;
+	ret = media_create_pad_link(decoder, 2, &dev->vbi_dev.entity, 0,
+				    MEDIA_LNK_FL_ENABLED);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < AU0828_MAX_INPUT; i++) {
+		struct media_entity *ent = &dev->input_ent[i];
+
+		if (AUVI_INPUT(i).type == AU0828_VMUX_UNDEFINED)
+			break;
+
+		switch (AUVI_INPUT(i).type) {
+		case AU0828_VMUX_CABLE:
+		case AU0828_VMUX_TELEVISION:
+		case AU0828_VMUX_DVB:
+			if (!tuner)
+				break;
+
+			ret = media_create_pad_link(ent, 0, tuner,
+						    TUNER_PAD_RF_INPUT,
+						    MEDIA_LNK_FL_ENABLED);
+			if (ret)
+				return ret;
+			break;
+		case AU0828_VMUX_COMPOSITE:
+		case AU0828_VMUX_SVIDEO:
+		default: /* AU0828_VMUX_DEBUG */
+			/* FIXME: fix the decoder PAD */
+			ret = media_create_pad_link(ent, 0, decoder, 0, 0);
+			if (ret)
+				return ret;
+			break;
+		}
+	}
+#endif
+	return 0;
 }
 
 static int au0828_usb_probe(struct usb_interface *interface,
@@ -194,15 +349,14 @@ static int au0828_usb_probe(struct usb_interface *interface,
 	 * not enough even for most Digital TV streams.
 	 */
 	if (usbdev->speed != USB_SPEED_HIGH && disable_usb_speed_check == 0) {
-		printk(KERN_ERR "au0828: Device initialization failed.\n");
-		printk(KERN_ERR "au0828: Device must be connected to a "
-		       "high-speed USB 2.0 port.\n");
+		pr_err("au0828: Device initialization failed.\n");
+		pr_err("au0828: Device must be connected to a high-speed USB 2.0 port.\n");
 		return -ENODEV;
 	}
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (dev == NULL) {
-		printk(KERN_ERR "%s() Unable to allocate memory\n", __func__);
+		pr_err("%s() Unable to allocate memory\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -212,11 +366,25 @@ static int au0828_usb_probe(struct usb_interface *interface,
 	mutex_init(&dev->dvb.lock);
 	dev->usbdev = usbdev;
 	dev->boardnr = id->driver_info;
+	dev->board = au0828_boards[dev->boardnr];
+
+	/* Initialize the media controller */
+	retval = au0828_media_device_init(dev, usbdev);
+	if (retval) {
+		pr_err("%s() au0828_media_device_init failed\n",
+		       __func__);
+		mutex_unlock(&dev->lock);
+		kfree(dev);
+		return retval;
+	}
 
 #ifdef CONFIG_VIDEO_AU0828_V4L2
 	dev->v4l2_dev.release = au0828_usb_v4l2_release;
 
 	/* Create the v4l2_device */
+#ifdef CONFIG_MEDIA_CONTROLLER
+	dev->v4l2_dev.mdev = dev->media_dev;
+#endif
 	retval = v4l2_device_register(&interface->dev, &dev->v4l2_dev);
 	if (retval) {
 		pr_err("%s() v4l2_device_register failed\n",
@@ -261,24 +429,88 @@ static int au0828_usb_probe(struct usb_interface *interface,
 		pr_err("%s() au0282_dev_register failed\n",
 		       __func__);
 
+	/* Remote controller */
+	au0828_rc_register(dev);
 
-	/* Store the pointer to the au0828_dev so it can be accessed in
-	   au0828_usb_disconnect */
+	/*
+	 * Store the pointer to the au0828_dev so it can be accessed in
+	 * au0828_usb_disconnect
+	 */
 	usb_set_intfdata(interface, dev);
 
-	printk(KERN_INFO "Registered device AU0828 [%s]\n",
+	pr_info("Registered device AU0828 [%s]\n",
 		dev->board.name == NULL ? "Unset" : dev->board.name);
 
 	mutex_unlock(&dev->lock);
 
+	retval = au0828_create_media_graph(dev);
+	if (retval) {
+		pr_err("%s() au0282_dev_register failed to create graph\n",
+		       __func__);
+		goto done;
+	}
+
+#ifdef CONFIG_MEDIA_CONTROLLER
+	retval = media_device_register(dev->media_dev);
+#endif
+
+done:
+	if (retval < 0)
+		au0828_usb_disconnect(interface);
+
 	return retval;
 }
 
+static int au0828_suspend(struct usb_interface *interface,
+				pm_message_t message)
+{
+	struct au0828_dev *dev = usb_get_intfdata(interface);
+
+	if (!dev)
+		return 0;
+
+	pr_info("Suspend\n");
+
+	au0828_rc_suspend(dev);
+	au0828_v4l2_suspend(dev);
+	au0828_dvb_suspend(dev);
+
+	/* FIXME: should suspend also ATV/DTV */
+
+	return 0;
+}
+
+static int au0828_resume(struct usb_interface *interface)
+{
+	struct au0828_dev *dev = usb_get_intfdata(interface);
+	if (!dev)
+		return 0;
+
+	pr_info("Resume\n");
+
+	/* Power Up the bridge */
+	au0828_write(dev, REG_600, 1 << 4);
+
+	/* Bring up the GPIO's and supporting devices */
+	au0828_gpio_setup(dev);
+
+	au0828_rc_resume(dev);
+	au0828_v4l2_resume(dev);
+	au0828_dvb_resume(dev);
+
+	/* FIXME: should resume also ATV/DTV */
+
+	return 0;
+}
+
 static struct usb_driver au0828_usb_driver = {
-	.name		= DRIVER_NAME,
+	.name		= KBUILD_MODNAME,
 	.probe		= au0828_usb_probe,
 	.disconnect	= au0828_usb_disconnect,
 	.id_table	= au0828_usb_id_table,
+	.suspend	= au0828_suspend,
+	.resume		= au0828_resume,
+	.reset_resume	= au0828_resume,
 };
 
 static int __init au0828_init(void)
@@ -286,23 +518,27 @@ static int __init au0828_init(void)
 	int ret;
 
 	if (au0828_debug & 1)
-		printk(KERN_INFO "%s() Debugging is enabled\n", __func__);
+		pr_info("%s() Debugging is enabled\n", __func__);
 
 	if (au0828_debug & 2)
-		printk(KERN_INFO "%s() USB Debugging is enabled\n", __func__);
+		pr_info("%s() USB Debugging is enabled\n", __func__);
 
 	if (au0828_debug & 4)
-		printk(KERN_INFO "%s() I2C Debugging is enabled\n", __func__);
+		pr_info("%s() I2C Debugging is enabled\n", __func__);
 
 	if (au0828_debug & 8)
-		printk(KERN_INFO "%s() Bridge Debugging is enabled\n",
+		pr_info("%s() Bridge Debugging is enabled\n",
 		       __func__);
 
-	printk(KERN_INFO "au0828 driver loaded\n");
+	if (au0828_debug & 16)
+		pr_info("%s() IR Debugging is enabled\n",
+		       __func__);
+
+	pr_info("au0828 driver loaded\n");
 
 	ret = usb_register(&au0828_usb_driver);
 	if (ret)
-		printk(KERN_ERR "usb_register failed, error = %d\n", ret);
+		pr_err("usb_register failed, error = %d\n", ret);
 
 	return ret;
 }
@@ -318,4 +554,4 @@ module_exit(au0828_exit);
 MODULE_DESCRIPTION("Driver for Auvitek AU0828 based products");
 MODULE_AUTHOR("Steven Toth <stoth@linuxtv.org>");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.0.2");
+MODULE_VERSION("0.0.3");

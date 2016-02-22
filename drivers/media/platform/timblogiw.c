@@ -31,7 +31,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-device.h>
 #include <media/videobuf-dma-contig.h>
-#include <media/timb_video.h>
+#include <linux/platform_data/media/timb_video.h>
 
 #define DRIVER_NAME			"timb-video"
 
@@ -857,7 +857,6 @@ static int timblogiw_remove(struct platform_device *pdev)
 static struct platform_driver timblogiw_platform_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= timblogiw_probe,
 	.remove		= timblogiw_remove,

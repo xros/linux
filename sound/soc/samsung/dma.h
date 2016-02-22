@@ -13,18 +13,12 @@
 #define _S3C_AUDIO_H
 
 #include <sound/dmaengine_pcm.h>
-
-struct s3c_dma_client {
-	char *name;
-};
+#include <linux/dmaengine.h>
 
 struct s3c_dma_params {
-	struct s3c_dma_client *client;	/* stream identifier */
-	int channel;				/* Channel ID */
+	void *slave;				/* Channel ID */
 	dma_addr_t dma_addr;
 	int dma_size;			/* Size of the DMA transfer */
-	unsigned ch;
-	struct samsung_dma_ops *ops;
 	char *ch_name;
 	struct snd_dmaengine_dai_dma_data dma_data;
 };
@@ -32,6 +26,7 @@ struct s3c_dma_params {
 void samsung_asoc_init_dma_data(struct snd_soc_dai *dai,
 				struct s3c_dma_params *playback,
 				struct s3c_dma_params *capture);
-int samsung_asoc_dma_platform_register(struct device *dev);
+int samsung_asoc_dma_platform_register(struct device *dev,
+				       dma_filter_fn fn);
 
 #endif

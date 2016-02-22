@@ -14,6 +14,7 @@
 #include <linux/spi/spi.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/gpio.h>
 #include <linux/delay.h>
 #include <asm/dma.h>
 #include <asm/bfin5xx_spi.h>
@@ -442,7 +443,7 @@ static const struct ppi_info ppi_info = {
 };
 
 #if IS_ENABLED(CONFIG_VIDEO_ADV7183)
-#include <media/adv7183.h>
+#include <media/i2c/adv7183.h>
 static struct v4l2_input adv7183_inputs[] = {
 	{
 		.index = 0,

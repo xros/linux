@@ -101,6 +101,7 @@ void __init arm_dt_init_cpu_maps(void)
 		if (of_property_read_u32(cpu, "reg", &hwid)) {
 			pr_debug(" * %s missing reg property\n",
 				     cpu->full_name);
+			of_node_put(cpu);
 			return;
 		}
 
@@ -108,8 +109,10 @@ void __init arm_dt_init_cpu_maps(void)
 		 * 8 MSBs must be set to 0 in the DT since the reg property
 		 * defines the MPIDR[23:0].
 		 */
-		if (hwid & ~MPIDR_HWID_BITMASK)
+		if (hwid & ~MPIDR_HWID_BITMASK) {
+			of_node_put(cpu);
 			return;
+		}
 
 		/*
 		 * Duplicate MPIDRs are a recipe for disaster.
@@ -119,9 +122,11 @@ void __init arm_dt_init_cpu_maps(void)
 		 * to avoid matching valid MPIDR[23:0] values.
 		 */
 		for (j = 0; j < cpuidx; j++)
-			if (WARN(tmp_map[j] == hwid, "Duplicate /cpu reg "
-						     "properties in the DT\n"))
+			if (WARN(tmp_map[j] == hwid,
+				 "Duplicate /cpu reg properties in the DT\n")) {
+				of_node_put(cpu);
 				return;
+			}
 
 		/*
 		 * Build a stashed array of MPIDR values. Numbering scheme
@@ -143,6 +148,7 @@ void __init arm_dt_init_cpu_maps(void)
 					       "max cores %u, capping them\n",
 					       cpuidx, nr_cpu_ids)) {
 			cpuidx = nr_cpu_ids;
+			of_node_put(cpu);
 			break;
 		}
 
@@ -205,14 +211,14 @@ const struct machine_desc * __init setup_machine_fdt(unsigned int dt_phys)
 {
 	const struct machine_desc *mdesc, *mdesc_best = NULL;
 
-#ifdef CONFIG_ARCH_MULTIPLATFORM
+#if defined(CONFIG_ARCH_MULTIPLATFORM) || defined(CONFIG_ARM_SINGLE_ARMV7M)
 	DT_MACHINE_START(GENERIC_DT, "Generic DT based system")
 	MACHINE_END
 
 	mdesc_best = &__mach_desc_GENERIC_DT;
 #endif
 
-	if (!dt_phys || !early_init_dt_scan(phys_to_virt(dt_phys)))
+	if (!dt_phys || !early_init_dt_verify(phys_to_virt(dt_phys)))
 		return NULL;
 
 	mdesc = of_flat_dt_match_machine(mdesc_best, arch_get_next_mach);
@@ -236,6 +242,12 @@ const struct machine_desc * __init setup_machine_fdt(unsigned int dt_phys)
 
 		dump_machine_table(); /* does not return */
 	}
+
+	/* We really don't want to do this, but sometimes firmware provides buggy data */
+	if (mdesc->dt_fixup)
+		mdesc->dt_fixup();
+
+	early_init_dt_scan_nodes();
 
 	/* Change machine number to match the mdesc we're using */
 	__machine_arch_type = mdesc->nr;

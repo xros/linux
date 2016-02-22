@@ -27,7 +27,7 @@
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
- * Copyright (c) 2011, 2012, Intel Corporation.
+ * Copyright (c) 2011, 2015, Intel Corporation.
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
@@ -41,15 +41,14 @@
 #include <asm/div64.h>
 #include <linux/seq_file.h>
 #include <linux/namei.h>
-#include <linux/lustre_intent.h>
-
-#include <obd_support.h>
-#include <lustre/lustre_idl.h>
-#include <lustre_lib.h>
-#include <lustre_net.h>
-#include <lustre_dlm.h>
-#include <obd_class.h>
-#include <lprocfs_status.h>
+#include "../include/lustre_intent.h"
+#include "../include/obd_support.h"
+#include "../include/lustre/lustre_idl.h"
+#include "../include/lustre_lib.h"
+#include "../include/lustre_net.h"
+#include "../include/lustre_dlm.h"
+#include "../include/obd_class.h"
+#include "../include/lprocfs_status.h"
 #include "lmv_internal.h"
 
 static int lmv_intent_remote(struct obd_export *exp, void *lmm,
@@ -95,12 +94,16 @@ static int lmv_intent_remote(struct obd_export *exp, void *lmm,
 	LASSERT(fid_is_sane(&body->fid1));
 
 	tgt = lmv_find_target(lmv, &body->fid1);
-	if (IS_ERR(tgt))
-		GOTO(out, rc = PTR_ERR(tgt));
+	if (IS_ERR(tgt)) {
+		rc = PTR_ERR(tgt);
+		goto out;
+	}
 
-	OBD_ALLOC_PTR(op_data);
-	if (op_data == NULL)
-		GOTO(out, rc = -ENOMEM);
+	op_data = kzalloc(sizeof(*op_data), GFP_NOFS);
+	if (!op_data) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
 	op_data->op_fid1 = body->fid1;
 	/* Sent the parent FID to the remote MDT */
@@ -122,7 +125,7 @@ static int lmv_intent_remote(struct obd_export *exp, void *lmm,
 	rc = md_intent_lock(tgt->ltd_exp, op_data, lmm, lmmsize, it,
 			    flags, &req, cb_blocking, extra_lock_flags);
 	if (rc)
-		GOTO(out_free_op_data, rc);
+		goto out_free_op_data;
 
 	/*
 	 * LLite needs LOOKUP lock to track dentry revocation in order to
@@ -139,7 +142,7 @@ static int lmv_intent_remote(struct obd_export *exp, void *lmm,
 	it->d.lustre.it_lock_mode = pmode;
 
 out_free_op_data:
-	OBD_FREE_PTR(op_data);
+	kfree(op_data);
 out:
 	if (rc && pmode)
 		ldlm_lock_decref(&plock, pmode);
@@ -153,11 +156,11 @@ out:
  * IT_OPEN is intended to open (and create, possible) an object. Parent (pid)
  * may be split dir.
  */
-int lmv_intent_open(struct obd_export *exp, struct md_op_data *op_data,
-		    void *lmm, int lmmsize, struct lookup_intent *it,
-		    int flags, struct ptlrpc_request **reqp,
-		    ldlm_blocking_callback cb_blocking,
-		    __u64 extra_lock_flags)
+static int lmv_intent_open(struct obd_export *exp, struct md_op_data *op_data,
+			   void *lmm, int lmmsize, struct lookup_intent *it,
+			   int flags, struct ptlrpc_request **reqp,
+			   ldlm_blocking_callback cb_blocking,
+			   __u64 extra_lock_flags)
 {
 	struct obd_device	*obd = exp->exp_obd;
 	struct lmv_obd		*lmv = &obd->u.lmv;
@@ -183,8 +186,8 @@ int lmv_intent_open(struct obd_export *exp, struct md_op_data *op_data,
 			return rc;
 	}
 
-	CDEBUG(D_INODE, "OPEN_INTENT with fid1="DFID", fid2="DFID","
-	       " name='%s' -> mds #%d\n", PFID(&op_data->op_fid1),
+	CDEBUG(D_INODE, "OPEN_INTENT with fid1=" DFID ", fid2=" DFID ", name='%s' -> mds #%d\n",
+	       PFID(&op_data->op_fid1),
 	       PFID(&op_data->op_fid2), op_data->op_name, tgt->ltd_idx);
 
 	rc = md_intent_lock(tgt->ltd_exp, op_data, lmm, lmmsize, it, flags,
@@ -223,8 +226,8 @@ int lmv_intent_open(struct obd_export *exp, struct md_op_data *op_data,
 		 * this is normal situation, we should not print error here,
 		 * only debug info.
 		 */
-		CDEBUG(D_INODE, "Can't handle remote %s: dir "DFID"("DFID"):"
-		       "%*s: %d\n", LL_IT2STR(it), PFID(&op_data->op_fid2),
+		CDEBUG(D_INODE, "Can't handle remote %s: dir " DFID "(" DFID "):%*s: %d\n",
+		       LL_IT2STR(it), PFID(&op_data->op_fid2),
 		       PFID(&op_data->op_fid1), op_data->op_namelen,
 		       op_data->op_name, rc);
 		return rc;
@@ -236,11 +239,12 @@ int lmv_intent_open(struct obd_export *exp, struct md_op_data *op_data,
 /*
  * Handler for: getattr, lookup and revalidate cases.
  */
-int lmv_intent_lookup(struct obd_export *exp, struct md_op_data *op_data,
-		      void *lmm, int lmmsize, struct lookup_intent *it,
-		      int flags, struct ptlrpc_request **reqp,
-		      ldlm_blocking_callback cb_blocking,
-		      __u64 extra_lock_flags)
+static int lmv_intent_lookup(struct obd_export *exp,
+			     struct md_op_data *op_data,
+			     void *lmm, int lmmsize, struct lookup_intent *it,
+			     int flags, struct ptlrpc_request **reqp,
+			     ldlm_blocking_callback cb_blocking,
+			     __u64 extra_lock_flags)
 {
 	struct obd_device      *obd = exp->exp_obd;
 	struct lmv_obd	 *lmv = &obd->u.lmv;

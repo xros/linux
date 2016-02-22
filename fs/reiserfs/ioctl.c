@@ -7,7 +7,7 @@
 #include <linux/mount.h>
 #include "reiserfs.h"
 #include <linux/time.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/pagemap.h>
 #include <linux/compat.h>
 
@@ -224,7 +224,7 @@ out_unlock:
 	page_cache_release(page);
 
 out:
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	reiserfs_write_unlock(inode->i_sb);
 	return retval;
 }
