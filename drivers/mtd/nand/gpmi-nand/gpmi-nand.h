@@ -17,7 +17,7 @@
 #ifndef __DRIVERS_MTD_NAND_GPMI_NAND_H
 #define __DRIVERS_MTD_NAND_GPMI_NAND_H
 
-#include <linux/mtd/nand.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
@@ -123,13 +123,16 @@ enum gpmi_type {
 	IS_MX23,
 	IS_MX28,
 	IS_MX6Q,
-	IS_MX6SX
+	IS_MX6SX,
+	IS_MX7D,
 };
 
 struct gpmi_devdata {
 	enum gpmi_type type;
 	int bch_max_ecc_strength;
 	int max_chain_delay; /* See the async EDO mode */
+	const char * const *clks;
+	const int clks_count;
 };
 
 struct gpmi_nand_data {
@@ -231,7 +234,7 @@ struct gpmi_nfc_hardware_timing {
 };
 
 /**
- * struct timing_threshod - Timing threshold
+ * struct timing_threshold - Timing threshold
  * @max_data_setup_cycles:       The maximum number of data setup cycles that
  *                               can be expressed in the hardware.
  * @internal_data_setup_in_ns:   The time, in ns, that the NFC hardware requires
@@ -253,7 +256,7 @@ struct gpmi_nfc_hardware_timing {
  *                               progress, this is the clock frequency during
  *                               the most recent I/O transaction.
  */
-struct timing_threshod {
+struct timing_threshold {
 	const unsigned int      max_chip_count;
 	const unsigned int      max_data_setup_cycles;
 	const unsigned int      internal_data_setup_in_ns;
@@ -265,31 +268,31 @@ struct timing_threshod {
 };
 
 /* Common Services */
-extern int common_nfc_set_geometry(struct gpmi_nand_data *);
-extern struct dma_chan *get_dma_chan(struct gpmi_nand_data *);
-extern void prepare_data_dma(struct gpmi_nand_data *,
-				enum dma_data_direction dr);
-extern int start_dma_without_bch_irq(struct gpmi_nand_data *,
-				struct dma_async_tx_descriptor *);
-extern int start_dma_with_bch_irq(struct gpmi_nand_data *,
-				struct dma_async_tx_descriptor *);
+int common_nfc_set_geometry(struct gpmi_nand_data *);
+struct dma_chan *get_dma_chan(struct gpmi_nand_data *);
+void prepare_data_dma(struct gpmi_nand_data *,
+		      enum dma_data_direction dr);
+int start_dma_without_bch_irq(struct gpmi_nand_data *,
+			      struct dma_async_tx_descriptor *);
+int start_dma_with_bch_irq(struct gpmi_nand_data *,
+			   struct dma_async_tx_descriptor *);
 
 /* GPMI-NAND helper function library */
-extern int gpmi_init(struct gpmi_nand_data *);
-extern int gpmi_extra_init(struct gpmi_nand_data *);
-extern void gpmi_clear_bch(struct gpmi_nand_data *);
-extern void gpmi_dump_info(struct gpmi_nand_data *);
-extern int bch_set_geometry(struct gpmi_nand_data *);
-extern int gpmi_is_ready(struct gpmi_nand_data *, unsigned chip);
-extern int gpmi_send_command(struct gpmi_nand_data *);
-extern void gpmi_begin(struct gpmi_nand_data *);
-extern void gpmi_end(struct gpmi_nand_data *);
-extern int gpmi_read_data(struct gpmi_nand_data *);
-extern int gpmi_send_data(struct gpmi_nand_data *);
-extern int gpmi_send_page(struct gpmi_nand_data *,
-			dma_addr_t payload, dma_addr_t auxiliary);
-extern int gpmi_read_page(struct gpmi_nand_data *,
-			dma_addr_t payload, dma_addr_t auxiliary);
+int gpmi_init(struct gpmi_nand_data *);
+int gpmi_extra_init(struct gpmi_nand_data *);
+void gpmi_clear_bch(struct gpmi_nand_data *);
+void gpmi_dump_info(struct gpmi_nand_data *);
+int bch_set_geometry(struct gpmi_nand_data *);
+int gpmi_is_ready(struct gpmi_nand_data *, unsigned chip);
+int gpmi_send_command(struct gpmi_nand_data *);
+void gpmi_begin(struct gpmi_nand_data *);
+void gpmi_end(struct gpmi_nand_data *);
+int gpmi_read_data(struct gpmi_nand_data *);
+int gpmi_send_data(struct gpmi_nand_data *);
+int gpmi_send_page(struct gpmi_nand_data *,
+		   dma_addr_t payload, dma_addr_t auxiliary);
+int gpmi_read_page(struct gpmi_nand_data *,
+		   dma_addr_t payload, dma_addr_t auxiliary);
 
 void gpmi_copy_bits(u8 *dst, size_t dst_bit_off,
 		    const u8 *src, size_t src_bit_off,
@@ -305,6 +308,8 @@ void gpmi_copy_bits(u8 *dst, size_t dst_bit_off,
 #define GPMI_IS_MX28(x)		((x)->devdata->type == IS_MX28)
 #define GPMI_IS_MX6Q(x)		((x)->devdata->type == IS_MX6Q)
 #define GPMI_IS_MX6SX(x)	((x)->devdata->type == IS_MX6SX)
+#define GPMI_IS_MX7D(x)		((x)->devdata->type == IS_MX7D)
 
-#define GPMI_IS_MX6(x)		(GPMI_IS_MX6Q(x) || GPMI_IS_MX6SX(x))
+#define GPMI_IS_MX6(x)		(GPMI_IS_MX6Q(x) || GPMI_IS_MX6SX(x) || \
+				 GPMI_IS_MX7D(x))
 #endif

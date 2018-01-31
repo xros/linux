@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * include/asm-cris/processor.h
  *
@@ -25,13 +26,6 @@ struct task_struct;
  */
 #define TASK_UNMAPPED_BASE      (PAGE_ALIGN(TASK_SIZE / 3))
 
-/* THREAD_SIZE is the size of the thread_info/kernel_stack combo.
- * normally, the stack is found by doing something like p + THREAD_SIZE
- * in CRIS, a page is 8192 bytes, which seems like a sane size
- */
-#define THREAD_SIZE       PAGE_SIZE
-#define THREAD_SIZE_ORDER (0)
-
 /*
  * At user->kernel entry, the pt_regs struct is stacked on the top of the kernel-stack.
  * This macro allows us to find those regs for a task.
@@ -52,18 +46,13 @@ unsigned long get_wchan(struct task_struct *p);
 
 #define KSTK_ESP(tsk)   ((tsk) == current ? rdusp() : (tsk)->thread.usp)
 
-extern unsigned long thread_saved_pc(struct task_struct *tsk);
-
 /* Free all resources held by a thread. */
 static inline void release_thread(struct task_struct *dead_task)
 {
         /* Nothing needs to be done.  */
 }
 
-#define init_stack      (init_thread_union.stack)
-
 #define cpu_relax()     barrier()
-#define cpu_relax_lowlatency() cpu_relax()
 
 void default_idle(void);
 

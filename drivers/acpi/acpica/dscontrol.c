@@ -6,7 +6,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -118,6 +118,8 @@ acpi_ds_exec_begin_control_op(struct acpi_walk_state *walk_state,
 		control_state->control.package_end =
 		    walk_state->parser_state.pkg_end;
 		control_state->control.opcode = op->common.aml_opcode;
+		control_state->control.loop_timeout = acpi_os_get_timer() +
+		    (u64)(acpi_gbl_max_loop_iterations * ACPI_100NSEC_PER_SEC);
 
 		/* Push the control state on this walk's control stack */
 
@@ -163,8 +165,8 @@ acpi_ds_exec_begin_control_op(struct acpi_walk_state *walk_state,
  ******************************************************************************/
 
 acpi_status
-acpi_ds_exec_end_control_op(struct acpi_walk_state * walk_state,
-			    union acpi_parse_object * op)
+acpi_ds_exec_end_control_op(struct acpi_walk_state *walk_state,
+			    union acpi_parse_object *op)
 {
 	acpi_status status = AE_OK;
 	union acpi_generic_state *control_state;
@@ -206,15 +208,15 @@ acpi_ds_exec_end_control_op(struct acpi_walk_state * walk_state,
 			/* Predicate was true, the body of the loop was just executed */
 
 			/*
-			 * This loop counter mechanism allows the interpreter to escape
-			 * possibly infinite loops. This can occur in poorly written AML
-			 * when the hardware does not respond within a while loop and the
-			 * loop does not implement a timeout.
+			 * This infinite loop detection mechanism allows the interpreter
+			 * to escape possibly infinite loops. This can occur in poorly
+			 * written AML when the hardware does not respond within a while
+			 * loop and the loop does not implement a timeout.
 			 */
-			control_state->control.loop_count++;
-			if (control_state->control.loop_count >
-			    acpi_gbl_max_loop_iterations) {
-				status = AE_AML_INFINITE_LOOP;
+			if (ACPI_TIME_AFTER(acpi_os_get_timer(),
+					    control_state->control.
+					    loop_timeout)) {
+				status = AE_AML_LOOP_TIMEOUT;
 				break;
 			}
 
@@ -347,7 +349,7 @@ acpi_ds_exec_end_control_op(struct acpi_walk_state * walk_state,
 
 		break;
 
-	case AML_BREAK_POINT_OP:
+	case AML_BREAKPOINT_OP:
 
 		acpi_db_signal_break_point(walk_state);
 

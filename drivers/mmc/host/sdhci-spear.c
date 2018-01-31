@@ -82,6 +82,10 @@ static int sdhci_probe(struct platform_device *pdev)
 	host->hw_name = "sdhci";
 	host->ops = &sdhci_pltfm_ops;
 	host->irq = platform_get_irq(pdev, 0);
+	if (host->irq <= 0) {
+		ret = -EINVAL;
+		goto err_host;
+	}
 	host->quirks = SDHCI_QUIRK_BROKEN_ADMA;
 
 	sdhci = sdhci_priv(host);
@@ -164,6 +168,9 @@ static int sdhci_suspend(struct device *dev)
 	struct sdhci_host *host = dev_get_drvdata(dev);
 	struct spear_sdhci *sdhci = sdhci_priv(host);
 	int ret;
+
+	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
+		mmc_retune_needed(host->mmc);
 
 	ret = sdhci_suspend_host(host);
 	if (!ret)

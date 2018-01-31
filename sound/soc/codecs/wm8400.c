@@ -1285,6 +1285,7 @@ static int wm8400_codec_probe(struct snd_soc_codec *codec)
 	if (priv == NULL)
 		return -ENOMEM;
 
+	snd_soc_codec_init_regmap(codec, wm8400->regmap);
 	snd_soc_codec_set_drvdata(codec, priv);
 	priv->wm8400 = wm8400;
 
@@ -1325,26 +1326,20 @@ static int  wm8400_codec_remove(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static struct regmap *wm8400_get_regmap(struct device *dev)
-{
-	struct wm8400 *wm8400 = dev_get_platdata(dev);
-
-	return wm8400->regmap;
-}
-
-static struct snd_soc_codec_driver soc_codec_dev_wm8400 = {
+static const struct snd_soc_codec_driver soc_codec_dev_wm8400 = {
 	.probe =	wm8400_codec_probe,
 	.remove =	wm8400_codec_remove,
-	.get_regmap =	wm8400_get_regmap,
 	.set_bias_level = wm8400_set_bias_level,
 	.suspend_bias_off = true,
 
-	.controls = wm8400_snd_controls,
-	.num_controls = ARRAY_SIZE(wm8400_snd_controls),
-	.dapm_widgets = wm8400_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(wm8400_dapm_widgets),
-	.dapm_routes = wm8400_dapm_routes,
-	.num_dapm_routes = ARRAY_SIZE(wm8400_dapm_routes),
+	.component_driver = {
+		.controls		= wm8400_snd_controls,
+		.num_controls		= ARRAY_SIZE(wm8400_snd_controls),
+		.dapm_widgets		= wm8400_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(wm8400_dapm_widgets),
+		.dapm_routes		= wm8400_dapm_routes,
+		.num_dapm_routes	= ARRAY_SIZE(wm8400_dapm_routes),
+	},
 };
 
 static int wm8400_probe(struct platform_device *pdev)

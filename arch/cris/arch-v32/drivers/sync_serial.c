@@ -11,7 +11,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/major.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/mutex.h>
 #include <linux/interrupt.h>
 #include <linux/poll.h>
@@ -178,7 +178,7 @@ static inline int sync_data_avail(struct sync_port *port);
 
 static int sync_serial_open(struct inode *, struct file *);
 static int sync_serial_release(struct inode *, struct file *);
-static unsigned int sync_serial_poll(struct file *filp, poll_table *wait);
+static __poll_t sync_serial_poll(struct file *filp, poll_table *wait);
 
 static long sync_serial_ioctl(struct file *file,
 			      unsigned int cmd, unsigned long arg);
@@ -555,13 +555,13 @@ static int sync_serial_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static unsigned int sync_serial_poll(struct file *file, poll_table *wait)
+static __poll_t sync_serial_poll(struct file *file, poll_table *wait)
 {
 	int dev = iminor(file_inode(file));
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 	struct sync_port *port;
 	DEBUGPOLL(
-	static unsigned int prev_mask;
+	static __poll_t prev_mask;
 	);
 
 	port = &ports[dev];
@@ -1627,6 +1627,12 @@ static int __init etrax_sync_serial_init(void)
 
 	/* Create a sysfs class for syncser */
 	syncser_class = class_create(THIS_MODULE, "syncser_class");
+	if (IS_ERR(syncser_class)) {
+		pr_err("Failed to create a sysfs class for syncser\n");
+		unregister_chrdev_region(syncser_first, minor_count);
+		cdev_del(syncser_cdev);
+		return -1;
+	}
 
 	/* Initialize Ports */
 #if defined(CONFIG_ETRAX_SYNCHRONOUS_SERIAL_PORT0)

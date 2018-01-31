@@ -1472,6 +1472,8 @@ static  int wm8350_codec_probe(struct snd_soc_codec *codec)
 			    GFP_KERNEL);
 	if (priv == NULL)
 		return -ENOMEM;
+
+	snd_soc_codec_init_regmap(codec, wm8350->regmap);
 	snd_soc_codec_set_drvdata(codec, priv);
 
 	priv->wm8350 = wm8350;
@@ -1580,26 +1582,20 @@ static int  wm8350_codec_remove(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static struct regmap *wm8350_get_regmap(struct device *dev)
-{
-	struct wm8350 *wm8350 = dev_get_platdata(dev);
-
-	return wm8350->regmap;
-}
-
-static struct snd_soc_codec_driver soc_codec_dev_wm8350 = {
+static const struct snd_soc_codec_driver soc_codec_dev_wm8350 = {
 	.probe =	wm8350_codec_probe,
 	.remove =	wm8350_codec_remove,
-	.get_regmap =	wm8350_get_regmap,
 	.set_bias_level = wm8350_set_bias_level,
 	.suspend_bias_off = true,
 
-	.controls = wm8350_snd_controls,
-	.num_controls = ARRAY_SIZE(wm8350_snd_controls),
-	.dapm_widgets = wm8350_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(wm8350_dapm_widgets),
-	.dapm_routes = wm8350_dapm_routes,
-	.num_dapm_routes = ARRAY_SIZE(wm8350_dapm_routes),
+	.component_driver = {
+		.controls		= wm8350_snd_controls,
+		.num_controls		= ARRAY_SIZE(wm8350_snd_controls),
+		.dapm_widgets		= wm8350_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(wm8350_dapm_widgets),
+		.dapm_routes		= wm8350_dapm_routes,
+		.num_dapm_routes	= ARRAY_SIZE(wm8350_dapm_routes),
+	},
 };
 
 static int wm8350_probe(struct platform_device *pdev)

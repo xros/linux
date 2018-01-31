@@ -106,10 +106,12 @@ static const struct snd_pcm_hw_constraint_list sysclk_constraints[] = {
 	{ .count = ARRAY_SIZE(hp_rates), .list = hp_rates, },
 };
 
+#define to_twl6040(codec)	dev_get_drvdata((codec)->dev->parent)
+
 static unsigned int twl6040_read(struct snd_soc_codec *codec, unsigned int reg)
 {
 	struct twl6040_data *priv = snd_soc_codec_get_drvdata(codec);
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 	u8 value;
 
 	if (reg >= TWL6040_CACHEREGNUM)
@@ -171,7 +173,7 @@ static inline void twl6040_update_dl12_cache(struct snd_soc_codec *codec,
 static int twl6040_write(struct snd_soc_codec *codec,
 			unsigned int reg, unsigned int value)
 {
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 
 	if (reg >= TWL6040_CACHEREGNUM)
 		return -EIO;
@@ -541,7 +543,7 @@ int twl6040_get_dl1_gain(struct snd_soc_codec *codec)
 	if (snd_soc_dapm_get_pin_status(dapm, "HSOR") ||
 		snd_soc_dapm_get_pin_status(dapm, "HSOL")) {
 
-		u8 val = snd_soc_read(codec, TWL6040_REG_HSLCTL);
+		u8 val = twl6040_read(codec, TWL6040_REG_HSLCTL);
 		if (val & TWL6040_HSDACMODE)
 			/* HSDACL in LP mode */
 			return -8; /* -8dB */
@@ -572,7 +574,7 @@ EXPORT_SYMBOL_GPL(twl6040_get_trim_value);
 
 int twl6040_get_hs_step_size(struct snd_soc_codec *codec)
 {
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 
 	if (twl6040_get_revid(twl6040) < TWL6040_REV_ES1_3)
 		/* For ES under ES_1.3 HS step is 2 mV */
@@ -605,6 +607,14 @@ static const struct snd_kcontrol_new twl6040_snd_controls[] = {
 	SOC_ENUM_EXT("Headset Power Mode", twl6040_power_mode_enum,
 		twl6040_headset_power_get_enum,
 		twl6040_headset_power_put_enum),
+
+	/* Left HS PDM data routed to Right HSDAC */
+	SOC_SINGLE("Headset Mono to Stereo Playback Switch",
+		TWL6040_REG_HSRCTL, 7, 1, 0),
+
+	/* Left HF PDM data routed to Right HFDAC */
+	SOC_SINGLE("Handsfree Mono to Stereo Playback Switch",
+		TWL6040_REG_HFRCTL, 5, 1, 0),
 
 	SOC_ENUM_EXT("PLL Selection", twl6040_power_mode_enum,
 		twl6040_pll_get_enum, twl6040_pll_put_enum),
@@ -822,9 +832,9 @@ static const struct snd_soc_dapm_route intercon[] = {
 static int twl6040_set_bias_level(struct snd_soc_codec *codec,
 				enum snd_soc_bias_level level)
 {
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 	struct twl6040_data *priv = snd_soc_codec_get_drvdata(codec);
-	int ret;
+	int ret = 0;
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -832,12 +842,16 @@ static int twl6040_set_bias_level(struct snd_soc_codec *codec,
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (priv->codec_powered)
+		if (priv->codec_powered) {
+			/* Select low power PLL in standby */
+			ret = twl6040_set_pll(twl6040, TWL6040_SYSCLK_SEL_LPPLL,
+					      32768, 19200000);
 			break;
+		}
 
 		ret = twl6040_power(twl6040, 1);
 		if (ret)
-			return ret;
+			break;
 
 		priv->codec_powered = 1;
 
@@ -853,7 +867,7 @@ static int twl6040_set_bias_level(struct snd_soc_codec *codec,
 		break;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int twl6040_startup(struct snd_pcm_substream *substream,
@@ -910,7 +924,7 @@ static int twl6040_prepare(struct snd_pcm_substream *substream,
 			struct snd_soc_dai *dai)
 {
 	struct snd_soc_codec *codec = dai->codec;
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 	struct twl6040_data *priv = snd_soc_codec_get_drvdata(codec);
 	int ret;
 
@@ -952,7 +966,7 @@ static int twl6040_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 static void twl6040_mute_path(struct snd_soc_codec *codec, enum twl6040_dai_id id,
 			     int mute)
 {
-	struct twl6040 *twl6040 = codec->control_data;
+	struct twl6040 *twl6040 = to_twl6040(codec);
 	struct twl6040_data *priv = snd_soc_codec_get_drvdata(codec);
 	int hslctl, hsrctl, earctl;
 	int hflctl, hfrctl;
@@ -983,9 +997,9 @@ static void twl6040_mute_path(struct snd_soc_codec *codec, enum twl6040_dai_id i
 		if (mute) {
 			/* Power down drivers and DACs */
 			hflctl &= ~(TWL6040_HFDACENA | TWL6040_HFPGAENA |
-				    TWL6040_HFDRVENA);
+				    TWL6040_HFDRVENA | TWL6040_HFSWENA);
 			hfrctl &= ~(TWL6040_HFDACENA | TWL6040_HFPGAENA |
-				    TWL6040_HFDRVENA);
+				    TWL6040_HFDRVENA | TWL6040_HFSWENA);
 		}
 
 		twl6040_reg_write(twl6040, TWL6040_REG_HFLCTL, hflctl);
@@ -1096,7 +1110,6 @@ static struct snd_soc_dai_driver twl6040_dai[] = {
 static int twl6040_probe(struct snd_soc_codec *codec)
 {
 	struct twl6040_data *priv;
-	struct twl6040 *twl6040 = dev_get_drvdata(codec->dev->parent);
 	struct platform_device *pdev = to_platform_device(codec->dev);
 	int ret = 0;
 
@@ -1107,12 +1120,11 @@ static int twl6040_probe(struct snd_soc_codec *codec)
 	snd_soc_codec_set_drvdata(codec, priv);
 
 	priv->codec = codec;
-	codec->control_data = twl6040;
 
 	priv->plug_irq = platform_get_irq(pdev, 0);
 	if (priv->plug_irq < 0) {
-		dev_err(codec->dev, "invalid irq\n");
-		return -EINVAL;
+		dev_err(codec->dev, "invalid irq: %d\n", priv->plug_irq);
+		return priv->plug_irq;
 	}
 
 	INIT_DELAYED_WORK(&priv->hs_jack.work, twl6040_accessory_work);
@@ -1143,21 +1155,21 @@ static int twl6040_remove(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static struct snd_soc_codec_driver soc_codec_dev_twl6040 = {
+static const struct snd_soc_codec_driver soc_codec_dev_twl6040 = {
 	.probe = twl6040_probe,
 	.remove = twl6040_remove,
-	.read = twl6040_read,
-	.write = twl6040_write,
 	.set_bias_level = twl6040_set_bias_level,
 	.suspend_bias_off = true,
 	.ignore_pmdown_time = true,
 
-	.controls = twl6040_snd_controls,
-	.num_controls = ARRAY_SIZE(twl6040_snd_controls),
-	.dapm_widgets = twl6040_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(twl6040_dapm_widgets),
-	.dapm_routes = intercon,
-	.num_dapm_routes = ARRAY_SIZE(intercon),
+	.component_driver = {
+		.controls		= twl6040_snd_controls,
+		.num_controls		= ARRAY_SIZE(twl6040_snd_controls),
+		.dapm_widgets		= twl6040_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(twl6040_dapm_widgets),
+		.dapm_routes		= intercon,
+		.num_dapm_routes	= ARRAY_SIZE(intercon),
+	},
 };
 
 static int twl6040_codec_probe(struct platform_device *pdev)

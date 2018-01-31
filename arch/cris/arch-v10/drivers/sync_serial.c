@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Simple synchronous serial port driver for ETRAX 100LX.
  *
@@ -16,7 +17,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/major.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/interrupt.h>
 #include <linux/poll.h>
 #include <linux/init.h>
@@ -27,7 +28,7 @@
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <arch/svinto.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/sync_serial.h>
 #include <arch/io_interface_mux.h>
 
@@ -156,7 +157,7 @@ static inline int sync_data_avail(struct sync_port *port);
 
 static int sync_serial_open(struct inode *inode, struct file *file);
 static int sync_serial_release(struct inode *inode, struct file *file);
-static unsigned int sync_serial_poll(struct file *filp, poll_table *wait);
+static __poll_t sync_serial_poll(struct file *filp, poll_table *wait);
 
 static long sync_serial_ioctl(struct file *file,
 	unsigned int cmd, unsigned long arg);
@@ -653,12 +654,12 @@ static int sync_serial_release(struct inode *inode, struct file *file)
 
 
 
-static unsigned int sync_serial_poll(struct file *file, poll_table *wait)
+static __poll_t sync_serial_poll(struct file *file, poll_table *wait)
 {
 	int dev = MINOR(file_inode(file)->i_rdev);
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 	struct sync_port *port;
-	DEBUGPOLL(static unsigned int prev_mask = 0);
+	DEBUGPOLL(static __poll_t prev_mask = 0);
 
 	port = &ports[dev];
 	poll_wait(file, &port->out_wait_q, wait);

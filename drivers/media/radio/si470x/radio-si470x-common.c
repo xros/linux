@@ -15,10 +15,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 
@@ -511,12 +507,12 @@ done:
 /*
  * si470x_fops_poll - poll RDS data
  */
-static unsigned int si470x_fops_poll(struct file *file,
+static __poll_t si470x_fops_poll(struct file *file,
 		struct poll_table_struct *pts)
 {
 	struct si470x_device *radio = video_drvdata(file);
-	unsigned long req_events = poll_requested_events(pts);
-	int retval = v4l2_ctrl_poll(file, pts);
+	__poll_t req_events = poll_requested_events(pts);
+	__poll_t retval = v4l2_ctrl_poll(file, pts);
 
 	if (req_events & (POLLIN | POLLRDNORM)) {
 		/* switch on rds reception */
@@ -753,7 +749,7 @@ static const struct v4l2_ioctl_ops si470x_ioctl_ops = {
 /*
  * si470x_viddev_template - video device interface
  */
-struct video_device si470x_viddev_template = {
+const struct video_device si470x_viddev_template = {
 	.fops			= &si470x_fops,
 	.name			= DRIVER_NAME,
 	.release		= video_device_release_empty,

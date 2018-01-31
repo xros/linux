@@ -56,7 +56,7 @@
   local_irq_{dis,en}able()
 */
 
-static char *version =
+static const char version[] =
 "cs89x0.c:v1.02 11/26/96 Russell Nelson <nelson@crynwr.com>\n";
 
 /* ======================= configure the driver here ======================= */
@@ -172,7 +172,6 @@ static const struct net_device_ops mac89x0_netdev_ops = {
 	.ndo_set_rx_mode	= set_multicast_list,
 	.ndo_set_mac_address	= set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_change_mtu		= eth_change_mtu,
 };
 
 /* Probe for the CS8900 card in slot E.  We won't bother looking
@@ -188,6 +187,7 @@ struct net_device * __init mac89x0_probe(int unit)
 	unsigned long ioaddr;
 	unsigned short sig;
 	int err = -ENODEV;
+	struct nubus_rsrc *fres;
 
 	if (!MACH_IS_MAC)
 		return ERR_PTR(-ENODEV);
@@ -208,8 +208,9 @@ struct net_device * __init mac89x0_probe(int unit)
 	/* We might have to parameterize this later */
 	slot = 0xE;
 	/* Get out now if there's a real NuBus card in slot E */
-	if (nubus_find_slot(slot, NULL) != NULL)
-		goto out;
+	for_each_func_rsrc(fres)
+		if (fres->board->slot == slot)
+			goto out;
 
 	/* The pseudo-ISA bits always live at offset 0x300 (gee,
            wonder why...) */

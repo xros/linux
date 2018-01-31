@@ -21,7 +21,6 @@
 #include <linux/firmware.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
-#include <linux/miscdevice.h>
 #include <linux/gpio.h>
 #include <linux/regulator/consumer.h>
 #include <linux/mutex.h>
@@ -656,11 +655,8 @@ static int wm0010_boot(struct snd_soc_codec *codec)
 		ret = -ENOMEM;
 		len = pll_rec.length + 8;
 		out = kzalloc(len, GFP_KERNEL | GFP_DMA);
-		if (!out) {
-			dev_err(codec->dev,
-				"Failed to allocate RX buffer\n");
+		if (!out)
 			goto abort;
-		}
 
 		img_swap = kzalloc(len, GFP_KERNEL | GFP_DMA);
 		if (!img_swap)
@@ -789,16 +785,18 @@ static int wm0010_set_sysclk(struct snd_soc_codec *codec, int source,
 
 static int wm0010_probe(struct snd_soc_codec *codec);
 
-static struct snd_soc_codec_driver soc_codec_dev_wm0010 = {
+static const struct snd_soc_codec_driver soc_codec_dev_wm0010 = {
 	.probe = wm0010_probe,
 	.set_bias_level = wm0010_set_bias_level,
 	.set_sysclk = wm0010_set_sysclk,
 	.idle_bias_off = true,
 
-	.dapm_widgets = wm0010_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(wm0010_dapm_widgets),
-	.dapm_routes = wm0010_dapm_routes,
-	.num_dapm_routes = ARRAY_SIZE(wm0010_dapm_routes),
+	.component_driver = {
+		.dapm_widgets		= wm0010_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(wm0010_dapm_widgets),
+		.dapm_routes		= wm0010_dapm_routes,
+		.num_dapm_routes	= ARRAY_SIZE(wm0010_dapm_routes),
+	},
 };
 
 #define WM0010_RATES (SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000)

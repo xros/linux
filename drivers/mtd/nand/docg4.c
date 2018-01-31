@@ -41,7 +41,7 @@
 #include <linux/bitops.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/nand.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/bch.h>
 #include <linux/bitrev.h>
 #include <linux/jiffies.h>
@@ -222,11 +222,33 @@ struct docg4_priv {
  * Bytes 8 - 14 are hw-generated ecc covering entire page + oob bytes 0 - 14.
  * Byte 15 (the last) is used by the driver as a "page written" flag.
  */
-static struct nand_ecclayout docg4_oobinfo = {
-	.eccbytes = 9,
-	.eccpos = {7, 8, 9, 10, 11, 12, 13, 14, 15},
-	.oobavail = 5,
-	.oobfree = { {.offset = 2, .length = 5} }
+static int docg4_ooblayout_ecc(struct mtd_info *mtd, int section,
+			       struct mtd_oob_region *oobregion)
+{
+	if (section)
+		return -ERANGE;
+
+	oobregion->offset = 7;
+	oobregion->length = 9;
+
+	return 0;
+}
+
+static int docg4_ooblayout_free(struct mtd_info *mtd, int section,
+				struct mtd_oob_region *oobregion)
+{
+	if (section)
+		return -ERANGE;
+
+	oobregion->offset = 2;
+	oobregion->length = 5;
+
+	return 0;
+}
+
+static const struct mtd_ooblayout_ops docg4_ooblayout_ops = {
+	.ecc = docg4_ooblayout_ecc,
+	.free = docg4_ooblayout_free,
 };
 
 /*
@@ -763,6 +785,8 @@ static int read_page(struct mtd_info *mtd, struct nand_chip *nand,
 
 	dev_dbg(doc->dev, "%s: page %08x\n", __func__, page);
 
+	nand_read_page_op(nand, page, 0, NULL, 0);
+
 	writew(DOC_ECCCONF0_READ_MODE |
 	       DOC_ECCCONF0_ECC_ENABLE |
 	       DOC_ECCCONF0_UNKNOWN |
@@ -842,7 +866,7 @@ static int docg4_read_oob(struct mtd_info *mtd, struct nand_chip *nand,
 
 	dev_dbg(doc->dev, "%s: page %x\n", __func__, page);
 
-	docg4_command(mtd, NAND_CMD_READ0, nand->ecc.size, page);
+	nand_read_page_op(nand, page, nand->ecc.size, NULL, 0);
 
 	writew(DOC_ECCCONF0_READ_MODE | DOCG4_OOB_SIZE, docptr + DOC_ECCCONF0);
 	write_nop(docptr);
@@ -878,6 +902,7 @@ static int docg4_erase_block(struct mtd_info *mtd, int page)
 	struct docg4_priv *doc = nand_get_controller_data(nand);
 	void __iomem *docptr = doc->virtadr;
 	uint16_t g4_page;
+	int status;
 
 	dev_dbg(doc->dev, "%s: page %04x\n", __func__, page);
 
@@ -917,17 +942,23 @@ static int docg4_erase_block(struct mtd_info *mtd, int page)
 	poll_status(doc);
 	write_nop(docptr);
 
-	return nand->waitfunc(mtd, nand);
+	status = nand->waitfunc(mtd, nand);
+	if (status < 0)
+		return status;
+
+	return status & NAND_STATUS_FAIL ? -EIO : 0;
 }
 
 static int write_page(struct mtd_info *mtd, struct nand_chip *nand,
-		       const uint8_t *buf, bool use_ecc)
+		      const uint8_t *buf, int page, bool use_ecc)
 {
 	struct docg4_priv *doc = nand_get_controller_data(nand);
 	void __iomem *docptr = doc->virtadr;
 	uint8_t ecc_buf[8];
 
 	dev_dbg(doc->dev, "%s...\n", __func__);
+
+	nand_prog_page_begin_op(nand, page, 0, NULL, 0);
 
 	writew(DOC_ECCCONF0_ECC_ENABLE |
 	       DOC_ECCCONF0_UNKNOWN |
@@ -973,19 +1004,19 @@ static int write_page(struct mtd_info *mtd, struct nand_chip *nand,
 	writew(0, docptr + DOC_DATAEND);
 	write_nop(docptr);
 
-	return 0;
+	return nand_prog_page_end_op(nand);
 }
 
 static int docg4_write_page_raw(struct mtd_info *mtd, struct nand_chip *nand,
 				const uint8_t *buf, int oob_required, int page)
 {
-	return write_page(mtd, nand, buf, false);
+	return write_page(mtd, nand, buf, page, false);
 }
 
 static int docg4_write_page(struct mtd_info *mtd, struct nand_chip *nand,
 			     const uint8_t *buf, int oob_required, int page)
 {
-	return write_page(mtd, nand, buf, true);
+	return write_page(mtd, nand, buf, page, true);
 }
 
 static int docg4_write_oob(struct mtd_info *mtd, struct nand_chip *nand,
@@ -1121,7 +1152,7 @@ static int docg4_block_markbad(struct mtd_info *mtd, loff_t ofs)
 	return ret;
 }
 
-static int docg4_block_neverbad(struct mtd_info *mtd, loff_t ofs, int getchip)
+static int docg4_block_neverbad(struct mtd_info *mtd, loff_t ofs)
 {
 	/* only called when module_param ignore_badblocks is set */
 	return 0;
@@ -1210,6 +1241,7 @@ static void __init init_mtd_structs(struct mtd_info *mtd)
 	mtd->writesize = DOCG4_PAGE_SIZE;
 	mtd->erasesize = DOCG4_BLOCK_SIZE;
 	mtd->oobsize = DOCG4_OOB_SIZE;
+	mtd_set_ooblayout(mtd, &docg4_ooblayout_ops);
 	nand->chipsize = DOCG4_CHIP_SIZE;
 	nand->chip_shift = DOCG4_CHIP_SHIFT;
 	nand->bbt_erase_shift = nand->phys_erase_shift = DOCG4_ERASE_SHIFT;
@@ -1218,7 +1250,6 @@ static void __init init_mtd_structs(struct mtd_info *mtd)
 	nand->pagemask = 0x3ffff;
 	nand->badblockpos = NAND_LARGE_BADBLOCK_POS;
 	nand->badblockbits = 8;
-	nand->ecc.layout = &docg4_oobinfo;
 	nand->ecc.mode = NAND_ECC_HW_SYNDROME;
 	nand->ecc.size = DOCG4_PAGE_SIZE;
 	nand->ecc.prepad = 8;
@@ -1227,8 +1258,7 @@ static void __init init_mtd_structs(struct mtd_info *mtd)
 	nand->options = NAND_BUSWIDTH_16 | NAND_NO_SUBPAGE_WRITE;
 	nand->IO_ADDR_R = nand->IO_ADDR_W = doc->virtadr + DOC_IOSPACE_DATA;
 	nand->controller = &nand->hwcontrol;
-	spin_lock_init(&nand->controller->lock);
-	init_waitqueue_head(&nand->controller->wq);
+	nand_hw_control_init(nand->controller);
 
 	/* methods */
 	nand->cmdfunc = docg4_command;
@@ -1239,6 +1269,8 @@ static void __init init_mtd_structs(struct mtd_info *mtd)
 	nand->read_buf = docg4_read_buf;
 	nand->write_buf = docg4_write_buf16;
 	nand->erase = docg4_erase_block;
+	nand->onfi_set_features = nand_onfi_get_set_features_notsupp;
+	nand->onfi_get_features = nand_onfi_get_set_features_notsupp;
 	nand->ecc.read_page = docg4_read_page;
 	nand->ecc.write_page = docg4_write_page;
 	nand->ecc.read_page_raw = docg4_read_page_raw;

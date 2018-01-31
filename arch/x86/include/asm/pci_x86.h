@@ -1,8 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	Low-Level PCI Access for i386 machines.
  *
  *	(c) 1999 Martin Mares <mj@ucw.cz>
  */
+
+#include <linux/ioport.h>
 
 #undef DEBUG
 
@@ -35,6 +38,7 @@ do {						\
 #define PCI_NOASSIGN_ROMS	0x80000
 #define PCI_ROOT_NO_CRS		0x100000
 #define PCI_NOASSIGN_BARS	0x200000
+#define PCI_BIG_ROOT_WINDOW	0x400000
 
 extern unsigned int pci_probe;
 extern unsigned long pirq_table_addr;

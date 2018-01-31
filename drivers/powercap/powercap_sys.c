@@ -538,6 +538,7 @@ struct powercap_zone *powercap_register_zone(
 
 	power_zone->id = result;
 	idr_init(&power_zone->idr);
+	result = -ENOMEM;
 	power_zone->name = kstrdup(name, GFP_KERNEL);
 	if (!power_zone->name)
 		goto err_name_alloc;
@@ -672,15 +673,13 @@ EXPORT_SYMBOL_GPL(powercap_unregister_control_type);
 
 static int __init powercap_init(void)
 {
-	int result = 0;
+	int result;
 
 	result = seed_constraint_attributes();
 	if (result)
 		return result;
 
-	result = class_register(&powercap_class);
-
-	return result;
+	return class_register(&powercap_class);
 }
 
 device_initcall(powercap_init);

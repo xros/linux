@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Etrax general port I/O device
  *
@@ -49,7 +50,7 @@ static ssize_t gpio_write(struct file *file, const char __user *buf,
 	size_t count, loff_t *off);
 static int gpio_open(struct inode *inode, struct file *filp);
 static int gpio_release(struct inode *inode, struct file *filp);
-static unsigned int gpio_poll(struct file *filp, struct poll_table_struct *wait);
+static __poll_t gpio_poll(struct file *filp, struct poll_table_struct *wait);
 
 /* private data per open() of this driver */
 
@@ -140,9 +141,9 @@ static unsigned long dir_g_shadow; /* 1=output */
 #define USE_PORTS(priv) ((priv)->minor <= GPIO_MINOR_B)
 
 
-static unsigned int gpio_poll(struct file *file, poll_table *wait)
+static __poll_t gpio_poll(struct file *file, poll_table *wait)
 {
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 	struct gpio_private *priv = file->private_data;
 	unsigned long data;
 	unsigned long flags;
@@ -399,7 +400,7 @@ out:
 /* Main device API. ioctl's to read/set/clear bits, as well as to
  * set alarms to wait for using a subsequent select().
  */
-unsigned long inline setget_input(struct gpio_private *priv, unsigned long arg)
+inline unsigned long setget_input(struct gpio_private *priv, unsigned long arg)
 {
 	/* Set direction 0=unchanged 1=input,
 	 * return mask with 1=input */
@@ -450,7 +451,7 @@ unsigned long inline setget_input(struct gpio_private *priv, unsigned long arg)
 	return dir_g_in_bits;
 } /* setget_input */
 
-unsigned long inline setget_output(struct gpio_private *priv, unsigned long arg)
+inline unsigned long setget_output(struct gpio_private *priv, unsigned long arg)
 {
 	if (USE_PORTS(priv)) {
 		*priv->dir = *priv->dir_shadow |=

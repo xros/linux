@@ -18,6 +18,9 @@
 #include <linux/kmsg_dump.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
+#include <linux/sched/loadavg.h>
+#include <linux/sched/stat.h>
+#include <linux/sched/debug.h>
 #include <linux/sysrq.h>
 #include <linux/smp.h>
 #include <linux/utsname.h>
@@ -60,7 +63,6 @@ int kdb_grep_trailing;
  * Kernel debugger state flags
  */
 int kdb_flags;
-atomic_t kdb_event;
 
 /*
  * kdb_lock protects updates to kdb_initial_cpu.  Used to
@@ -2439,7 +2441,6 @@ static int kdb_kill(int argc, const char **argv)
 	long sig, pid;
 	char *endp;
 	struct task_struct *p;
-	struct siginfo info;
 
 	if (argc != 2)
 		return KDB_ARGCOUNT;
@@ -2447,7 +2448,7 @@ static int kdb_kill(int argc, const char **argv)
 	sig = simple_strtol(argv[1], &endp, 0);
 	if (*endp)
 		return KDB_BADINT;
-	if (sig >= 0) {
+	if ((sig >= 0) || !valid_signal(-sig)) {
 		kdb_printf("Invalid signal parameter.<-signal>\n");
 		return 0;
 	}
@@ -2468,12 +2469,7 @@ static int kdb_kill(int argc, const char **argv)
 		return 0;
 	}
 	p = p->group_leader;
-	info.si_signo = sig;
-	info.si_errno = 0;
-	info.si_code = SI_USER;
-	info.si_pid = pid;  /* same capabilities as process being signalled */
-	info.si_uid = 0;    /* kdb has root authority */
-	kdb_send_sig_info(p, &info);
+	kdb_send_sig(p, sig);
 	return 0;
 }
 

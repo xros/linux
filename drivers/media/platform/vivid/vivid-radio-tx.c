@@ -19,6 +19,7 @@
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 #include <linux/delay.h>
 #include <linux/videodev2.h>
 #include <linux/v4l2-dv-timings.h>
@@ -104,7 +105,7 @@ retry:
 	return i;
 }
 
-unsigned int vivid_radio_tx_poll(struct file *file, struct poll_table_struct *wait)
+__poll_t vivid_radio_tx_poll(struct file *file, struct poll_table_struct *wait)
 {
 	return POLLOUT | POLLWRNORM | v4l2_ctrl_poll(file, wait);
 }

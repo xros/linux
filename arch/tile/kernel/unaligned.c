@@ -17,17 +17,19 @@
 #include <linux/smp.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
 #include <linux/thread_info.h>
 #include <linux/uaccess.h>
 #include <linux/mman.h>
 #include <linux/types.h>
 #include <linux/err.h>
-#include <linux/module.h>
+#include <linux/extable.h>
 #include <linux/compat.h>
 #include <linux/prctl.h>
 #include <asm/cacheflush.h>
 #include <asm/traps.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unaligned.h>
 #include <arch/abi.h>
 #include <arch/spr_def.h>
@@ -188,7 +190,7 @@ static void find_regs(tilegx_bundle_bits bundle, uint64_t *rd, uint64_t *ra,
 	 * Parse fault bundle, find potential used registers and mark
 	 * corresponding bits in reg_map and alias_map. These 2 bit maps
 	 * are used to find the scratch registers and determine if there
-	 * is register alais.
+	 * is register alias.
 	 */
 	if (bundle & TILEGX_BUNDLE_MODE_MASK) {  /* Y Mode Bundle. */
 
@@ -978,11 +980,13 @@ void jit_bundle_gen(struct pt_regs *regs, tilegx_bundle_bits bundle,
 	}
 
 	if ((align_ctl == 0) || unexpected) {
-		siginfo_t info = {
-			.si_signo = SIGBUS,
-			.si_code = BUS_ADRALN,
-			.si_addr = (unsigned char __user *)0
-		};
+		siginfo_t info;
+
+		clear_siginfo(&info);
+		info.si_signo = SIGBUS;
+		info.si_code = BUS_ADRALN;
+		info.si_addr = (unsigned char __user *)0;
+
 		if (unaligned_printk)
 			pr_info("Unalign bundle: unexp @%llx, %llx\n",
 				(unsigned long long)regs->pc,
@@ -1394,11 +1398,12 @@ void jit_bundle_gen(struct pt_regs *regs, tilegx_bundle_bits bundle,
 				      &frag, sizeof(frag));
 		if (status) {
 			/* Fail to copy JIT into user land. send SIGSEGV. */
-			siginfo_t info = {
-				.si_signo = SIGSEGV,
-				.si_code = SEGV_MAPERR,
-				.si_addr = (void __user *)&jit_code_area[idx]
-			};
+			siginfo_t info;
+
+			clear_siginfo(&info);
+			info.si_signo = SIGSEGV;
+			info.si_code = SEGV_MAPERR;
+			info.si_addr = (void __user *)&jit_code_area[idx];
 
 			pr_warn("Unalign fixup: pid=%d %s jit_code_area=%llx\n",
 				current->pid, current->comm,
@@ -1509,11 +1514,12 @@ void do_unaligned(struct pt_regs *regs, int vecnum)
 	 * If so, we will trigger SIGBUS.
 	 */
 	if ((regs->sp & 0x7) || (regs->ex1) || (align_ctl < 0)) {
-		siginfo_t info = {
-			.si_signo = SIGBUS,
-			.si_code = BUS_ADRALN,
-			.si_addr = (unsigned char __user *)0
-		};
+		siginfo_t info;
+
+		clear_siginfo(&info);
+		info.si_signo = SIGBUS;
+		info.si_code = BUS_ADRALN;
+		info.si_addr = (unsigned char __user *)0;
 
 		if (unaligned_printk)
 			pr_info("Unalign fixup: %d %llx @%llx\n",
@@ -1529,15 +1535,17 @@ void do_unaligned(struct pt_regs *regs, int vecnum)
 	}
 
 
-	/* Read the bundle casued the exception! */
+	/* Read the bundle caused the exception! */
 	pc = (tilegx_bundle_bits __user *)(regs->pc);
 	if (get_user(bundle, pc) != 0) {
 		/* Probably never be here since pc is valid user address.*/
-		siginfo_t info = {
-			.si_signo = SIGSEGV,
-			.si_code = SEGV_MAPERR,
-			.si_addr = (void __user *)pc
-		};
+		siginfo_t info;
+
+		clear_siginfo(&info);
+		info.si_signo = SIGSEGV;
+		info.si_code = SEGV_MAPERR;
+		info.si_addr = (void __user *)pc;
+
 		pr_err("Couldn't read instruction at %p trying to step\n", pc);
 		trace_unhandled_signal("segfault in unalign fixup", regs,
 				       (unsigned long)info.si_addr, SIGSEGV);

@@ -724,11 +724,11 @@ capi_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	return count;
 }
 
-static unsigned int
+static __poll_t
 capi_poll(struct file *file, poll_table *wait)
 {
 	struct capidev *cdev = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	if (!cdev->ap.applid)
 		return POLLERR;
@@ -1058,7 +1058,7 @@ static int capinc_tty_write(struct tty_struct *tty,
 	}
 
 	skb_reserve(skb, CAPI_DATA_B3_REQ_LEN);
-	memcpy(skb_put(skb, count), buf, count);
+	skb_put_data(skb, buf, count);
 
 	__skb_queue_tail(&mp->outqueue, skb);
 	mp->outbytes += skb->len;
@@ -1082,7 +1082,7 @@ static int capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 	skb = mp->outskb;
 	if (skb) {
 		if (skb_tailroom(skb) > 0) {
-			*(skb_put(skb, 1)) = ch;
+			skb_put_u8(skb, ch);
 			goto unlock_out;
 		}
 		mp->outskb = NULL;
@@ -1094,7 +1094,7 @@ static int capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 	skb = alloc_skb(CAPI_DATA_B3_REQ_LEN + CAPI_MAX_BLKSIZE, GFP_ATOMIC);
 	if (skb) {
 		skb_reserve(skb, CAPI_DATA_B3_REQ_LEN);
-		*(skb_put(skb, 1)) = ch;
+		skb_put_u8(skb, ch);
 		mp->outskb = skb;
 	} else {
 		printk(KERN_ERR "capinc_put_char: char %u lost\n", ch);

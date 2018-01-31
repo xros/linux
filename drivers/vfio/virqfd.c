@@ -43,10 +43,10 @@ static void virqfd_deactivate(struct virqfd *virqfd)
 	queue_work(vfio_irqfd_cleanup_wq, &virqfd->shutdown);
 }
 
-static int virqfd_wakeup(wait_queue_t *wait, unsigned mode, int sync, void *key)
+static int virqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
 {
 	struct virqfd *virqfd = container_of(wait, struct virqfd, wait);
-	unsigned long flags = (unsigned long)key;
+	__poll_t flags = key_to_poll(key);
 
 	if (flags & POLLIN) {
 		/* An event has been signaled, call function */
@@ -113,7 +113,7 @@ int vfio_virqfd_enable(void *opaque,
 	struct eventfd_ctx *ctx;
 	struct virqfd *virqfd;
 	int ret = 0;
-	unsigned int events;
+	__poll_t events;
 
 	virqfd = kzalloc(sizeof(*virqfd), GFP_KERNEL);
 	if (!virqfd)

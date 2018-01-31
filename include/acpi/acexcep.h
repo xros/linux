@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -91,7 +91,6 @@ struct acpi_exception_info {
 #define ACPI_SUCCESS(a)                 (!(a))
 #define ACPI_FAILURE(a)                 (a)
 
-#define ACPI_SKIP(a)                    (a == AE_CTRL_SKIP)
 #define AE_OK                           (acpi_status) 0x0000
 
 /*
@@ -127,8 +126,13 @@ struct acpi_exception_info {
 #define AE_NOT_CONFIGURED               EXCEP_ENV (0x001C)
 #define AE_ACCESS                       EXCEP_ENV (0x001D)
 #define AE_IO_ERROR                     EXCEP_ENV (0x001E)
+#define AE_NUMERIC_OVERFLOW             EXCEP_ENV (0x001F)
+#define AE_HEX_OVERFLOW                 EXCEP_ENV (0x0020)
+#define AE_DECIMAL_OVERFLOW             EXCEP_ENV (0x0021)
+#define AE_OCTAL_OVERFLOW               EXCEP_ENV (0x0022)
+#define AE_END_OF_TABLE                 EXCEP_ENV (0x0023)
 
-#define AE_CODE_ENV_MAX                 0x001E
+#define AE_CODE_ENV_MAX                 0x0023
 
 /*
  * Programmer exceptions
@@ -192,7 +196,7 @@ struct acpi_exception_info {
 #define AE_AML_CIRCULAR_REFERENCE       EXCEP_AML (0x001E)
 #define AE_AML_BAD_RESOURCE_LENGTH      EXCEP_AML (0x001F)
 #define AE_AML_ILLEGAL_ADDRESS          EXCEP_AML (0x0020)
-#define AE_AML_INFINITE_LOOP            EXCEP_AML (0x0021)
+#define AE_AML_LOOP_TIMEOUT             EXCEP_AML (0x0021)
 #define AE_AML_UNINITIALIZED_NODE       EXCEP_AML (0x0022)
 #define AE_AML_TARGET_TYPE              EXCEP_AML (0x0023)
 
@@ -211,11 +215,10 @@ struct acpi_exception_info {
 #define AE_CTRL_TRANSFER                EXCEP_CTL (0x0008)
 #define AE_CTRL_BREAK                   EXCEP_CTL (0x0009)
 #define AE_CTRL_CONTINUE                EXCEP_CTL (0x000A)
-#define AE_CTRL_SKIP                    EXCEP_CTL (0x000B)
-#define AE_CTRL_PARSE_CONTINUE          EXCEP_CTL (0x000C)
-#define AE_CTRL_PARSE_PENDING           EXCEP_CTL (0x000D)
+#define AE_CTRL_PARSE_CONTINUE          EXCEP_CTL (0x000B)
+#define AE_CTRL_PARSE_PENDING           EXCEP_CTL (0x000C)
 
-#define AE_CODE_CTRL_MAX                0x000D
+#define AE_CODE_CTRL_MAX                0x000C
 
 /* Exception strings for acpi_format_exception */
 
@@ -265,7 +268,16 @@ static const struct acpi_exception_info acpi_gbl_exception_names_env[] = {
 	EXCEP_TXT("AE_NOT_CONFIGURED",
 		  "The interface is not part of the current subsystem configuration"),
 	EXCEP_TXT("AE_ACCESS", "Permission denied for the requested operation"),
-	EXCEP_TXT("AE_IO_ERROR", "An I/O error occurred")
+	EXCEP_TXT("AE_IO_ERROR", "An I/O error occurred"),
+	EXCEP_TXT("AE_NUMERIC_OVERFLOW",
+		  "Overflow during string-to-integer conversion"),
+	EXCEP_TXT("AE_HEX_OVERFLOW",
+		  "Overflow during ASCII hex-to-binary conversion"),
+	EXCEP_TXT("AE_DECIMAL_OVERFLOW",
+		  "Overflow during ASCII decimal-to-binary conversion"),
+	EXCEP_TXT("AE_OCTAL_OVERFLOW",
+		  "Overflow during ASCII octal-to-binary conversion"),
+	EXCEP_TXT("AE_END_OF_TABLE", "Reached the end of table")
 };
 
 static const struct acpi_exception_info acpi_gbl_exception_names_pgm[] = {
@@ -358,8 +370,8 @@ static const struct acpi_exception_info acpi_gbl_exception_names_aml[] = {
 		  "The length of a Resource Descriptor in the AML is incorrect"),
 	EXCEP_TXT("AE_AML_ILLEGAL_ADDRESS",
 		  "A memory, I/O, or PCI configuration address is invalid"),
-	EXCEP_TXT("AE_AML_INFINITE_LOOP",
-		  "An apparent infinite AML While loop, method was aborted"),
+	EXCEP_TXT("AE_AML_LOOP_TIMEOUT",
+		  "An AML While loop exceeded the maximum execution time"),
 	EXCEP_TXT("AE_AML_UNINITIALIZED_NODE",
 		  "A namespace node is uninitialized or unresolved"),
 	EXCEP_TXT("AE_AML_TARGET_TYPE",
@@ -378,7 +390,6 @@ static const struct acpi_exception_info acpi_gbl_exception_names_ctrl[] = {
 	EXCEP_TXT("AE_CTRL_TRANSFER", "Transfer control to called method"),
 	EXCEP_TXT("AE_CTRL_BREAK", "A Break has been executed"),
 	EXCEP_TXT("AE_CTRL_CONTINUE", "A Continue has been executed"),
-	EXCEP_TXT("AE_CTRL_SKIP", "Not currently used"),
 	EXCEP_TXT("AE_CTRL_PARSE_CONTINUE", "Used to skip over bad opcodes"),
 	EXCEP_TXT("AE_CTRL_PARSE_PENDING", "Used to implement AML While loops")
 };

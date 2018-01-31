@@ -1056,13 +1056,14 @@ static const struct snd_soc_codec_driver soc_codec_dev_cs42l52 = {
 	.set_bias_level = cs42l52_set_bias_level,
 	.suspend_bias_off = true,
 
-	.dapm_widgets = cs42l52_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(cs42l52_dapm_widgets),
-	.dapm_routes = cs42l52_audio_map,
-	.num_dapm_routes = ARRAY_SIZE(cs42l52_audio_map),
-
-	.controls = cs42l52_snd_controls,
-	.num_controls = ARRAY_SIZE(cs42l52_snd_controls),
+	.component_driver = {
+		.controls		= cs42l52_snd_controls,
+		.num_controls		= ARRAY_SIZE(cs42l52_snd_controls),
+		.dapm_widgets		= cs42l52_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(cs42l52_dapm_widgets),
+		.dapm_routes		= cs42l52_audio_map,
+		.num_dapm_routes	= ARRAY_SIZE(cs42l52_audio_map),
+	},
 };
 
 /* Current and threshold powerup sequence Pg37 */
@@ -1099,8 +1100,7 @@ static int cs42l52_i2c_probe(struct i2c_client *i2c_client,
 	unsigned int reg;
 	u32 val32;
 
-	cs42l52 = devm_kzalloc(&i2c_client->dev, sizeof(struct cs42l52_private),
-			       GFP_KERNEL);
+	cs42l52 = devm_kzalloc(&i2c_client->dev, sizeof(*cs42l52), GFP_KERNEL);
 	if (cs42l52 == NULL)
 		return -ENOMEM;
 	cs42l52->dev = &i2c_client->dev;
@@ -1114,13 +1114,11 @@ static int cs42l52_i2c_probe(struct i2c_client *i2c_client,
 	if (pdata) {
 		cs42l52->pdata = *pdata;
 	} else {
-		pdata = devm_kzalloc(&i2c_client->dev,
-				     sizeof(struct cs42l52_platform_data),
-				GFP_KERNEL);
-		if (!pdata) {
-			dev_err(&i2c_client->dev, "could not allocate pdata\n");
+		pdata = devm_kzalloc(&i2c_client->dev, sizeof(*pdata),
+				     GFP_KERNEL);
+		if (!pdata)
 			return -ENOMEM;
-		}
+
 		if (i2c_client->dev.of_node) {
 			if (of_property_read_bool(i2c_client->dev.of_node,
 				"cirrus,mica-differential-cfg"))

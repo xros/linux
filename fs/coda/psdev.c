@@ -22,7 +22,7 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/time.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
@@ -61,10 +61,10 @@ static struct class *coda_psdev_class;
  * Device operations
  */
 
-static unsigned int coda_psdev_poll(struct file *file, poll_table * wait)
+static __poll_t coda_psdev_poll(struct file *file, poll_table * wait)
 {
         struct venus_comm *vcp = (struct venus_comm *) file->private_data;
-	unsigned int mask = POLLOUT | POLLWRNORM;
+	__poll_t mask = POLLOUT | POLLWRNORM;
 
 	poll_wait(file, &vcp->vc_waitq, wait);
 	mutex_lock(&vcp->vc_mutex);

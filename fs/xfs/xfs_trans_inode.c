@@ -28,6 +28,8 @@
 #include "xfs_inode_item.h"
 #include "xfs_trace.h"
 
+#include <linux/iversion.h>
+
 /*
  * Add a locked inode to the transaction.
  *
@@ -73,20 +75,12 @@ xfs_trans_ichgtime(
 	ASSERT(tp);
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
 
-	tv = current_fs_time(inode->i_sb);
+	tv = current_time(inode);
 
-	if ((flags & XFS_ICHGTIME_MOD) &&
-	    !timespec_equal(&inode->i_mtime, &tv)) {
+	if (flags & XFS_ICHGTIME_MOD)
 		inode->i_mtime = tv;
-		ip->i_d.di_mtime.t_sec = tv.tv_sec;
-		ip->i_d.di_mtime.t_nsec = tv.tv_nsec;
-	}
-	if ((flags & XFS_ICHGTIME_CHG) &&
-	    !timespec_equal(&inode->i_ctime, &tv)) {
+	if (flags & XFS_ICHGTIME_CHG)
 		inode->i_ctime = tv;
-		ip->i_d.di_ctime.t_sec = tv.tv_sec;
-		ip->i_d.di_ctime.t_nsec = tv.tv_nsec;
-	}
 }
 
 /*
@@ -118,15 +112,17 @@ xfs_trans_log_inode(
 
 	/*
 	 * First time we log the inode in a transaction, bump the inode change
-	 * counter if it is configured for this to occur. We don't use
-	 * inode_inc_version() because there is no need for extra locking around
-	 * i_version as we already hold the inode locked exclusively for
-	 * metadata modification.
+	 * counter if it is configured for this to occur. While we have the
+	 * inode locked exclusively for metadata modification, we can usually
+	 * avoid setting XFS_ILOG_CORE if no one has queried the value since
+	 * the last time it was incremented. If we have XFS_ILOG_CORE already
+	 * set however, then go ahead and bump the i_version counter
+	 * unconditionally.
 	 */
 	if (!(ip->i_itemp->ili_item.li_desc->lid_flags & XFS_LID_DIRTY) &&
 	    IS_I_VERSION(VFS_I(ip))) {
-		ip->i_d.di_changecount = ++VFS_I(ip)->i_version;
-		flags |= XFS_ILOG_CORE;
+		if (inode_maybe_inc_iversion(VFS_I(ip), flags & XFS_ILOG_CORE))
+			flags |= XFS_ILOG_CORE;
 	}
 
 	tp->t_flags |= XFS_TRANS_DIRTY;
@@ -141,4 +137,18 @@ xfs_trans_log_inode(
 	 */
 	flags |= ip->i_itemp->ili_last_fields;
 	ip->i_itemp->ili_fields |= flags;
+}
+
+int
+xfs_trans_roll_inode(
+	struct xfs_trans	**tpp,
+	struct xfs_inode	*ip)
+{
+	int			error;
+
+	xfs_trans_log_inode(*tpp, ip, XFS_ILOG_CORE);
+	error = xfs_trans_roll(tpp);
+	if (!error)
+		xfs_trans_ijoin(*tpp, ip, 0);
+	return error;
 }

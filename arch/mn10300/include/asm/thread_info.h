@@ -79,8 +79,6 @@ struct thread_info {
 	.addr_limit	= KERNEL_DS,		\
 }
 
-#define init_thread_info	(init_thread_union.thread_info)
-#define init_stack		(init_thread_union.stack)
 #define init_uregs							\
 	((struct pt_regs *)						\
 	 ((unsigned long) init_stack + THREAD_SIZE - sizeof(struct pt_regs)))
@@ -115,7 +113,7 @@ static inline unsigned long current_stack_pointer(void)
 }
 
 #ifndef CONFIG_KGDB
-void arch_release_thread_info(struct thread_info *ti);
+void arch_release_thread_stack(unsigned long *stack);
 #endif
 #define get_thread_info(ti)	get_task_struct((ti)->task)
 #define put_thread_info(ti)	put_task_struct((ti)->task)
