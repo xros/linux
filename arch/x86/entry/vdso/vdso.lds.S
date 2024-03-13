@@ -25,6 +25,11 @@ VERSION {
 		__vdso_getcpu;
 		time;
 		__vdso_time;
+		clock_getres;
+		__vdso_clock_getres;
+#ifdef CONFIG_X86_SGX
+		__vdso_sgx_enter_enclave;
+#endif
 	local: *;
 	};
 }

@@ -1,3 +1,6 @@
+
+.. _addsyscalls:
+
 Adding a New System Call
 ========================
 
@@ -30,7 +33,7 @@ interface.
        to a somewhat opaque API.
 
  - If you're just exposing runtime system information, a new node in sysfs
-   (see ``Documentation/filesystems/sysfs.txt``) or the ``/proc`` filesystem may
+   (see ``Documentation/filesystems/sysfs.rst``) or the ``/proc`` filesystem may
    be more appropriate.  However, access to these mechanisms requires that the
    relevant filesystem is mounted, which might not always be the case (e.g.
    in a namespaced/sandboxed/chrooted environment).  Avoid adding any API to
@@ -222,7 +225,7 @@ your new syscall number may get adjusted to resolve conflicts.
 The file ``kernel/sys_ni.c`` provides a fallback stub implementation of each
 system call, returning ``-ENOSYS``.  Add your new system call here too::
 
-    cond_syscall(sys_xyzzy);
+    COND_SYSCALL(xyzzy);
 
 Your new kernel functionality, and the system call that controls it, should
 normally be optional, so add a ``CONFIG`` option (typically to
@@ -232,7 +235,7 @@ normally be optional, so add a ``CONFIG`` option (typically to
    by the option.
  - Make the option depend on EXPERT if it should be hidden from normal users.
  - Make any new source files implementing the function dependent on the CONFIG
-   option in the Makefile (e.g. ``obj-$(CONFIG_XYZZY_SYSCALL) += xyzzy.c``).
+   option in the Makefile (e.g. ``obj-$(CONFIG_XYZZY_SYSCALL) += xyzzy.o``).
  - Double check that the kernel still builds with the new CONFIG option turned
    off.
 
@@ -360,7 +363,7 @@ First, the entry in ``arch/x86/entry/syscalls/syscall_32.tbl`` gets an extra
 column to indicate that a 32-bit userspace program running on a 64-bit kernel
 should hit the compat entry point::
 
-    380   i386     xyzzy     sys_xyzzy    compat_sys_xyzzy
+    380   i386     xyzzy     sys_xyzzy    __ia32_compat_sys_xyzzy
 
 Second, you need to figure out what should happen for the x32 ABI version of
 the new system call.  There's a choice here: the layout of the arguments
@@ -373,7 +376,7 @@ the compatibility wrapper::
 
     333   64       xyzzy     sys_xyzzy
     ...
-    555   x32      xyzzy     compat_sys_xyzzy
+    555   x32      xyzzy     __x32_compat_sys_xyzzy
 
 If no pointers are involved, then it is preferable to re-use the 64-bit system
 call for the x32 ABI (and consequently the entry in
@@ -487,6 +490,38 @@ patchset, for the convenience of reviewers.
 The man page should be cc'ed to linux-man@vger.kernel.org
 For more details, see https://www.kernel.org/doc/man-pages/patches.html
 
+
+Do not call System Calls in the Kernel
+--------------------------------------
+
+System calls are, as stated above, interaction points between userspace and
+the kernel.  Therefore, system call functions such as ``sys_xyzzy()`` or
+``compat_sys_xyzzy()`` should only be called from userspace via the syscall
+table, but not from elsewhere in the kernel.  If the syscall functionality is
+useful to be used within the kernel, needs to be shared between an old and a
+new syscall, or needs to be shared between a syscall and its compatibility
+variant, it should be implemented by means of a "helper" function (such as
+``ksys_xyzzy()``).  This kernel function may then be called within the
+syscall stub (``sys_xyzzy()``), the compatibility syscall stub
+(``compat_sys_xyzzy()``), and/or other kernel code.
+
+At least on 64-bit x86, it will be a hard requirement from v4.17 onwards to not
+call system call functions in the kernel.  It uses a different calling
+convention for system calls where ``struct pt_regs`` is decoded on-the-fly in a
+syscall wrapper which then hands processing over to the actual syscall function.
+This means that only those parameters which are actually needed for a specific
+syscall are passed on during syscall entry, instead of filling in six CPU
+registers with random user space content all the time (which may cause serious
+trouble down the call chain).
+
+Moreover, rules on how data may be accessed may differ between kernel data and
+user data.  This is another reason why calling ``sys_xyzzy()`` is generally a
+bad idea.
+
+Exceptions to this rule are only allowed in architecture-specific overrides,
+architecture-specific compatibility wrappers, or other code in arch/.
+
+
 References and Sources
 ----------------------
 
@@ -506,25 +541,25 @@ References and Sources
    :manpage:`syscall(2)` man-page:
    http://man7.org/linux/man-pages/man2/syscall.2.html#NOTES
  - Collated emails from Linus Torvalds discussing the problems with ``ioctl()``:
-   http://yarchive.net/comp/linux/ioctl.html
+   https://yarchive.net/comp/linux/ioctl.html
  - "How to not invent kernel interfaces", Arnd Bergmann,
-   http://www.ukuug.org/events/linux2007/2007/papers/Bergmann.pdf
+   https://www.ukuug.org/events/linux2007/2007/papers/Bergmann.pdf
  - LWN article from Michael Kerrisk on avoiding new uses of CAP_SYS_ADMIN:
    https://lwn.net/Articles/486306/
  - Recommendation from Andrew Morton that all related information for a new
    system call should come in the same email thread:
-   https://lkml.org/lkml/2014/7/24/641
+   https://lore.kernel.org/r/20140724144747.3041b208832bbdf9fbce5d96@linux-foundation.org
  - Recommendation from Michael Kerrisk that a new system call should come with
-   a man page: https://lkml.org/lkml/2014/6/13/309
+   a man page: https://lore.kernel.org/r/CAKgNAkgMA39AfoSoA5Pe1r9N+ZzfYQNvNPvcRN7tOvRb8+v06Q@mail.gmail.com
  - Suggestion from Thomas Gleixner that x86 wire-up should be in a separate
-   commit: https://lkml.org/lkml/2014/11/19/254
+   commit: https://lore.kernel.org/r/alpine.DEB.2.11.1411191249560.3909@nanos
  - Suggestion from Greg Kroah-Hartman that it's good for new system calls to
-   come with a man-page & selftest: https://lkml.org/lkml/2014/3/19/710
+   come with a man-page & selftest: https://lore.kernel.org/r/20140320025530.GA25469@kroah.com
  - Discussion from Michael Kerrisk of new system call vs. :manpage:`prctl(2)` extension:
-   https://lkml.org/lkml/2014/6/3/411
+   https://lore.kernel.org/r/CAHO5Pa3F2MjfTtfNxa8LbnkeeU8=YJ+9tDqxZpw7Gz59E-4AUg@mail.gmail.com
  - Suggestion from Ingo Molnar that system calls that involve multiple
    arguments should encapsulate those arguments in a struct, which includes a
-   size field for future extensibility: https://lkml.org/lkml/2015/7/30/117
+   size field for future extensibility: https://lore.kernel.org/r/20150730083831.GA22182@gmail.com
  - Numbering oddities arising from (re-)use of O_* numbering space flags:
 
     - commit 75069f2b5bfb ("vfs: renumber FMODE_NONOTIFY and add to uniqueness
@@ -534,9 +569,9 @@ References and Sources
     - commit bb458c644a59 ("Safer ABI for O_TMPFILE")
 
  - Discussion from Matthew Wilcox about restrictions on 64-bit arguments:
-   https://lkml.org/lkml/2008/12/12/187
+   https://lore.kernel.org/r/20081212152929.GM26095@parisc-linux.org
  - Recommendation from Greg Kroah-Hartman that unknown flags should be
-   policed: https://lkml.org/lkml/2014/7/17/577
+   policed: https://lore.kernel.org/r/20140717193330.GB4703@kroah.com
  - Recommendation from Linus Torvalds that x32 system calls should prefer
    compatibility with 64-bit versions rather than 32-bit versions:
-   https://lkml.org/lkml/2011/8/31/244
+   https://lore.kernel.org/r/CA+55aFxfmwfB7jbbrXxa=K7VBYPfAvmu3XOkGrLbB1UFjX1+Ew@mail.gmail.com

@@ -28,10 +28,10 @@ trusted userspace bits.
 
 This facility uses X.509 ITU-T standard certificates to encode the public keys
 involved.  The signatures are not themselves encoded in any industrial standard
-type.  The facility currently only supports the RSA public key encryption
-standard (though it is pluggable and permits others to be used).  The possible
-hash algorithms that can be used are SHA-1, SHA-224, SHA-256, SHA-384, and
-SHA-512 (the algorithm is selected by data in the signature).
+type.  The built-in facility currently only supports the RSA & NIST P-384 ECDSA
+public key signing standard (though it is pluggable and permits others to be
+used).  The possible hash algorithms that can be used are SHA-2 and SHA-3 of
+sizes 256, 384, and 512 (the algorithm is selected by data in the signature).
 
 
 ==========================
@@ -81,11 +81,12 @@ This has a number of options available:
      sign the modules with:
 
         =============================== ==========================================
-	``CONFIG_MODULE_SIG_SHA1``	:menuselection:`Sign modules with SHA-1`
-	``CONFIG_MODULE_SIG_SHA224``	:menuselection:`Sign modules with SHA-224`
 	``CONFIG_MODULE_SIG_SHA256``	:menuselection:`Sign modules with SHA-256`
 	``CONFIG_MODULE_SIG_SHA384``	:menuselection:`Sign modules with SHA-384`
 	``CONFIG_MODULE_SIG_SHA512``	:menuselection:`Sign modules with SHA-512`
+	``CONFIG_MODULE_SIG_SHA3_256``	:menuselection:`Sign modules with SHA3-256`
+	``CONFIG_MODULE_SIG_SHA3_384``	:menuselection:`Sign modules with SHA3-384`
+	``CONFIG_MODULE_SIG_SHA3_512``	:menuselection:`Sign modules with SHA3-512`
         =============================== ==========================================
 
      The algorithm selected here will also be built into the kernel (rather
@@ -106,7 +107,7 @@ This has a number of options available:
      certificate and a private key.
 
      If the PEM file containing the private key is encrypted, or if the
-     PKCS#11 token requries a PIN, this can be provided at build time by
+     PKCS#11 token requires a PIN, this can be provided at build time by
      means of the ``KBUILD_SIGN_PIN`` variable.
 
 
@@ -145,6 +146,10 @@ into vmlinux) using parameters in the::
 
 file (which is also generated if it does not already exist).
 
+One can select between RSA (``MODULE_SIG_KEY_TYPE_RSA``) and ECDSA
+(``MODULE_SIG_KEY_TYPE_ECDSA``) to generate either RSA 4k or NIST
+P-384 keypair.
+
 It is strongly recommended that you provide your own x509.genkey file.
 
 Most notably, in the x509.genkey file, the req_distinguished_name section
@@ -180,11 +185,11 @@ Public keys in the kernel
 =========================
 
 The kernel contains a ring of public keys that can be viewed by root.  They're
-in a keyring called ".system_keyring" that can be seen by::
+in a keyring called ".builtin_trusted_keys" that can be seen by::
 
 	[root@deneb ~]# cat /proc/keys
 	...
-	223c7853 I------     1 perm 1f030000     0     0 keyring   .system_keyring: 1
+	223c7853 I------     1 perm 1f030000     0     0 keyring   .builtin_trusted_keys: 1
 	302d2d52 I------     1 perm 1f010000     0     0 asymmetri Fedora kernel signing key: d69a84e6bce3d216b979e9505b3e3ef9a7118079: X509.RSA a7118079 []
 	...
 
@@ -197,15 +202,15 @@ add those in also (e.g. from the UEFI key database).
 
 Finally, it is possible to add additional public keys by doing::
 
-	keyctl padd asymmetric "" [.system_keyring-ID] <[key-file]
+	keyctl padd asymmetric "" [.builtin_trusted_keys-ID] <[key-file]
 
 e.g.::
 
 	keyctl padd asymmetric "" 0x223c7853 <my_public_key.x509
 
 Note, however, that the kernel will only permit keys to be added to
-``.system_keyring _if_`` the new key's X.509 wrapper is validly signed by a key
-that is already resident in the .system_keyring at the time the key was added.
+``.builtin_trusted_keys`` **if** the new key's X.509 wrapper is validly signed by a key
+that is already resident in the ``.builtin_trusted_keys`` at the time the key was added.
 
 
 ========================
@@ -266,7 +271,7 @@ for which it has a public key.   Otherwise, it will also load modules that are
 unsigned.   Any module for which the kernel has a key, but which proves to have
 a signature mismatch will not be permitted to load.
 
-Any module that has an unparseable signature will be rejected.
+Any module that has an unparsable signature will be rejected.
 
 
 =========================================

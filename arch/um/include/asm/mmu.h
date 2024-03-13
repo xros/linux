@@ -1,6 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* 
  * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #ifndef __ARCH_UM_MMU_H
@@ -12,7 +12,6 @@
 typedef struct mm_context {
 	struct mm_id id;
 	struct uml_arch_mm_context arch;
-	struct page *stub_pages[2];
 } mm_context_t;
 
 extern void __switch_mm(struct mm_id * mm_idp);

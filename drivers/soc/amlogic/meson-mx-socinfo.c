@@ -104,7 +104,7 @@ static const struct of_device_id meson_mx_socinfo_analog_top_ids[] = {
 	{ /* sentinel */ }
 };
 
-int __init meson_mx_socinfo_init(void)
+static int __init meson_mx_socinfo_init(void)
 {
 	struct soc_device_attribute *soc_dev_attr;
 	struct soc_device *soc_dev;
@@ -126,6 +126,7 @@ int __init meson_mx_socinfo_init(void)
 	np = of_find_matching_node(NULL, meson_mx_socinfo_analog_top_ids);
 	if (np) {
 		analog_top_regmap = syscon_node_to_regmap(np);
+		of_node_put(np);
 		if (IS_ERR(analog_top_regmap))
 			return PTR_ERR(analog_top_regmap);
 

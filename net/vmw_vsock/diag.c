@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * vsock sock_diag(7) module
  *
  * Copyright (C) 2017 Red Hat, Inc.
  * Author: Stefan Hajnoczi <stefanha@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation version 2 and no later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/module.h>
@@ -182,5 +174,6 @@ static void __exit vsock_diag_exit(void)
 module_init(vsock_diag_init);
 module_exit(vsock_diag_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("VMware Virtual Sockets monitoring via SOCK_DIAG");
 MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG,
 			       40 /* AF_VSOCK */);

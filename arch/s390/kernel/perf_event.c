@@ -15,33 +15,16 @@
 #include <linux/export.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>
+#include <linux/compat.h>
 #include <linux/sysfs.h>
+#include <asm/stacktrace.h>
 #include <asm/irq.h>
 #include <asm/cpu_mf.h>
 #include <asm/lowcore.h>
 #include <asm/processor.h>
 #include <asm/sysinfo.h>
-
-const char *perf_pmu_name(void)
-{
-	if (cpum_cf_avail() || cpum_sf_avail())
-		return "CPU-Measurement Facilities (CPU-MF)";
-	return "pmu";
-}
-EXPORT_SYMBOL(perf_pmu_name);
-
-int perf_num_counters(void)
-{
-	int num = 0;
-
-	if (cpum_cf_avail())
-		num += PERF_CPUM_CF_MAX_CTR;
-	if (cpum_sf_avail())
-		num += PERF_CPUM_SF_MAX_CTR;
-
-	return num;
-}
-EXPORT_SYMBOL(perf_num_counters);
+#include <asm/unwind.h>
 
 static struct kvm_s390_sie_block *sie_block(struct pt_regs *regs)
 {
@@ -50,7 +33,7 @@ static struct kvm_s390_sie_block *sie_block(struct pt_regs *regs)
 	if (!stack)
 		return NULL;
 
-	return (struct kvm_s390_sie_block *) stack->empty1[0];
+	return (struct kvm_s390_sie_block *)stack->sie_control_block;
 }
 
 static bool is_in_guest(struct pt_regs *regs)
@@ -219,20 +202,55 @@ static int __init service_level_perf_register(void)
 }
 arch_initcall(service_level_perf_register);
 
-static int __perf_callchain_kernel(void *data, unsigned long address, int reliable)
-{
-	struct perf_callchain_entry_ctx *entry = data;
-
-	perf_callchain_store(entry, address);
-	return 0;
-}
-
 void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
 			   struct pt_regs *regs)
 {
-	if (user_mode(regs))
+	struct unwind_state state;
+	unsigned long addr;
+
+	unwind_for_each_frame(&state, current, regs, 0) {
+		addr = unwind_get_return_address(&state);
+		if (!addr || perf_callchain_store(entry, addr))
+			return;
+	}
+}
+
+void perf_callchain_user(struct perf_callchain_entry_ctx *entry,
+			 struct pt_regs *regs)
+{
+	struct stack_frame_user __user *sf;
+	unsigned long ip, sp;
+	bool first = true;
+
+	if (is_compat_task())
 		return;
-	dump_trace(__perf_callchain_kernel, entry, NULL, regs->gprs[15]);
+	perf_callchain_store(entry, instruction_pointer(regs));
+	sf = (void __user *)user_stack_pointer(regs);
+	pagefault_disable();
+	while (entry->nr < entry->max_stack) {
+		if (__get_user(sp, &sf->back_chain))
+			break;
+		if (__get_user(ip, &sf->gprs[8]))
+			break;
+		if (ip & 0x1) {
+			/*
+			 * If the instruction address is invalid, and this
+			 * is the first stack frame, assume r14 has not
+			 * been written to the stack yet. Otherwise exit.
+			 */
+			if (first && !(regs->gprs[14] & 0x1))
+				ip = regs->gprs[14];
+			else
+				break;
+		}
+		perf_callchain_store(entry, ip);
+		/* Sanity check: ABI requires SP to be aligned 8 bytes. */
+		if (!sp || sp & 0x7)
+			break;
+		sf = (void __user *)sp;
+		first = false;
+	}
+	pagefault_enable();
 }
 
 /* Perf definitions for PMU event attributes in sysfs */

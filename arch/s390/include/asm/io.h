@@ -12,6 +12,7 @@
 
 #include <linux/kernel.h>
 #include <asm/page.h>
+#include <asm/pgtable.h>
 #include <asm/pci_io.h>
 
 #define xlate_dev_mem_ptr xlate_dev_mem_ptr
@@ -19,25 +20,20 @@ void *xlate_dev_mem_ptr(phys_addr_t phys);
 #define unxlate_dev_mem_ptr unxlate_dev_mem_ptr
 void unxlate_dev_mem_ptr(phys_addr_t phys, void *addr);
 
-/*
- * Convert a virtual cached pointer to an uncached pointer
- */
-#define xlate_dev_kmem_ptr(p)	p
-
 #define IO_SPACE_LIMIT 0
 
-#define ioremap_nocache(addr, size)	ioremap(addr, size)
-#define ioremap_wc			ioremap_nocache
-#define ioremap_wt			ioremap_nocache
+/*
+ * I/O memory mapping functions.
+ */
+#define ioremap_prot ioremap_prot
+#define iounmap iounmap
 
-static inline void __iomem *ioremap(unsigned long offset, unsigned long size)
-{
-	return (void __iomem *) offset;
-}
+#define _PAGE_IOREMAP pgprot_val(PAGE_KERNEL)
 
-static inline void iounmap(volatile void __iomem *addr)
-{
-}
+#define ioremap_wc(addr, size)  \
+	ioremap_prot((addr), (size), pgprot_val(pgprot_writecombine(PAGE_KERNEL)))
+#define ioremap_wt(addr, size)  \
+	ioremap_prot((addr), (size), pgprot_val(pgprot_writethrough(PAGE_KERNEL)))
 
 static inline void __iomem *ioport_map(unsigned long port, unsigned int nr)
 {
@@ -57,13 +53,16 @@ static inline void ioport_unmap(void __iomem *p)
  * the corresponding device and create the mapping cookie.
  */
 #define pci_iomap pci_iomap
+#define pci_iomap_range pci_iomap_range
 #define pci_iounmap pci_iounmap
-#define pci_iomap_wc pci_iomap
-#define pci_iomap_wc_range pci_iomap_range
+#define pci_iomap_wc pci_iomap_wc
+#define pci_iomap_wc_range pci_iomap_wc_range
 
 #define memcpy_fromio(dst, src, count)	zpci_memcpy_fromio(dst, src, count)
 #define memcpy_toio(dst, src, count)	zpci_memcpy_toio(dst, src, count)
 #define memset_io(dst, val, count)	zpci_memset_io(dst, val, count)
+
+#define mmiowb()	zpci_barrier()
 
 #define __raw_readb	zpci_read_u8
 #define __raw_readw	zpci_read_u16

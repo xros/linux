@@ -102,10 +102,8 @@ static int ncm_do_config(struct usb_configuration *c)
 	}
 
 	f_ncm = usb_get_function(f_ncm_inst);
-	if (IS_ERR(f_ncm)) {
-		status = PTR_ERR(f_ncm);
-		return status;
-	}
+	if (IS_ERR(f_ncm))
+		return PTR_ERR(f_ncm);
 
 	status = usb_add_function(c, f_ncm);
 	if (status < 0) {
@@ -158,8 +156,10 @@ static int gncm_bind(struct usb_composite_dev *cdev)
 		struct usb_descriptor_header *usb_desc;
 
 		usb_desc = usb_otg_descriptor_alloc(gadget);
-		if (!usb_desc)
+		if (!usb_desc) {
+			status = -ENOMEM;
 			goto fail;
+		}
 		usb_otg_descriptor_init(gadget, usb_desc);
 		otg_desc[0] = usb_desc;
 		otg_desc[1] = NULL;
@@ -199,7 +199,7 @@ static struct usb_composite_driver ncm_driver = {
 	.name		= "g_ncm",
 	.dev		= &device_desc,
 	.strings	= dev_strings,
-	.max_speed	= USB_SPEED_HIGH,
+	.max_speed	= USB_SPEED_SUPER,
 	.bind		= gncm_bind,
 	.unbind		= gncm_unbind,
 };

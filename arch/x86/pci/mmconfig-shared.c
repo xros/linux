@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mmconfig-shared.c - Low-level direct PCI config space access via
- *                     MMCONFIG - common code between i386 and x86-64.
+ * Low-level direct PCI config space access via ECAM - common code between
+ * i386 and x86-64.
  *
  * This code does:
  * - known chipset handling
@@ -11,9 +11,12 @@
  * themselves.
  */
 
+#define pr_fmt(fmt) "PCI: " fmt
+
+#include <linux/acpi.h>
+#include <linux/efi.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/sfi_acpi.h>
 #include <linux/bitmap.h>
 #include <linux/dmi.h>
 #include <linux/slab.h>
@@ -23,12 +26,11 @@
 #include <asm/pci_x86.h>
 #include <asm/acpi.h>
 
-#define PREFIX "PCI: "
-
-/* Indicate if the mmcfg resources have been placed into the resource table. */
+/* Indicate if the ECAM resources have been placed into the resource table */
 static bool pci_mmcfg_running_state;
 static bool pci_mmcfg_arch_init_failed;
 static DEFINE_MUTEX(pci_mmcfg_lock);
+#define pci_mmcfg_lock_held() lock_is_held(&(pci_mmcfg_lock).dep_map)
 
 LIST_HEAD(pci_mmcfg_list);
 
@@ -54,7 +56,7 @@ static void list_add_sorted(struct pci_mmcfg_region *new)
 	struct pci_mmcfg_region *cfg;
 
 	/* keep list sorted by segment and starting bus number */
-	list_for_each_entry_rcu(cfg, &pci_mmcfg_list, list) {
+	list_for_each_entry_rcu(cfg, &pci_mmcfg_list, list, pci_mmcfg_lock_held()) {
 		if (cfg->segment > new->segment ||
 		    (cfg->segment == new->segment &&
 		     cfg->start_bus >= new->start_bus)) {
@@ -88,28 +90,27 @@ static struct pci_mmcfg_region *pci_mmconfig_alloc(int segment, int start,
 	res->end = addr + PCI_MMCFG_BUS_OFFSET(end + 1) - 1;
 	res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 	snprintf(new->name, PCI_MMCFG_RESOURCE_NAME_LEN,
-		 "PCI MMCONFIG %04x [bus %02x-%02x]", segment, start, end);
+		 "PCI ECAM %04x [bus %02x-%02x]", segment, start, end);
 	res->name = new->name;
 
 	return new;
 }
 
-static struct pci_mmcfg_region *__init pci_mmconfig_add(int segment, int start,
-							int end, u64 addr)
+struct pci_mmcfg_region *__init pci_mmconfig_add(int segment, int start,
+						 int end, u64 addr)
 {
 	struct pci_mmcfg_region *new;
 
 	new = pci_mmconfig_alloc(segment, start, end, addr);
-	if (new) {
-		mutex_lock(&pci_mmcfg_lock);
-		list_add_sorted(new);
-		mutex_unlock(&pci_mmcfg_lock);
+	if (!new)
+		return NULL;
 
-		pr_info(PREFIX
-		       "MMCONFIG for domain %04x [bus %02x-%02x] at %pR "
-		       "(base %#lx)\n",
-		       segment, start, end, &new->res, (unsigned long)addr);
-	}
+	mutex_lock(&pci_mmcfg_lock);
+	list_add_sorted(new);
+	mutex_unlock(&pci_mmcfg_lock);
+
+	pr_info("ECAM %pR (base %#lx) for domain %04x [bus %02x-%02x]\n",
+		&new->res, (unsigned long)addr, segment, start, end);
 
 	return new;
 }
@@ -118,7 +119,7 @@ struct pci_mmcfg_region *pci_mmconfig_lookup(int segment, int bus)
 {
 	struct pci_mmcfg_region *cfg;
 
-	list_for_each_entry_rcu(cfg, &pci_mmcfg_list, list)
+	list_for_each_entry_rcu(cfg, &pci_mmcfg_list, list, pci_mmcfg_lock_held())
 		if (cfg->segment == segment &&
 		    cfg->start_bus <= bus && bus <= cfg->end_bus)
 			return cfg;
@@ -203,7 +204,7 @@ static const char *__init pci_mmcfg_amd_fam10h(void)
 	msr <<= 32;
 	msr |= low;
 
-	/* mmconfig is not enable */
+	/* ECAM is not enabled */
 	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
 		return NULL;
 
@@ -365,7 +366,7 @@ static int __init pci_mmcfg_check_hostbridge(void)
 			name = pci_mmcfg_probes[i].probe();
 
 		if (name)
-			pr_info(PREFIX "%s with MMCONFIG support\n", name);
+			pr_info("%s with ECAM support\n", name);
 	}
 
 	/* some end_bus_number is crazy, fix it */
@@ -424,7 +425,7 @@ static acpi_status find_mboard_resource(acpi_handle handle, u32 lvl,
 	return AE_OK;
 }
 
-static bool is_acpi_reserved(u64 start, u64 end, unsigned not_used)
+static bool is_acpi_reserved(u64 start, u64 end, enum e820_type not_used)
 {
 	struct resource mcfg_res;
 
@@ -441,17 +442,39 @@ static bool is_acpi_reserved(u64 start, u64 end, unsigned not_used)
 	return mcfg_res.flags;
 }
 
-typedef bool (*check_reserved_t)(u64 start, u64 end, unsigned type);
+static bool is_efi_mmio(struct resource *res)
+{
+#ifdef CONFIG_EFI
+	u64 start = res->start;
+	u64 end = res->start + resource_size(res);
+	efi_memory_desc_t *md;
+	u64 size, mmio_start, mmio_end;
+
+	for_each_efi_memory_desc(md) {
+		if (md->type == EFI_MEMORY_MAPPED_IO) {
+			size = md->num_pages << EFI_PAGE_SHIFT;
+			mmio_start = md->phys_addr;
+			mmio_end = mmio_start + size;
+
+			if (mmio_start <= start && end <= mmio_end)
+				return true;
+		}
+	}
+#endif
+
+	return false;
+}
+
+typedef bool (*check_reserved_t)(u64 start, u64 end, enum e820_type type);
 
 static bool __ref is_mmconf_reserved(check_reserved_t is_reserved,
 				     struct pci_mmcfg_region *cfg,
-				     struct device *dev, int with_e820)
+				     struct device *dev, const char *method)
 {
 	u64 addr = cfg->res.start;
 	u64 size = resource_size(&cfg->res);
 	u64 old_size = size;
 	int num_buses;
-	char *method = with_e820 ? "E820" : "ACPI motherboard resources";
 
 	while (!is_reserved(addr, addr + size, E820_TYPE_RESERVED)) {
 		size >>= 1;
@@ -460,14 +483,13 @@ static bool __ref is_mmconf_reserved(check_reserved_t is_reserved,
 	}
 
 	if (size < (16UL<<20) && size != old_size)
-		return 0;
+		return false;
 
 	if (dev)
-		dev_info(dev, "MMCONFIG at %pR reserved in %s\n",
+		dev_info(dev, "ECAM %pR reserved as %s\n",
 			 &cfg->res, method);
 	else
-		pr_info(PREFIX "MMCONFIG at %pR reserved in %s\n",
-		       &cfg->res, method);
+		pr_info("ECAM %pR reserved as %s\n", &cfg->res, method);
 
 	if (old_size != size) {
 		/* update end_bus */
@@ -476,42 +498,51 @@ static bool __ref is_mmconf_reserved(check_reserved_t is_reserved,
 		cfg->res.end = cfg->res.start +
 		    PCI_MMCFG_BUS_OFFSET(num_buses) - 1;
 		snprintf(cfg->name, PCI_MMCFG_RESOURCE_NAME_LEN,
-			 "PCI MMCONFIG %04x [bus %02x-%02x]",
+			 "PCI ECAM %04x [bus %02x-%02x]",
 			 cfg->segment, cfg->start_bus, cfg->end_bus);
 
 		if (dev)
-			dev_info(dev,
-				"MMCONFIG "
-				"at %pR (base %#lx) (size reduced!)\n",
-				&cfg->res, (unsigned long) cfg->address);
+			dev_info(dev, "ECAM %pR (base %#lx) (size reduced!)\n",
+				 &cfg->res, (unsigned long) cfg->address);
 		else
-			pr_info(PREFIX
-				"MMCONFIG for %04x [bus%02x-%02x] "
-				"at %pR (base %#lx) (size reduced!)\n",
-				cfg->segment, cfg->start_bus, cfg->end_bus,
-				&cfg->res, (unsigned long) cfg->address);
+			pr_info("ECAM %pR (base %#lx) for %04x [bus%02x-%02x] (size reduced!)\n",
+				&cfg->res, (unsigned long) cfg->address,
+				cfg->segment, cfg->start_bus, cfg->end_bus);
 	}
 
-	return 1;
+	return true;
 }
 
-static bool __ref
-pci_mmcfg_check_reserved(struct device *dev, struct pci_mmcfg_region *cfg, int early)
+static bool __ref pci_mmcfg_reserved(struct device *dev,
+				     struct pci_mmcfg_region *cfg, int early)
 {
+	struct resource *conflict;
+
 	if (!early && !acpi_disabled) {
-		if (is_mmconf_reserved(is_acpi_reserved, cfg, dev, 0))
-			return 1;
+		if (is_mmconf_reserved(is_acpi_reserved, cfg, dev,
+				       "ACPI motherboard resource"))
+			return true;
 
 		if (dev)
-			dev_info(dev, FW_INFO
-				 "MMCONFIG at %pR not reserved in "
-				 "ACPI motherboard resources\n",
+			dev_info(dev, FW_INFO "ECAM %pR not reserved in ACPI motherboard resources\n",
 				 &cfg->res);
 		else
-			pr_info(FW_INFO PREFIX
-			       "MMCONFIG at %pR not reserved in "
-			       "ACPI motherboard resources\n",
-			       &cfg->res);
+			pr_info(FW_INFO "ECAM %pR not reserved in ACPI motherboard resources\n",
+			        &cfg->res);
+
+		if (is_efi_mmio(&cfg->res)) {
+			pr_info("ECAM %pR is EfiMemoryMappedIO; assuming valid\n",
+				&cfg->res);
+			conflict = insert_resource_conflict(&iomem_resource,
+							    &cfg->res);
+			if (conflict)
+				pr_warn("ECAM %pR conflicts with %s %pR\n",
+					&cfg->res, conflict->name, conflict);
+			else
+				pr_info("ECAM %pR reserved to work around lack of ACPI motherboard _CRS\n",
+					&cfg->res);
+			return true;
+		}
 	}
 
 	/*
@@ -521,14 +552,15 @@ pci_mmcfg_check_reserved(struct device *dev, struct pci_mmcfg_region *cfg, int e
 	 * _CBA method, just assume it's reserved.
 	 */
 	if (pci_mmcfg_running_state)
-		return 1;
+		return true;
 
 	/* Don't try to do this check unless configuration
 	   type 1 is available. how about type 2 ?*/
 	if (raw_pci_ops)
-		return is_mmconf_reserved(e820__mapped_all, cfg, dev, 1);
+		return is_mmconf_reserved(e820__mapped_all, cfg, dev,
+					  "E820 entry");
 
-	return 0;
+	return false;
 }
 
 static void __init pci_mmcfg_reject_broken(int early)
@@ -536,35 +568,31 @@ static void __init pci_mmcfg_reject_broken(int early)
 	struct pci_mmcfg_region *cfg;
 
 	list_for_each_entry(cfg, &pci_mmcfg_list, list) {
-		if (pci_mmcfg_check_reserved(NULL, cfg, early) == 0) {
-			pr_info(PREFIX "not using MMCONFIG\n");
+		if (!pci_mmcfg_reserved(NULL, cfg, early)) {
+			pr_info("not using ECAM (%pR not reserved)\n",
+				&cfg->res);
 			free_all_mmcfg();
 			return;
 		}
 	}
 }
 
-static int __init acpi_mcfg_check_entry(struct acpi_table_mcfg *mcfg,
-					struct acpi_mcfg_allocation *cfg)
+static bool __init acpi_mcfg_valid_entry(struct acpi_table_mcfg *mcfg,
+					 struct acpi_mcfg_allocation *cfg)
 {
-	int year;
-
 	if (cfg->address < 0xFFFFFFFF)
-		return 0;
+		return true;
 
 	if (!strncmp(mcfg->header.oem_id, "SGI", 3))
-		return 0;
+		return true;
 
-	if (mcfg->header.revision >= 1) {
-		if (dmi_get_date(DMI_BIOS_DATE, &year, NULL, NULL) &&
-		    year >= 2010)
-			return 0;
-	}
+	if ((mcfg->header.revision >= 1) && (dmi_get_bios_year() >= 2010))
+		return true;
 
-	pr_err(PREFIX "MCFG region for %04x [bus %02x-%02x] at %#llx "
-	       "is above 4GB, ignored\n", cfg->pci_segment,
-	       cfg->start_bus_number, cfg->end_bus_number, cfg->address);
-	return -EINVAL;
+	pr_err("ECAM at %#llx for %04x [bus %02x-%02x] is above 4GB, ignored\n",
+	       cfg->address, cfg->pci_segment, cfg->start_bus_number,
+	       cfg->end_bus_number);
+	return false;
 }
 
 static int __init pci_parse_mcfg(struct acpi_table_header *header)
@@ -588,21 +616,21 @@ static int __init pci_parse_mcfg(struct acpi_table_header *header)
 		i -= sizeof(struct acpi_mcfg_allocation);
 	}
 	if (entries == 0) {
-		pr_err(PREFIX "MMCONFIG has no entries\n");
+		pr_err("MCFG has no entries\n");
 		return -ENODEV;
 	}
 
 	cfg_table = (struct acpi_mcfg_allocation *) &mcfg[1];
 	for (i = 0; i < entries; i++) {
 		cfg = &cfg_table[i];
-		if (acpi_mcfg_check_entry(mcfg, cfg)) {
+		if (!acpi_mcfg_valid_entry(mcfg, cfg)) {
 			free_all_mmcfg();
 			return -ENODEV;
 		}
 
 		if (pci_mmconfig_add(cfg->pci_segment, cfg->start_bus_number,
 				   cfg->end_bus_number, cfg->address) == NULL) {
-			pr_warn(PREFIX "no memory for MCFG entries\n");
+			pr_warn("no memory for MCFG entries\n");
 			free_all_mmcfg();
 			return -ENOMEM;
 		}
@@ -639,6 +667,8 @@ static int pci_mmcfg_for_each_region(int (*func)(__u64 start, __u64 size,
 
 static void __init __pci_mmcfg_init(int early)
 {
+	pr_debug("%s(%s)\n", __func__, early ? "early" : "late");
+
 	pci_mmcfg_reject_broken(early);
 	if (list_empty(&pci_mmcfg_list))
 		return;
@@ -665,11 +695,13 @@ static int __initdata known_bridge;
 
 void __init pci_mmcfg_early_init(void)
 {
+	pr_debug("%s() pci_probe %#x\n", __func__, pci_probe);
+
 	if (pci_probe & PCI_PROBE_MMCONF) {
 		if (pci_mmcfg_check_hostbridge())
 			known_bridge = 1;
 		else
-			acpi_sfi_table_parse(ACPI_SIG_MCFG, pci_parse_mcfg);
+			acpi_table_parse(ACPI_SIG_MCFG, pci_parse_mcfg);
 		__pci_mmcfg_init(1);
 
 		set_apei_filter();
@@ -678,16 +710,18 @@ void __init pci_mmcfg_early_init(void)
 
 void __init pci_mmcfg_late_init(void)
 {
-	/* MMCONFIG disabled */
+	pr_debug("%s() pci_probe %#x\n", __func__, pci_probe);
+
+	/* ECAM disabled */
 	if ((pci_probe & PCI_PROBE_MMCONF) == 0)
 		return;
 
 	if (known_bridge)
 		return;
 
-	/* MMCONFIG hasn't been enabled yet, try again */
+	/* ECAM hasn't been enabled yet, try again */
 	if (pci_probe & PCI_PROBE_MASK & ~PCI_PROBE_MMCONF) {
-		acpi_sfi_table_parse(ACPI_SIG_MCFG, pci_parse_mcfg);
+		acpi_table_parse(ACPI_SIG_MCFG, pci_parse_mcfg);
 		__pci_mmcfg_init(0);
 	}
 }
@@ -698,7 +732,9 @@ static int __init pci_mmcfg_late_insert_resources(void)
 
 	pci_mmcfg_running_state = true;
 
-	/* If we are not using MMCONFIG, don't insert the resources. */
+	pr_debug("%s() pci_probe %#x\n", __func__, pci_probe);
+
+	/* If we are not using ECAM, don't insert the resources. */
 	if ((pci_probe & PCI_PROBE_MMCONF) == 0)
 		return 1;
 
@@ -707,27 +743,32 @@ static int __init pci_mmcfg_late_insert_resources(void)
 	 * marked so it won't cause request errors when __request_region is
 	 * called.
 	 */
-	list_for_each_entry(cfg, &pci_mmcfg_list, list)
-		if (!cfg->res.parent)
+	list_for_each_entry(cfg, &pci_mmcfg_list, list) {
+		if (!cfg->res.parent) {
+			pr_debug("%s() insert %pR\n", __func__, &cfg->res);
 			insert_resource(&iomem_resource, &cfg->res);
+		}
+	}
 
 	return 0;
 }
 
 /*
- * Perform MMCONFIG resource insertion after PCI initialization to allow for
+ * Perform ECAM resource insertion after PCI initialization to allow for
  * misprogrammed MCFG tables that state larger sizes but actually conflict
  * with other system resources.
  */
 late_initcall(pci_mmcfg_late_insert_resources);
 
-/* Add MMCFG information for host bridges */
+/* Add ECAM information for host bridges */
 int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
 			phys_addr_t addr)
 {
 	int rc;
 	struct resource *tmp = NULL;
 	struct pci_mmcfg_region *cfg;
+
+	dev_dbg(dev, "%s(%04x [bus %02x-%02x])\n", __func__, seg, start, end);
 
 	if (!(pci_probe & PCI_PROBE_MMCONF) || pci_mmcfg_arch_init_failed)
 		return -ENODEV;
@@ -739,15 +780,17 @@ int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
 	cfg = pci_mmconfig_lookup(seg, start);
 	if (cfg) {
 		if (cfg->end_bus < end)
-			dev_info(dev, FW_INFO
-				 "MMCONFIG for "
-				 "domain %04x [bus %02x-%02x] "
-				 "only partially covers this bridge\n",
-				  cfg->segment, cfg->start_bus, cfg->end_bus);
+			dev_info(dev, FW_INFO "ECAM %pR for domain %04x [bus %02x-%02x] only partially covers this bridge\n",
+				 &cfg->res, cfg->segment, cfg->start_bus,
+				 cfg->end_bus);
 		mutex_unlock(&pci_mmcfg_lock);
 		return -EEXIST;
 	}
 
+	/*
+	 * Don't move earlier; we must return -EEXIST, not -EINVAL, if
+	 * pci_mmconfig_lookup() finds something
+	 */
 	if (!addr) {
 		mutex_unlock(&pci_mmcfg_lock);
 		return -EINVAL;
@@ -756,10 +799,10 @@ int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
 	rc = -EBUSY;
 	cfg = pci_mmconfig_alloc(seg, start, end, addr);
 	if (cfg == NULL) {
-		dev_warn(dev, "fail to add MMCONFIG (out of memory)\n");
+		dev_warn(dev, "fail to add ECAM (out of memory)\n");
 		rc = -ENOMEM;
-	} else if (!pci_mmcfg_check_reserved(dev, cfg, 0)) {
-		dev_warn(dev, FW_BUG "MMCONFIG %pR isn't reserved\n",
+	} else if (!pci_mmcfg_reserved(dev, cfg, 0)) {
+		dev_warn(dev, FW_BUG "ECAM %pR isn't reserved\n",
 			 &cfg->res);
 	} else {
 		/* Insert resource if it's not in boot stage */
@@ -768,16 +811,13 @@ int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
 						       &cfg->res);
 
 		if (tmp) {
-			dev_warn(dev,
-				 "MMCONFIG %pR conflicts with "
-				 "%s %pR\n",
+			dev_warn(dev, "ECAM %pR conflicts with %s %pR\n",
 				 &cfg->res, tmp->name, tmp);
 		} else if (pci_mmcfg_arch_map(cfg)) {
-			dev_warn(dev, "fail to map MMCONFIG %pR.\n",
-				 &cfg->res);
+			dev_warn(dev, "fail to map ECAM %pR\n", &cfg->res);
 		} else {
 			list_add_sorted(cfg);
-			dev_info(dev, "MMCONFIG at %pR (base %#lx)\n",
+			dev_info(dev, "ECAM %pR (base %#lx)\n",
 				 &cfg->res, (unsigned long)addr);
 			cfg = NULL;
 			rc = 0;
@@ -795,7 +835,7 @@ int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
 	return rc;
 }
 
-/* Delete MMCFG information for host bridges */
+/* Delete ECAM information for host bridges */
 int pci_mmconfig_delete(u16 seg, u8 start, u8 end)
 {
 	struct pci_mmcfg_region *cfg;

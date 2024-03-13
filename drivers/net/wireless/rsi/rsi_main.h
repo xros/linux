@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2014 Redpine Signals Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
@@ -20,6 +20,7 @@
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <net/mac80211.h>
+#include <net/rsi_91x.h>
 
 struct rsi_sta {
 	struct ieee80211_sta *sta;
@@ -60,6 +61,7 @@ enum RSI_FSM_STATES {
 extern u32 rsi_zone_enabled;
 extern __printf(2, 3) void rsi_dbg(u32 zone, const char *fmt, ...);
 
+#define RSI_MAX_BANDS			2
 #define RSI_MAX_VIFS                    3
 #define NUM_EDCA_QUEUES                 4
 #define IEEE80211_ADDR_LEN              6
@@ -85,10 +87,6 @@ extern __printf(2, 3) void rsi_dbg(u32 zone, const char *fmt, ...);
 #define MGMT_HW_Q			10
 #define BEACON_HW_Q			11
 
-/* Queue information */
-#define RSI_COEX_Q			0x0
-#define RSI_WIFI_MGMT_Q                 0x4
-#define RSI_WIFI_DATA_Q                 0x5
 #define IEEE80211_MGMT_FRAME            0x00
 #define IEEE80211_CTL_FRAME             0x04
 
@@ -114,7 +112,12 @@ extern __printf(2, 3) void rsi_dbg(u32 zone, const char *fmt, ...);
 #define RSI_WOW_ENABLED			BIT(0)
 #define RSI_WOW_NO_CONNECTION		BIT(1)
 
-#define RSI_DEV_9113		1
+#define RSI_MAX_RX_PKTS		64
+
+enum rsi_dev_model {
+	RSI_DEV_9113 = 0,
+	RSI_DEV_9116
+};
 
 struct version_info {
 	u16 major;
@@ -137,6 +140,7 @@ struct skb_info {
 	u8 internal_hdr_size;
 	struct ieee80211_vif *vif;
 	u8 vap_id;
+	bool have_key;
 };
 
 enum edca_queue {
@@ -149,7 +153,6 @@ enum edca_queue {
 };
 
 struct security_info {
-	bool security_enable;
 	u32 ptk_cipher;
 	u32 gtk_cipher;
 };
@@ -164,6 +167,24 @@ struct wmm_qinfo {
 struct transmit_q_stats {
 	u32 total_tx_pkt_send[NUM_EDCA_QUEUES + 2];
 	u32 total_tx_pkt_freed[NUM_EDCA_QUEUES + 2];
+};
+
+#define MAX_BGSCAN_CHANNELS_DUAL_BAND	38
+#define MAX_BGSCAN_PROBE_REQ_LEN	0x64
+#define RSI_DEF_BGSCAN_THRLD		0x0
+#define RSI_DEF_ROAM_THRLD		0xa
+#define RSI_BGSCAN_PERIODICITY		0x1e
+#define RSI_ACTIVE_SCAN_TIME		0x14
+#define RSI_PASSIVE_SCAN_TIME		0x46
+#define RSI_CHANNEL_SCAN_TIME		20
+struct rsi_bgscan_params {
+	u16 bgscan_threshold;
+	u16 roam_threshold;
+	u16 bgscan_periodicity;
+	u8 num_bgscan_channels;
+	u8 two_probe;
+	u16 active_scan_duration;
+	u16 passive_scan_duration;
 };
 
 struct vif_priv {
@@ -192,12 +213,6 @@ struct cqm_info {
 	u32 rssi_hyst;
 };
 
-struct xtended_desc {
-	u8 confirm_frame_type;
-	u8 retry_cnt;
-	u16 reserved;
-};
-
 enum rsi_dfs_regions {
 	RSI_REGION_FCC = 0,
 	RSI_REGION_ETSI,
@@ -205,10 +220,28 @@ enum rsi_dfs_regions {
 	RSI_REGION_WORLD
 };
 
+struct rsi_9116_features {
+	u8 pll_mode;
+	u8 rf_type;
+	u8 wireless_mode;
+	u8 afe_type;
+	u8 enable_ppe;
+	u8 dpd;
+	u32 sifs_tx_enable;
+	u32 ps_options;
+};
+
+struct rsi_rate_config {
+	u32 configured_mask;	/* configured by mac80211 bits 0-11=legacy 12+ mcs */
+	u16 fixed_hw_rate;
+	bool fixed_enabled;
+};
+
 struct rsi_common {
 	struct rsi_hw *priv;
 	struct vif_priv vif_info[RSI_MAX_VIFS];
 
+	void *coex_cb;
 	bool mgmt_q_block;
 	struct version_info lmac_ver;
 
@@ -229,8 +262,8 @@ struct rsi_common {
 	u8 channel_width;
 
 	u16 rts_threshold;
-	u16 bitrate_mask[2];
-	u32 fixedrate_mask[2];
+	u32 bitrate_mask[RSI_MAX_BANDS];
+	struct rsi_rate_config rate_config[RSI_MAX_BANDS];
 
 	u8 rf_reset;
 	struct transmit_q_stats tx_stats;
@@ -251,7 +284,6 @@ struct rsi_common {
 	u8 mac_id;
 	u8 radio_id;
 	u16 rate_pwr[20];
-	u16 min_rate;
 
 	/* WMM algo related */
 	u8 selected_qnum;
@@ -273,6 +305,8 @@ struct rsi_common {
 	u8 obm_ant_sel_val;
 	int tx_power;
 	u8 ant_in_use;
+	/* Mutex used for writing packet to bus */
+	struct mutex tx_bus_mutex;
 	bool hibernate_resume;
 	bool reinit_hw;
 	u8 wow_flags;
@@ -291,11 +325,16 @@ struct rsi_common {
 	bool p2p_enabled;
 	struct timer_list roc_timer;
 	struct ieee80211_vif *roc_vif;
-};
 
-enum host_intf {
-	RSI_HOST_INTF_SDIO = 0,
-	RSI_HOST_INTF_USB
+	bool eapol4_confirm;
+	bool bt_defer_attach;
+	void *bt_adapter;
+
+	struct cfg80211_scan_request *hwscan;
+	struct rsi_bgscan_params bgscan;
+	struct rsi_9116_features w9116_features;
+	u8 bgscan_en;
+	u8 mac_ops_resumed;
 };
 
 struct eepromrw_info {
@@ -313,7 +352,7 @@ struct eeprom_read {
 
 struct rsi_hw {
 	struct rsi_common *priv;
-	u8 device_model;
+	enum rsi_dev_model device_model;
 	struct ieee80211_hw *hw;
 	struct ieee80211_vif *vifs[RSI_MAX_VIFS];
 	struct ieee80211_tx_queue_params edca_params[NUM_EDCA_QUEUES];
@@ -322,7 +361,7 @@ struct rsi_hw {
 	struct device *device;
 	u8 sc_nvifs;
 
-	enum host_intf rsi_host_intf;
+	enum rsi_host_intf rsi_host_intf;
 	u16 block_size;
 	enum ps_state ps_state;
 	struct rsi_ps_info ps_info;
@@ -343,7 +382,6 @@ struct rsi_hw {
 	void *rsi_dev;
 	struct rsi_host_intf_ops *host_intf_ops;
 	int (*check_hw_queue_status)(struct rsi_hw *adapter, u8 q_num);
-	int (*rx_urb_submit)(struct rsi_hw *adapter);
 	int (*determine_event_timeout)(struct rsi_hw *adapter);
 };
 
@@ -366,5 +404,11 @@ struct rsi_host_intf_ops {
 				      u32 instructions_size, u16 block_size,
 				      u8 *fw);
 	int (*reinit_device)(struct rsi_hw *adapter);
+	int (*ta_reset)(struct rsi_hw *adapter);
 };
+
+enum rsi_host_intf rsi_get_host_intf(void *priv);
+void rsi_set_bt_context(void *priv, void *bt_context);
+void rsi_attach_bt(struct rsi_common *common);
+
 #endif

@@ -1,18 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Maxim MAX197 A/D Converter driver
  *
  * Copyright (c) 2012 Savoir-faire Linux Inc.
  *          Vivien Didelot <vivien.didelot@savoirfairelinux.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * For further information, see the Documentation/hwmon/max197 file.
+ * For further information, see the Documentation/hwmon/max197.rst file.
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -314,14 +312,12 @@ error:
 	return ret;
 }
 
-static int max197_remove(struct platform_device *pdev)
+static void max197_remove(struct platform_device *pdev)
 {
 	struct max197_data *data = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &max197_sysfs_group);
-
-	return 0;
 }
 
 static const struct platform_device_id max197_device_ids[] = {
@@ -336,7 +332,7 @@ static struct platform_driver max197_driver = {
 		.name = "max197",
 	},
 	.probe = max197_probe,
-	.remove = max197_remove,
+	.remove_new = max197_remove,
 	.id_table = max197_device_ids,
 };
 module_platform_driver(max197_driver);

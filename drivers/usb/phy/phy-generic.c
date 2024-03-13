@@ -21,8 +21,7 @@
 #include <linux/clk.h>
 #include <linux/regulator/consumer.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 
 #include "phy-generic.h"
@@ -47,15 +46,21 @@ EXPORT_SYMBOL_GPL(usb_phy_generic_unregister);
 static int nop_set_suspend(struct usb_phy *x, int suspend)
 {
 	struct usb_phy_generic *nop = dev_get_drvdata(x->dev);
+	int ret = 0;
 
-	if (!IS_ERR(nop->clk)) {
-		if (suspend)
+	if (suspend) {
+		if (!IS_ERR(nop->clk))
 			clk_disable_unprepare(nop->clk);
-		else
+		if (!IS_ERR(nop->vcc) && !device_may_wakeup(x->dev))
+			ret = regulator_disable(nop->vcc);
+	} else {
+		if (!IS_ERR(nop->vcc) && !device_may_wakeup(x->dev))
+			ret = regulator_enable(nop->vcc);
+		if (!IS_ERR(nop->clk))
 			clk_prepare_enable(nop->clk);
 	}
 
-	return 0;
+	return ret;
 }
 
 static void nop_reset(struct usb_phy_generic *nop)
@@ -63,9 +68,9 @@ static void nop_reset(struct usb_phy_generic *nop)
 	if (!nop->gpiod_reset)
 		return;
 
-	gpiod_set_value(nop->gpiod_reset, 1);
+	gpiod_set_value_cansleep(nop->gpiod_reset, 1);
 	usleep_range(10000, 20000);
-	gpiod_set_value(nop->gpiod_reset, 0);
+	gpiod_set_value_cansleep(nop->gpiod_reset, 0);
 }
 
 /* interface to regulator framework */
@@ -159,7 +164,7 @@ void usb_gen_phy_shutdown(struct usb_phy *phy)
 {
 	struct usb_phy_generic *nop = dev_get_drvdata(phy->dev);
 
-	gpiod_set_value(nop->gpiod_reset, 1);
+	gpiod_set_value_cansleep(nop->gpiod_reset, 1);
 
 	if (!IS_ERR(nop->clk))
 		clk_disable_unprepare(nop->clk);
@@ -204,14 +209,13 @@ static int nop_set_host(struct usb_otg *otg, struct usb_bus *host)
 	return 0;
 }
 
-int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_generic *nop,
-		struct usb_phy_generic_platform_data *pdata)
+int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_generic *nop)
 {
 	enum usb_phy_type type = USB_PHY_TYPE_USB2;
 	int err = 0;
 
 	u32 clk_rate = 0;
-	bool needs_vcc = false, needs_clk = false;
+	bool needs_clk = false;
 
 	if (dev->of_node) {
 		struct device_node *node = dev->of_node;
@@ -219,38 +223,21 @@ int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_generic *nop,
 		if (of_property_read_u32(node, "clock-frequency", &clk_rate))
 			clk_rate = 0;
 
-		needs_vcc = of_property_read_bool(node, "vcc-supply");
 		needs_clk = of_property_read_bool(node, "clocks");
-		nop->gpiod_reset = devm_gpiod_get_optional(dev, "reset",
-							   GPIOD_ASIS);
-		err = PTR_ERR_OR_ZERO(nop->gpiod_reset);
-		if (!err) {
-			nop->gpiod_vbus = devm_gpiod_get_optional(dev,
-							 "vbus-detect",
-							 GPIOD_ASIS);
-			err = PTR_ERR_OR_ZERO(nop->gpiod_vbus);
-		}
-	} else if (pdata) {
-		type = pdata->type;
-		clk_rate = pdata->clk_rate;
-		needs_vcc = pdata->needs_vcc;
-		if (gpio_is_valid(pdata->gpio_reset)) {
-			err = devm_gpio_request_one(dev, pdata->gpio_reset,
-						    GPIOF_ACTIVE_LOW,
-						    dev_name(dev));
-			if (!err)
-				nop->gpiod_reset =
-					gpio_to_desc(pdata->gpio_reset);
-		}
-		nop->gpiod_vbus = pdata->gpiod_vbus;
+	}
+	nop->gpiod_reset = devm_gpiod_get_optional(dev, "reset",
+						   GPIOD_ASIS);
+	err = PTR_ERR_OR_ZERO(nop->gpiod_reset);
+	if (!err) {
+		nop->gpiod_vbus = devm_gpiod_get_optional(dev,
+						 "vbus-detect",
+						 GPIOD_ASIS);
+		err = PTR_ERR_OR_ZERO(nop->gpiod_vbus);
 	}
 
-	if (err == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
-	if (err) {
-		dev_err(dev, "Error requesting RESET or VBUS GPIO\n");
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err,
+				     "Error requesting RESET or VBUS GPIO\n");
 	if (nop->gpiod_reset)
 		gpiod_direction_output(nop->gpiod_reset, 1);
 
@@ -275,13 +262,17 @@ int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_generic *nop,
 		}
 	}
 
-	nop->vcc = devm_regulator_get(dev, "vcc");
-	if (IS_ERR(nop->vcc)) {
-		dev_dbg(dev, "Error getting vcc regulator: %ld\n",
-					PTR_ERR(nop->vcc));
-		if (needs_vcc)
-			return -EPROBE_DEFER;
-	}
+	nop->vcc = devm_regulator_get_optional(dev, "vcc");
+	if (IS_ERR(nop->vcc) && PTR_ERR(nop->vcc) != -ENODEV)
+		return dev_err_probe(dev, PTR_ERR(nop->vcc),
+				     "could not get vcc regulator\n");
+
+	nop->vbus_draw = devm_regulator_get_exclusive(dev, "vbus");
+	if (PTR_ERR(nop->vbus_draw) == -ENODEV)
+		nop->vbus_draw = NULL;
+	if (IS_ERR(nop->vbus_draw))
+		return dev_err_probe(dev, PTR_ERR(nop->vbus_draw),
+				     "could not get vbus regulator\n");
 
 	nop->dev		= dev;
 	nop->phy.dev		= nop->dev;
@@ -301,6 +292,7 @@ EXPORT_SYMBOL_GPL(usb_phy_gen_create_phy);
 static int usb_phy_generic_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct device_node *dn = dev->of_node;
 	struct usb_phy_generic	*nop;
 	int err;
 
@@ -308,7 +300,7 @@ static int usb_phy_generic_probe(struct platform_device *pdev)
 	if (!nop)
 		return -ENOMEM;
 
-	err = usb_phy_gen_create_phy(dev, nop, dev_get_platdata(&pdev->dev));
+	err = usb_phy_gen_create_phy(dev, nop);
 	if (err)
 		return err;
 	if (nop->gpiod_vbus) {
@@ -338,16 +330,17 @@ static int usb_phy_generic_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, nop);
 
+	device_set_wakeup_capable(&pdev->dev,
+				  of_property_read_bool(dn, "wakeup-source"));
+
 	return 0;
 }
 
-static int usb_phy_generic_remove(struct platform_device *pdev)
+static void usb_phy_generic_remove(struct platform_device *pdev)
 {
 	struct usb_phy_generic *nop = platform_get_drvdata(pdev);
 
 	usb_remove_phy(&nop->phy);
-
-	return 0;
 }
 
 static const struct of_device_id nop_xceiv_dt_ids[] = {
@@ -359,7 +352,7 @@ MODULE_DEVICE_TABLE(of, nop_xceiv_dt_ids);
 
 static struct platform_driver usb_phy_generic_driver = {
 	.probe		= usb_phy_generic_probe,
-	.remove		= usb_phy_generic_remove,
+	.remove_new	= usb_phy_generic_remove,
 	.driver		= {
 		.name	= "usb_phy_generic",
 		.of_match_table = nop_xceiv_dt_ids,

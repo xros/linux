@@ -1,38 +1,9 @@
-/*
- * drivers/net/ethernet/mellanox/mlxsw/spectrum_mr.c
- * Copyright (c) 2017 Mellanox Technologies. All rights reserved.
- * Copyright (c) 2017 Yotam Gigi <yotamg@mellanox.com>
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the names of the copyright holders nor the names of its
- *    contributors may be used to endorse or promote products derived from
- *    this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
+/* Copyright (c) 2017-2018 Mellanox Technologies. All rights reserved */
 
+#include <linux/mutex.h>
 #include <linux/rhashtable.h>
+#include <net/ipv6.h>
 
 #include "spectrum_mr.h"
 #include "spectrum_router.h"
@@ -42,9 +13,15 @@ struct mlxsw_sp_mr {
 	void *catchall_route_priv;
 	struct delayed_work stats_update_dw;
 	struct list_head table_list;
+	struct mutex table_list_lock; /* Protects table_list */
 #define MLXSW_SP_MR_ROUTES_COUNTER_UPDATE_INTERVAL 5000 /* ms */
-	unsigned long priv[0];
+	unsigned long priv[];
 	/* priv has to be always the last item */
+};
+
+struct mlxsw_sp_mr_vif;
+struct mlxsw_sp_mr_vif_ops {
+	bool (*is_regular)(const struct mlxsw_sp_mr_vif *vif);
 };
 
 struct mlxsw_sp_mr_vif {
@@ -61,6 +38,9 @@ struct mlxsw_sp_mr_vif {
 	 * instance is used as an ingress VIF
 	 */
 	struct list_head route_ivif_list;
+
+	/* Protocol specific operations for a VIF */
+	const struct mlxsw_sp_mr_vif_ops *ops;
 };
 
 struct mlxsw_sp_mr_route_vif_entry {
@@ -70,6 +50,17 @@ struct mlxsw_sp_mr_route_vif_entry {
 	struct mlxsw_sp_mr_route *mr_route;
 };
 
+struct mlxsw_sp_mr_table;
+struct mlxsw_sp_mr_table_ops {
+	bool (*is_route_valid)(const struct mlxsw_sp_mr_table *mr_table,
+			       const struct mr_mfc *mfc);
+	void (*key_create)(struct mlxsw_sp_mr_table *mr_table,
+			   struct mlxsw_sp_mr_route_key *key,
+			   struct mr_mfc *mfc);
+	bool (*is_route_starg)(const struct mlxsw_sp_mr_table *mr_table,
+			       const struct mlxsw_sp_mr_route *mr_route);
+};
+
 struct mlxsw_sp_mr_table {
 	struct list_head node;
 	enum mlxsw_sp_l3proto proto;
@@ -77,8 +68,10 @@ struct mlxsw_sp_mr_table {
 	u32 vr_id;
 	struct mlxsw_sp_mr_vif vifs[MAXVIFS];
 	struct list_head route_list;
+	struct mutex route_list_lock; /* Protects route_list */
 	struct rhashtable route_ht;
-	char catchall_route_priv[0];
+	const struct mlxsw_sp_mr_table_ops *ops;
+	char catchall_route_priv[];
 	/* catchall_route_priv has to be always the last item */
 };
 
@@ -88,7 +81,7 @@ struct mlxsw_sp_mr_route {
 	struct mlxsw_sp_mr_route_key key;
 	enum mlxsw_sp_mr_route_action route_action;
 	u16 min_mtu;
-	struct mfc_cache *mfc4;
+	struct mr_mfc *mfc;
 	void *route_priv;
 	const struct mlxsw_sp_mr_table *mr_table;
 	/* A list of route_vif_entry structs that point to the egress VIFs */
@@ -104,14 +97,9 @@ static const struct rhashtable_params mlxsw_sp_mr_route_ht_params = {
 	.automatic_shrinking = true,
 };
 
-static bool mlxsw_sp_mr_vif_regular(const struct mlxsw_sp_mr_vif *vif)
-{
-	return !(vif->vif_flags & (VIFF_TUNNEL | VIFF_REGISTER));
-}
-
 static bool mlxsw_sp_mr_vif_valid(const struct mlxsw_sp_mr_vif *vif)
 {
-	return mlxsw_sp_mr_vif_regular(vif) && vif->dev && vif->rif;
+	return vif->ops->is_regular(vif) && vif->dev && vif->rif;
 }
 
 static bool mlxsw_sp_mr_vif_exists(const struct mlxsw_sp_mr_vif *vif)
@@ -122,18 +110,9 @@ static bool mlxsw_sp_mr_vif_exists(const struct mlxsw_sp_mr_vif *vif)
 static bool
 mlxsw_sp_mr_route_ivif_in_evifs(const struct mlxsw_sp_mr_route *mr_route)
 {
-	vifi_t ivif;
+	vifi_t ivif = mr_route->mfc->mfc_parent;
 
-	switch (mr_route->mr_table->proto) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		ivif = mr_route->mfc4->mfc_parent;
-		return mr_route->mfc4->mfc_un.res.ttls[ivif] != 255;
-	case MLXSW_SP_L3_PROTO_IPV6:
-		/* fall through */
-	default:
-		WARN_ON_ONCE(1);
-	}
-	return false;
+	return mr_route->mfc->mfc_un.res.ttls[ivif] != 255;
 }
 
 static int
@@ -149,19 +128,6 @@ mlxsw_sp_mr_route_valid_evifs_num(const struct mlxsw_sp_mr_route *mr_route)
 	return valid_evifs;
 }
 
-static bool mlxsw_sp_mr_route_starg(const struct mlxsw_sp_mr_route *mr_route)
-{
-	switch (mr_route->mr_table->proto) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		return mr_route->key.source_mask.addr4 == htonl(INADDR_ANY);
-	case MLXSW_SP_L3_PROTO_IPV6:
-		/* fall through */
-	default:
-		WARN_ON_ONCE(1);
-	}
-	return false;
-}
-
 static enum mlxsw_sp_mr_route_action
 mlxsw_sp_mr_route_action(const struct mlxsw_sp_mr_route *mr_route)
 {
@@ -174,7 +140,8 @@ mlxsw_sp_mr_route_action(const struct mlxsw_sp_mr_route *mr_route)
 	/* The kernel does not match a (*,G) route that the ingress interface is
 	 * not one of the egress interfaces, so trap these kind of routes.
 	 */
-	if (mlxsw_sp_mr_route_starg(mr_route) &&
+	if (mr_route->mr_table->ops->is_route_starg(mr_route->mr_table,
+						    mr_route) &&
 	    !mlxsw_sp_mr_route_ivif_in_evifs(mr_route))
 		return MLXSW_SP_MR_ROUTE_ACTION_TRAP;
 
@@ -195,23 +162,9 @@ mlxsw_sp_mr_route_action(const struct mlxsw_sp_mr_route *mr_route)
 static enum mlxsw_sp_mr_route_prio
 mlxsw_sp_mr_route_prio(const struct mlxsw_sp_mr_route *mr_route)
 {
-	return mlxsw_sp_mr_route_starg(mr_route) ?
+	return mr_route->mr_table->ops->is_route_starg(mr_route->mr_table,
+						       mr_route) ?
 		MLXSW_SP_MR_ROUTE_PRIO_STARG : MLXSW_SP_MR_ROUTE_PRIO_SG;
-}
-
-static void mlxsw_sp_mr_route4_key(struct mlxsw_sp_mr_table *mr_table,
-				   struct mlxsw_sp_mr_route_key *key,
-				   const struct mfc_cache *mfc)
-{
-	bool starg = (mfc->mfc_origin == htonl(INADDR_ANY));
-
-	memset(key, 0, sizeof(*key));
-	key->vrid = mr_table->vr_id;
-	key->proto = mr_table->proto;
-	key->group.addr4 = mfc->mfc_mcastgrp;
-	key->group_mask.addr4 = htonl(0xffffffff);
-	key->source.addr4 = mfc->mfc_origin;
-	key->source_mask.addr4 = htonl(starg ? 0 : 0xffffffff);
 }
 
 static int mlxsw_sp_mr_route_evif_link(struct mlxsw_sp_mr_route *mr_route,
@@ -343,8 +296,8 @@ static void mlxsw_sp_mr_route_erase(struct mlxsw_sp_mr_table *mr_table,
 }
 
 static struct mlxsw_sp_mr_route *
-mlxsw_sp_mr_route4_create(struct mlxsw_sp_mr_table *mr_table,
-			  struct mfc_cache *mfc)
+mlxsw_sp_mr_route_create(struct mlxsw_sp_mr_table *mr_table,
+			 struct mr_mfc *mfc)
 {
 	struct mlxsw_sp_mr_route_vif_entry *rve, *tmp;
 	struct mlxsw_sp_mr_route *mr_route;
@@ -356,12 +309,13 @@ mlxsw_sp_mr_route4_create(struct mlxsw_sp_mr_table *mr_table,
 	if (!mr_route)
 		return ERR_PTR(-ENOMEM);
 	INIT_LIST_HEAD(&mr_route->evif_list);
-	mlxsw_sp_mr_route4_key(mr_table, &mr_route->key, mfc);
 
 	/* Find min_mtu and link iVIF and eVIFs */
 	mr_route->min_mtu = ETH_MAX_MTU;
-	ipmr_cache_hold(mfc);
-	mr_route->mfc4 = mfc;
+	mr_cache_hold(mfc);
+	mr_route->mfc = mfc;
+	mr_table->ops->key_create(mr_table, &mr_route->key, mr_route->mfc);
+
 	mr_route->mr_table = mr_table;
 	for (i = 0; i < MAXVIFS; i++) {
 		if (mfc->mfc_un.res.ttls[i] != 255) {
@@ -374,59 +328,38 @@ mlxsw_sp_mr_route4_create(struct mlxsw_sp_mr_table *mr_table,
 				mr_route->min_mtu = mr_table->vifs[i].dev->mtu;
 		}
 	}
-	mlxsw_sp_mr_route_ivif_link(mr_route, &mr_table->vifs[mfc->mfc_parent]);
+	mlxsw_sp_mr_route_ivif_link(mr_route,
+				    &mr_table->vifs[mfc->mfc_parent]);
 
 	mr_route->route_action = mlxsw_sp_mr_route_action(mr_route);
 	return mr_route;
 err:
-	ipmr_cache_put(mfc);
+	mr_cache_put(mfc);
 	list_for_each_entry_safe(rve, tmp, &mr_route->evif_list, route_node)
 		mlxsw_sp_mr_route_evif_unlink(rve);
 	kfree(mr_route);
 	return ERR_PTR(err);
 }
 
-static void mlxsw_sp_mr_route4_destroy(struct mlxsw_sp_mr_table *mr_table,
-				       struct mlxsw_sp_mr_route *mr_route)
+static void mlxsw_sp_mr_route_destroy(struct mlxsw_sp_mr_table *mr_table,
+				      struct mlxsw_sp_mr_route *mr_route)
 {
 	struct mlxsw_sp_mr_route_vif_entry *rve, *tmp;
 
 	mlxsw_sp_mr_route_ivif_unlink(mr_route);
-	ipmr_cache_put(mr_route->mfc4);
+	mr_cache_put(mr_route->mfc);
 	list_for_each_entry_safe(rve, tmp, &mr_route->evif_list, route_node)
 		mlxsw_sp_mr_route_evif_unlink(rve);
 	kfree(mr_route);
 }
 
-static void mlxsw_sp_mr_route_destroy(struct mlxsw_sp_mr_table *mr_table,
-				      struct mlxsw_sp_mr_route *mr_route)
-{
-	switch (mr_table->proto) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		mlxsw_sp_mr_route4_destroy(mr_table, mr_route);
-		break;
-	case MLXSW_SP_L3_PROTO_IPV6:
-		/* fall through */
-	default:
-		WARN_ON_ONCE(1);
-	}
-}
-
 static void mlxsw_sp_mr_mfc_offload_set(struct mlxsw_sp_mr_route *mr_route,
 					bool offload)
 {
-	switch (mr_route->mr_table->proto) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		if (offload)
-			mr_route->mfc4->mfc_flags |= MFC_OFFLOAD;
-		else
-			mr_route->mfc4->mfc_flags &= ~MFC_OFFLOAD;
-		break;
-	case MLXSW_SP_L3_PROTO_IPV6:
-		/* fall through */
-	default:
-		WARN_ON_ONCE(1);
-	}
+	if (offload)
+		mr_route->mfc->mfc_flags |= MFC_OFFLOAD;
+	else
+		mr_route->mfc->mfc_flags &= ~MFC_OFFLOAD;
 }
 
 static void mlxsw_sp_mr_mfc_offload_update(struct mlxsw_sp_mr_route *mr_route)
@@ -440,33 +373,28 @@ static void mlxsw_sp_mr_mfc_offload_update(struct mlxsw_sp_mr_route *mr_route)
 static void __mlxsw_sp_mr_route_del(struct mlxsw_sp_mr_table *mr_table,
 				    struct mlxsw_sp_mr_route *mr_route)
 {
+	WARN_ON_ONCE(!mutex_is_locked(&mr_table->route_list_lock));
+
 	mlxsw_sp_mr_mfc_offload_set(mr_route, false);
-	mlxsw_sp_mr_route_erase(mr_table, mr_route);
 	rhashtable_remove_fast(&mr_table->route_ht, &mr_route->ht_node,
 			       mlxsw_sp_mr_route_ht_params);
 	list_del(&mr_route->node);
+	mlxsw_sp_mr_route_erase(mr_table, mr_route);
 	mlxsw_sp_mr_route_destroy(mr_table, mr_route);
 }
 
-int mlxsw_sp_mr_route4_add(struct mlxsw_sp_mr_table *mr_table,
-			   struct mfc_cache *mfc, bool replace)
+int mlxsw_sp_mr_route_add(struct mlxsw_sp_mr_table *mr_table,
+			  struct mr_mfc *mfc, bool replace)
 {
 	struct mlxsw_sp_mr_route *mr_orig_route = NULL;
 	struct mlxsw_sp_mr_route *mr_route;
 	int err;
 
-	/* If the route is a (*,*) route, abort, as these kind of routes are
-	 * used for proxy routes.
-	 */
-	if (mfc->mfc_origin == htonl(INADDR_ANY) &&
-	    mfc->mfc_mcastgrp == htonl(INADDR_ANY)) {
-		dev_warn(mr_table->mlxsw_sp->bus_info->dev,
-			 "Offloading proxy routes is not supported.\n");
+	if (!mr_table->ops->is_route_valid(mr_table, mfc))
 		return -EINVAL;
-	}
 
 	/* Create a new route */
-	mr_route = mlxsw_sp_mr_route4_create(mr_table, mfc);
+	mr_route = mlxsw_sp_mr_route_create(mr_table, mfc);
 	if (IS_ERR(mr_route))
 		return PTR_ERR(mr_route);
 
@@ -492,18 +420,20 @@ int mlxsw_sp_mr_route4_add(struct mlxsw_sp_mr_table *mr_table,
 		goto err_duplicate_route;
 	}
 
+	/* Write the route to the hardware */
+	err = mlxsw_sp_mr_route_write(mr_table, mr_route, replace);
+	if (err)
+		goto err_mr_route_write;
+
 	/* Put it in the table data-structures */
+	mutex_lock(&mr_table->route_list_lock);
 	list_add_tail(&mr_route->node, &mr_table->route_list);
+	mutex_unlock(&mr_table->route_list_lock);
 	err = rhashtable_insert_fast(&mr_table->route_ht,
 				     &mr_route->ht_node,
 				     mlxsw_sp_mr_route_ht_params);
 	if (err)
 		goto err_rhashtable_insert;
-
-	/* Write the route to the hardware */
-	err = mlxsw_sp_mr_route_write(mr_table, mr_route, replace);
-	if (err)
-		goto err_mr_route_write;
 
 	/* Destroy the original route */
 	if (replace) {
@@ -511,34 +441,38 @@ int mlxsw_sp_mr_route4_add(struct mlxsw_sp_mr_table *mr_table,
 				       &mr_orig_route->ht_node,
 				       mlxsw_sp_mr_route_ht_params);
 		list_del(&mr_orig_route->node);
-		mlxsw_sp_mr_route4_destroy(mr_table, mr_orig_route);
+		mlxsw_sp_mr_route_destroy(mr_table, mr_orig_route);
 	}
 
 	mlxsw_sp_mr_mfc_offload_update(mr_route);
 	return 0;
 
-err_mr_route_write:
-	rhashtable_remove_fast(&mr_table->route_ht, &mr_route->ht_node,
-			       mlxsw_sp_mr_route_ht_params);
 err_rhashtable_insert:
+	mutex_lock(&mr_table->route_list_lock);
 	list_del(&mr_route->node);
+	mutex_unlock(&mr_table->route_list_lock);
+	mlxsw_sp_mr_route_erase(mr_table, mr_route);
+err_mr_route_write:
 err_no_orig_route:
 err_duplicate_route:
-	mlxsw_sp_mr_route4_destroy(mr_table, mr_route);
+	mlxsw_sp_mr_route_destroy(mr_table, mr_route);
 	return err;
 }
 
-void mlxsw_sp_mr_route4_del(struct mlxsw_sp_mr_table *mr_table,
-			    struct mfc_cache *mfc)
+void mlxsw_sp_mr_route_del(struct mlxsw_sp_mr_table *mr_table,
+			   struct mr_mfc *mfc)
 {
 	struct mlxsw_sp_mr_route *mr_route;
 	struct mlxsw_sp_mr_route_key key;
 
-	mlxsw_sp_mr_route4_key(mr_table, &key, mfc);
+	mr_table->ops->key_create(mr_table, &key, mfc);
 	mr_route = rhashtable_lookup_fast(&mr_table->route_ht, &key,
 					  mlxsw_sp_mr_route_ht_params);
-	if (mr_route)
+	if (mr_route) {
+		mutex_lock(&mr_table->route_list_lock);
 		__mlxsw_sp_mr_route_del(mr_table, mr_route);
+		mutex_unlock(&mr_table->route_list_lock);
+	}
 }
 
 /* Should be called after the VIF struct is updated */
@@ -601,6 +535,16 @@ mlxsw_sp_mr_route_evif_resolve(struct mlxsw_sp_mr_table *mr_table,
 	u16 erif_index = 0;
 	int err;
 
+	/* Add the eRIF */
+	if (mlxsw_sp_mr_vif_valid(rve->mr_vif)) {
+		erif_index = mlxsw_sp_rif_index(rve->mr_vif->rif);
+		err = mr->mr_ops->route_erif_add(mlxsw_sp,
+						 rve->mr_route->route_priv,
+						 erif_index);
+		if (err)
+			return err;
+	}
+
 	/* Update the route action, as the new eVIF can be a tunnel or a pimreg
 	 * device which will require updating the action.
 	 */
@@ -610,17 +554,7 @@ mlxsw_sp_mr_route_evif_resolve(struct mlxsw_sp_mr_table *mr_table,
 						      rve->mr_route->route_priv,
 						      route_action);
 		if (err)
-			return err;
-	}
-
-	/* Add the eRIF */
-	if (mlxsw_sp_mr_vif_valid(rve->mr_vif)) {
-		erif_index = mlxsw_sp_rif_index(rve->mr_vif->rif);
-		err = mr->mr_ops->route_erif_add(mlxsw_sp,
-						 rve->mr_route->route_priv,
-						 erif_index);
-		if (err)
-			goto err_route_erif_add;
+			goto err_route_action_update;
 	}
 
 	/* Update the minimum MTU */
@@ -638,14 +572,14 @@ mlxsw_sp_mr_route_evif_resolve(struct mlxsw_sp_mr_table *mr_table,
 	return 0;
 
 err_route_min_mtu_update:
-	if (mlxsw_sp_mr_vif_valid(rve->mr_vif))
-		mr->mr_ops->route_erif_del(mlxsw_sp, rve->mr_route->route_priv,
-					   erif_index);
-err_route_erif_add:
 	if (route_action != rve->mr_route->route_action)
 		mr->mr_ops->route_action_update(mlxsw_sp,
 						rve->mr_route->route_priv,
 						rve->mr_route->route_action);
+err_route_action_update:
+	if (mlxsw_sp_mr_vif_valid(rve->mr_vif))
+		mr->mr_ops->route_erif_del(mlxsw_sp, rve->mr_route->route_priv,
+					   erif_index);
 	return err;
 }
 
@@ -714,12 +648,12 @@ static int mlxsw_sp_mr_vif_resolve(struct mlxsw_sp_mr_table *mr_table,
 	return 0;
 
 err_erif_unresolve:
-	list_for_each_entry_from_reverse(erve, &mr_vif->route_evif_list,
-					 vif_node)
+	list_for_each_entry_continue_reverse(erve, &mr_vif->route_evif_list,
+					     vif_node)
 		mlxsw_sp_mr_route_evif_unresolve(mr_table, erve);
 err_irif_unresolve:
-	list_for_each_entry_from_reverse(irve, &mr_vif->route_ivif_list,
-					 vif_node)
+	list_for_each_entry_continue_reverse(irve, &mr_vif->route_ivif_list,
+					     vif_node)
 		mlxsw_sp_mr_route_ivif_unresolve(mr_table, irve);
 	mr_vif->rif = NULL;
 	return err;
@@ -770,12 +704,12 @@ void mlxsw_sp_mr_vif_del(struct mlxsw_sp_mr_table *mr_table, vifi_t vif_index)
 
 static struct mlxsw_sp_mr_vif *
 mlxsw_sp_mr_dev_vif_lookup(struct mlxsw_sp_mr_table *mr_table,
-			   const struct net_device *dev)
+			   const struct mlxsw_sp_rif *rif)
 {
 	vifi_t vif_index;
 
 	for (vif_index = 0; vif_index < MAXVIFS; vif_index++)
-		if (mr_table->vifs[vif_index].dev == dev)
+		if (mlxsw_sp_rif_dev_is(rif, mr_table->vifs[vif_index].dev))
 			return &mr_table->vifs[vif_index];
 	return NULL;
 }
@@ -783,13 +717,12 @@ mlxsw_sp_mr_dev_vif_lookup(struct mlxsw_sp_mr_table *mr_table,
 int mlxsw_sp_mr_rif_add(struct mlxsw_sp_mr_table *mr_table,
 			const struct mlxsw_sp_rif *rif)
 {
-	const struct net_device *rif_dev = mlxsw_sp_rif_dev(rif);
 	struct mlxsw_sp_mr_vif *mr_vif;
 
-	if (!rif_dev)
+	if (!mlxsw_sp_rif_has_dev(rif))
 		return 0;
 
-	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif_dev);
+	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif);
 	if (!mr_vif)
 		return 0;
 	return mlxsw_sp_mr_vif_resolve(mr_table, mr_vif->dev, mr_vif,
@@ -799,13 +732,12 @@ int mlxsw_sp_mr_rif_add(struct mlxsw_sp_mr_table *mr_table,
 void mlxsw_sp_mr_rif_del(struct mlxsw_sp_mr_table *mr_table,
 			 const struct mlxsw_sp_rif *rif)
 {
-	const struct net_device *rif_dev = mlxsw_sp_rif_dev(rif);
 	struct mlxsw_sp_mr_vif *mr_vif;
 
-	if (!rif_dev)
+	if (!mlxsw_sp_rif_has_dev(rif))
 		return;
 
-	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif_dev);
+	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif);
 	if (!mr_vif)
 		return;
 	mlxsw_sp_mr_vif_unresolve(mr_table, mr_vif->dev, mr_vif);
@@ -814,17 +746,16 @@ void mlxsw_sp_mr_rif_del(struct mlxsw_sp_mr_table *mr_table,
 void mlxsw_sp_mr_rif_mtu_update(struct mlxsw_sp_mr_table *mr_table,
 				const struct mlxsw_sp_rif *rif, int mtu)
 {
-	const struct net_device *rif_dev = mlxsw_sp_rif_dev(rif);
 	struct mlxsw_sp *mlxsw_sp = mr_table->mlxsw_sp;
 	struct mlxsw_sp_mr_route_vif_entry *rve;
 	struct mlxsw_sp_mr *mr = mlxsw_sp->mr;
 	struct mlxsw_sp_mr_vif *mr_vif;
 
-	if (!rif_dev)
+	if (!mlxsw_sp_rif_has_dev(rif))
 		return;
 
 	/* Search for a VIF that use that RIF */
-	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif_dev);
+	mr_vif = mlxsw_sp_mr_dev_vif_lookup(mr_table, rif);
 	if (!mr_vif)
 		return;
 
@@ -839,6 +770,125 @@ void mlxsw_sp_mr_rif_mtu_update(struct mlxsw_sp_mr_table *mr_table,
 	}
 }
 
+/* Protocol specific functions */
+static bool
+mlxsw_sp_mr_route4_validate(const struct mlxsw_sp_mr_table *mr_table,
+			    const struct mr_mfc *c)
+{
+	struct mfc_cache *mfc = (struct mfc_cache *) c;
+
+	/* If the route is a (*,*) route, abort, as these kind of routes are
+	 * used for proxy routes.
+	 */
+	if (mfc->mfc_origin == htonl(INADDR_ANY) &&
+	    mfc->mfc_mcastgrp == htonl(INADDR_ANY)) {
+		dev_warn(mr_table->mlxsw_sp->bus_info->dev,
+			 "Offloading proxy routes is not supported.\n");
+		return false;
+	}
+	return true;
+}
+
+static void mlxsw_sp_mr_route4_key(struct mlxsw_sp_mr_table *mr_table,
+				   struct mlxsw_sp_mr_route_key *key,
+				   struct mr_mfc *c)
+{
+	const struct mfc_cache *mfc = (struct mfc_cache *) c;
+	bool starg;
+
+	starg = (mfc->mfc_origin == htonl(INADDR_ANY));
+
+	memset(key, 0, sizeof(*key));
+	key->vrid = mr_table->vr_id;
+	key->proto = MLXSW_SP_L3_PROTO_IPV4;
+	key->group.addr4 = mfc->mfc_mcastgrp;
+	key->group_mask.addr4 = htonl(0xffffffff);
+	key->source.addr4 = mfc->mfc_origin;
+	key->source_mask.addr4 = htonl(starg ? 0 : 0xffffffff);
+}
+
+static bool mlxsw_sp_mr_route4_starg(const struct mlxsw_sp_mr_table *mr_table,
+				     const struct mlxsw_sp_mr_route *mr_route)
+{
+	return mr_route->key.source_mask.addr4 == htonl(INADDR_ANY);
+}
+
+static bool mlxsw_sp_mr_vif4_is_regular(const struct mlxsw_sp_mr_vif *vif)
+{
+	return !(vif->vif_flags & (VIFF_TUNNEL | VIFF_REGISTER));
+}
+
+static bool
+mlxsw_sp_mr_route6_validate(const struct mlxsw_sp_mr_table *mr_table,
+			    const struct mr_mfc *c)
+{
+	struct mfc6_cache *mfc = (struct mfc6_cache *) c;
+
+	/* If the route is a (*,*) route, abort, as these kind of routes are
+	 * used for proxy routes.
+	 */
+	if (ipv6_addr_any(&mfc->mf6c_origin) &&
+	    ipv6_addr_any(&mfc->mf6c_mcastgrp)) {
+		dev_warn(mr_table->mlxsw_sp->bus_info->dev,
+			 "Offloading proxy routes is not supported.\n");
+		return false;
+	}
+	return true;
+}
+
+static void mlxsw_sp_mr_route6_key(struct mlxsw_sp_mr_table *mr_table,
+				   struct mlxsw_sp_mr_route_key *key,
+				   struct mr_mfc *c)
+{
+	const struct mfc6_cache *mfc = (struct mfc6_cache *) c;
+
+	memset(key, 0, sizeof(*key));
+	key->vrid = mr_table->vr_id;
+	key->proto = MLXSW_SP_L3_PROTO_IPV6;
+	key->group.addr6 = mfc->mf6c_mcastgrp;
+	memset(&key->group_mask.addr6, 0xff, sizeof(key->group_mask.addr6));
+	key->source.addr6 = mfc->mf6c_origin;
+	if (!ipv6_addr_any(&mfc->mf6c_origin))
+		memset(&key->source_mask.addr6, 0xff,
+		       sizeof(key->source_mask.addr6));
+}
+
+static bool mlxsw_sp_mr_route6_starg(const struct mlxsw_sp_mr_table *mr_table,
+				     const struct mlxsw_sp_mr_route *mr_route)
+{
+	return ipv6_addr_any(&mr_route->key.source_mask.addr6);
+}
+
+static bool mlxsw_sp_mr_vif6_is_regular(const struct mlxsw_sp_mr_vif *vif)
+{
+	return !(vif->vif_flags & MIFF_REGISTER);
+}
+
+static struct
+mlxsw_sp_mr_vif_ops mlxsw_sp_mr_vif_ops_arr[] = {
+	{
+		.is_regular = mlxsw_sp_mr_vif4_is_regular,
+	},
+	{
+		.is_regular = mlxsw_sp_mr_vif6_is_regular,
+	},
+};
+
+static struct
+mlxsw_sp_mr_table_ops mlxsw_sp_mr_table_ops_arr[] = {
+	{
+		.is_route_valid = mlxsw_sp_mr_route4_validate,
+		.key_create = mlxsw_sp_mr_route4_key,
+		.is_route_starg = mlxsw_sp_mr_route4_starg,
+	},
+	{
+		.is_route_valid = mlxsw_sp_mr_route6_validate,
+		.key_create = mlxsw_sp_mr_route6_key,
+		.is_route_starg = mlxsw_sp_mr_route6_starg,
+	},
+
+};
+
 struct mlxsw_sp_mr_table *mlxsw_sp_mr_table_create(struct mlxsw_sp *mlxsw_sp,
 						   u32 vr_id,
 						   enum mlxsw_sp_l3proto proto)
@@ -847,6 +897,7 @@ struct mlxsw_sp_mr_table *mlxsw_sp_mr_table_create(struct mlxsw_sp *mlxsw_sp,
 		.prio = MLXSW_SP_MR_ROUTE_PRIO_CATCHALL,
 		.key = {
 			.vrid = vr_id,
+			.proto = proto,
 		},
 		.value = {
 			.route_action = MLXSW_SP_MR_ROUTE_ACTION_TRAP,
@@ -865,7 +916,9 @@ struct mlxsw_sp_mr_table *mlxsw_sp_mr_table_create(struct mlxsw_sp *mlxsw_sp,
 	mr_table->vr_id = vr_id;
 	mr_table->mlxsw_sp = mlxsw_sp;
 	mr_table->proto = proto;
+	mr_table->ops = &mlxsw_sp_mr_table_ops_arr[proto];
 	INIT_LIST_HEAD(&mr_table->route_list);
+	mutex_init(&mr_table->route_list_lock);
 
 	err = rhashtable_init(&mr_table->route_ht,
 			      &mlxsw_sp_mr_route_ht_params);
@@ -875,6 +928,7 @@ struct mlxsw_sp_mr_table *mlxsw_sp_mr_table_create(struct mlxsw_sp *mlxsw_sp,
 	for (i = 0; i < MAXVIFS; i++) {
 		INIT_LIST_HEAD(&mr_table->vifs[i].route_evif_list);
 		INIT_LIST_HEAD(&mr_table->vifs[i].route_ivif_list);
+		mr_table->vifs[i].ops = &mlxsw_sp_mr_vif_ops_arr[proto];
 	}
 
 	err = mr->mr_ops->route_create(mlxsw_sp, mr->priv,
@@ -882,12 +936,15 @@ struct mlxsw_sp_mr_table *mlxsw_sp_mr_table_create(struct mlxsw_sp *mlxsw_sp,
 				       &catchall_route_params);
 	if (err)
 		goto err_ops_route_create;
+	mutex_lock(&mr->table_list_lock);
 	list_add_tail(&mr_table->node, &mr->table_list);
+	mutex_unlock(&mr->table_list_lock);
 	return mr_table;
 
 err_ops_route_create:
 	rhashtable_destroy(&mr_table->route_ht);
 err_route_rhashtable_init:
+	mutex_destroy(&mr_table->route_list_lock);
 	kfree(mr_table);
 	return ERR_PTR(err);
 }
@@ -898,10 +955,13 @@ void mlxsw_sp_mr_table_destroy(struct mlxsw_sp_mr_table *mr_table)
 	struct mlxsw_sp_mr *mr = mlxsw_sp->mr;
 
 	WARN_ON(!mlxsw_sp_mr_table_empty(mr_table));
+	mutex_lock(&mr->table_list_lock);
 	list_del(&mr_table->node);
+	mutex_unlock(&mr->table_list_lock);
 	mr->mr_ops->route_destroy(mlxsw_sp, mr->priv,
 				  &mr_table->catchall_route_priv);
 	rhashtable_destroy(&mr_table->route_ht);
+	mutex_destroy(&mr_table->route_list_lock);
 	kfree(mr_table);
 }
 
@@ -910,8 +970,10 @@ void mlxsw_sp_mr_table_flush(struct mlxsw_sp_mr_table *mr_table)
 	struct mlxsw_sp_mr_route *mr_route, *tmp;
 	int i;
 
+	mutex_lock(&mr_table->route_list_lock);
 	list_for_each_entry_safe(mr_route, tmp, &mr_table->route_list, node)
 		__mlxsw_sp_mr_route_del(mr_table, mr_route);
+	mutex_unlock(&mr_table->route_list_lock);
 
 	for (i = 0; i < MAXVIFS; i++) {
 		mr_table->vifs[i].dev = NULL;
@@ -941,18 +1003,10 @@ static void mlxsw_sp_mr_route_stats_update(struct mlxsw_sp *mlxsw_sp,
 	mr->mr_ops->route_stats(mlxsw_sp, mr_route->route_priv, &packets,
 				&bytes);
 
-	switch (mr_route->mr_table->proto) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		if (mr_route->mfc4->mfc_un.res.pkt != packets)
-			mr_route->mfc4->mfc_un.res.lastuse = jiffies;
-		mr_route->mfc4->mfc_un.res.pkt = packets;
-		mr_route->mfc4->mfc_un.res.bytes = bytes;
-		break;
-	case MLXSW_SP_L3_PROTO_IPV6:
-		/* fall through */
-	default:
-		WARN_ON_ONCE(1);
-	}
+	if (mr_route->mfc->mfc_un.res.pkt != packets)
+		mr_route->mfc->mfc_un.res.lastuse = jiffies;
+	mr_route->mfc->mfc_un.res.pkt = packets;
+	mr_route->mfc->mfc_un.res.bytes = bytes;
 }
 
 static void mlxsw_sp_mr_stats_update(struct work_struct *work)
@@ -963,12 +1017,15 @@ static void mlxsw_sp_mr_stats_update(struct work_struct *work)
 	struct mlxsw_sp_mr_route *mr_route;
 	unsigned long interval;
 
-	rtnl_lock();
-	list_for_each_entry(mr_table, &mr->table_list, node)
+	mutex_lock(&mr->table_list_lock);
+	list_for_each_entry(mr_table, &mr->table_list, node) {
+		mutex_lock(&mr_table->route_list_lock);
 		list_for_each_entry(mr_route, &mr_table->route_list, node)
 			mlxsw_sp_mr_route_stats_update(mr_table->mlxsw_sp,
 						       mr_route);
-	rtnl_unlock();
+		mutex_unlock(&mr_table->route_list_lock);
+	}
+	mutex_unlock(&mr->table_list_lock);
 
 	interval = msecs_to_jiffies(MLXSW_SP_MR_ROUTES_COUNTER_UPDATE_INTERVAL);
 	mlxsw_core_schedule_dw(&mr->stats_update_dw, interval);
@@ -987,6 +1044,7 @@ int mlxsw_sp_mr_init(struct mlxsw_sp *mlxsw_sp,
 	mr->mr_ops = mr_ops;
 	mlxsw_sp->mr = mr;
 	INIT_LIST_HEAD(&mr->table_list);
+	mutex_init(&mr->table_list_lock);
 
 	err = mr_ops->init(mlxsw_sp, mr->priv);
 	if (err)
@@ -998,6 +1056,7 @@ int mlxsw_sp_mr_init(struct mlxsw_sp *mlxsw_sp,
 	mlxsw_core_schedule_dw(&mr->stats_update_dw, interval);
 	return 0;
 err:
+	mutex_destroy(&mr->table_list_lock);
 	kfree(mr);
 	return err;
 }
@@ -1007,6 +1066,7 @@ void mlxsw_sp_mr_fini(struct mlxsw_sp *mlxsw_sp)
 	struct mlxsw_sp_mr *mr = mlxsw_sp->mr;
 
 	cancel_delayed_work_sync(&mr->stats_update_dw);
-	mr->mr_ops->fini(mr->priv);
+	mr->mr_ops->fini(mlxsw_sp, mr->priv);
+	mutex_destroy(&mr->table_list_lock);
 	kfree(mr);
 }

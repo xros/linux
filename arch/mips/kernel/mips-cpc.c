@@ -1,15 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2013 Imagination Technologies
  * Author: Paul Burton <paul.burton@mips.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
+#include <linux/bitfield.h>
 #include <linux/errno.h>
 #include <linux/percpu.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/spinlock.h>
 
 #include <asm/mips-cps.h>
@@ -22,6 +21,18 @@ static DEFINE_PER_CPU_ALIGNED(unsigned long, cpc_core_lock_flags);
 
 phys_addr_t __weak mips_cpc_default_phys_base(void)
 {
+	struct device_node *cpc_node;
+	struct resource res;
+	int err;
+
+	cpc_node = of_find_compatible_node(of_root, NULL, "mti,mips-cpc");
+	if (cpc_node) {
+		err = of_address_to_resource(cpc_node, 0, &res);
+		of_node_put(cpc_node);
+		if (!err)
+			return res.start;
+	}
+
 	return 0;
 }
 
@@ -69,7 +80,7 @@ int mips_cpc_probe(void)
 	if (!addr)
 		return -ENODEV;
 
-	mips_cpc_base = ioremap_nocache(addr, 0x8000);
+	mips_cpc_base = ioremap(addr, 0x8000);
 	if (!mips_cpc_base)
 		return -ENXIO;
 
@@ -88,7 +99,7 @@ void mips_cpc_lock_other(unsigned int core)
 	curr_core = cpu_core(&current_cpu_data);
 	spin_lock_irqsave(&per_cpu(cpc_core_lock, curr_core),
 			  per_cpu(cpc_core_lock_flags, curr_core));
-	write_cpc_cl_other(core << __ffs(CPC_Cx_OTHER_CORENUM));
+	write_cpc_cl_other(FIELD_PREP(CPC_Cx_OTHER_CORENUM, core));
 
 	/*
 	 * Ensure the core-other region reflects the appropriate core &

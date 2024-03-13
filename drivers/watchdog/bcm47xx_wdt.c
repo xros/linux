@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Watchdog driver for Broadcom BCM47XX
  *
@@ -5,10 +6,6 @@
  *  Copyright (C) 2009 Matthieu CASTET <castet.matthieu@free.fr>
  *  Copyright (C) 2012-2013 Hauke Mehrtens <hauke@hauke-m.de>
  *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -205,7 +202,7 @@ static int bcm47xx_wdt_probe(struct platform_device *pdev)
 	watchdog_set_restart_priority(&wdt->wdd, 64);
 	watchdog_stop_on_reboot(&wdt->wdd);
 
-	ret = watchdog_register_device(&wdt->wdd);
+	ret = devm_watchdog_register_device(&pdev->dev, &wdt->wdd);
 	if (ret)
 		goto err_timer;
 
@@ -221,21 +218,11 @@ err_timer:
 	return ret;
 }
 
-static int bcm47xx_wdt_remove(struct platform_device *pdev)
-{
-	struct bcm47xx_wdt *wdt = dev_get_platdata(&pdev->dev);
-
-	watchdog_unregister_device(&wdt->wdd);
-
-	return 0;
-}
-
 static struct platform_driver bcm47xx_wdt_driver = {
 	.driver		= {
 		.name	= "bcm47xx-wdt",
 	},
 	.probe		= bcm47xx_wdt_probe,
-	.remove		= bcm47xx_wdt_remove,
 };
 
 module_platform_driver(bcm47xx_wdt_driver);

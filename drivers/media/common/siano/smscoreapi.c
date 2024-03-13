@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Siano core API module
  *
@@ -6,15 +7,6 @@
  *  author: Uri Shkolnik
  *
  *  Copyright (c), 2005-2008 Siano Mobile Silicon, Inc.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation;
- *
- *  Software distributed under the License is distributed on an "AS IS"
- *  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied.
- *
- *  See the GNU General Public License for more details.
  */
 
 #include "smscoreapi.h"
@@ -238,8 +230,8 @@ static char *siano_msgs[] = {
 	[MSG_SMS_FLASH_DL_REQ                        - MSG_TYPE_BASE_VAL] = "MSG_SMS_FLASH_DL_REQ",
 	[MSG_SMS_EXEC_TEST_1_REQ                     - MSG_TYPE_BASE_VAL] = "MSG_SMS_EXEC_TEST_1_REQ",
 	[MSG_SMS_EXEC_TEST_1_RES                     - MSG_TYPE_BASE_VAL] = "MSG_SMS_EXEC_TEST_1_RES",
-	[MSG_SMS_ENBALE_TS_INTERFACE_REQ             - MSG_TYPE_BASE_VAL] = "MSG_SMS_ENBALE_TS_INTERFACE_REQ",
-	[MSG_SMS_ENBALE_TS_INTERFACE_RES             - MSG_TYPE_BASE_VAL] = "MSG_SMS_ENBALE_TS_INTERFACE_RES",
+	[MSG_SMS_ENABLE_TS_INTERFACE_REQ             - MSG_TYPE_BASE_VAL] = "MSG_SMS_ENABLE_TS_INTERFACE_REQ",
+	[MSG_SMS_ENABLE_TS_INTERFACE_RES             - MSG_TYPE_BASE_VAL] = "MSG_SMS_ENABLE_TS_INTERFACE_RES",
 	[MSG_SMS_SPI_SET_BUS_WIDTH_REQ               - MSG_TYPE_BASE_VAL] = "MSG_SMS_SPI_SET_BUS_WIDTH_REQ",
 	[MSG_SMS_SPI_SET_BUS_WIDTH_RES               - MSG_TYPE_BASE_VAL] = "MSG_SMS_SPI_SET_BUS_WIDTH_RES",
 	[MSG_SMS_SEND_EMM_REQ                        - MSG_TYPE_BASE_VAL] = "MSG_SMS_SEND_EMM_REQ",
@@ -415,17 +407,17 @@ EXPORT_SYMBOL_GPL(smscore_get_board_id);
 
 struct smscore_registry_entry_t {
 	struct list_head entry;
-	char			devpath[32];
-	int				mode;
+	char devpath[32];
+	int mode;
 	enum sms_device_type_st	type;
 };
 
 static struct list_head g_smscore_notifyees;
 static struct list_head g_smscore_devices;
-static struct mutex g_smscore_deviceslock;
+static DEFINE_MUTEX(g_smscore_deviceslock);
 
 static struct list_head g_smscore_registry;
-static struct mutex g_smscore_registrylock;
+static DEFINE_MUTEX(g_smscore_registrylock);
 
 static int default_mode = DEVICE_MODE_NONE;
 
@@ -437,24 +429,24 @@ static struct smscore_registry_entry_t *smscore_find_registry(char *devpath)
 	struct smscore_registry_entry_t *entry;
 	struct list_head *next;
 
-	kmutex_lock(&g_smscore_registrylock);
+	mutex_lock(&g_smscore_registrylock);
 	for (next = g_smscore_registry.next;
 	     next != &g_smscore_registry;
 	     next = next->next) {
 		entry = (struct smscore_registry_entry_t *) next;
-		if (!strcmp(entry->devpath, devpath)) {
-			kmutex_unlock(&g_smscore_registrylock);
+		if (!strncmp(entry->devpath, devpath, sizeof(entry->devpath))) {
+			mutex_unlock(&g_smscore_registrylock);
 			return entry;
 		}
 	}
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (entry) {
 		entry->mode = default_mode;
-		strcpy(entry->devpath, devpath);
+		strscpy(entry->devpath, devpath, sizeof(entry->devpath));
 		list_add(&entry->entry, &g_smscore_registry);
 	} else
 		pr_err("failed to create smscore_registry.\n");
-	kmutex_unlock(&g_smscore_registrylock);
+	mutex_unlock(&g_smscore_registrylock);
 	return entry;
 }
 
@@ -535,7 +527,7 @@ int smscore_register_hotplug(hotplug_t hotplug)
 	struct list_head *next, *first;
 	int rc = 0;
 
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 	notifyee = kmalloc(sizeof(*notifyee), GFP_KERNEL);
 	if (notifyee) {
 		/* now notify callback about existing devices */
@@ -556,7 +548,7 @@ int smscore_register_hotplug(hotplug_t hotplug)
 	} else
 		rc = -ENOMEM;
 
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 
 	return rc;
 }
@@ -572,7 +564,7 @@ void smscore_unregister_hotplug(hotplug_t hotplug)
 {
 	struct list_head *next, *first;
 
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 
 	first = &g_smscore_notifyees;
 
@@ -587,7 +579,7 @@ void smscore_unregister_hotplug(hotplug_t hotplug)
 		}
 	}
 
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 }
 EXPORT_SYMBOL_GPL(smscore_unregister_hotplug);
 
@@ -631,7 +623,8 @@ smscore_buffer_t *smscore_createbuffer(u8 *buffer, void *common_buffer,
 
 	cb->p = buffer;
 	cb->offset_in_common = buffer - (u8 *) common_buffer;
-	cb->phys = common_buffer_phys + cb->offset_in_common;
+	if (common_buffer_phys)
+		cb->phys = common_buffer_phys + cb->offset_in_common;
 
 	return cb;
 }
@@ -648,6 +641,7 @@ smscore_buffer_t *smscore_createbuffer(u8 *buffer, void *common_buffer,
  */
 int smscore_register_device(struct smsdevice_params_t *params,
 			    struct smscore_device_t **coredev,
+			    gfp_t gfp_buf_flags,
 			    void *mdev)
 {
 	struct smscore_device_t *dev;
@@ -660,6 +654,7 @@ int smscore_register_device(struct smsdevice_params_t *params,
 #ifdef CONFIG_MEDIA_CONTROLLER_DVB
 	dev->media_dev = mdev;
 #endif
+	dev->gfp_buf_flags = gfp_buf_flags;
 
 	/* init list entry so it could be safe in smscore_unregister_device */
 	INIT_LIST_HEAD(&dev->entry);
@@ -690,17 +685,21 @@ int smscore_register_device(struct smsdevice_params_t *params,
 
 	/* alloc common buffer */
 	dev->common_buffer_size = params->buffer_size * params->num_buffers;
-	dev->common_buffer = dma_alloc_coherent(NULL, dev->common_buffer_size,
-						&dev->common_buffer_phys,
-						GFP_KERNEL | GFP_DMA);
-	if (!dev->common_buffer) {
+	if (params->usb_device)
+		buffer = kzalloc(dev->common_buffer_size, GFP_KERNEL);
+	else
+		buffer = dma_alloc_coherent(params->device,
+					    dev->common_buffer_size,
+					    &dev->common_buffer_phys,
+					    GFP_KERNEL | dev->gfp_buf_flags);
+	if (!buffer) {
 		smscore_unregister_device(dev);
 		return -ENOMEM;
 	}
+	dev->common_buffer = buffer;
 
 	/* prepare dma buffers */
-	for (buffer = dev->common_buffer;
-	     dev->num_buffers < params->num_buffers;
+	for (; dev->num_buffers < params->num_buffers;
 	     dev->num_buffers++, buffer += params->buffer_size) {
 		struct smscore_buffer_t *cb;
 
@@ -720,6 +719,7 @@ int smscore_register_device(struct smsdevice_params_t *params,
 	dev->board_id = SMS_BOARD_UNKNOWN;
 	dev->context = params->context;
 	dev->device = params->device;
+	dev->usb_device = params->usb_device;
 	dev->setmode_handler = params->setmode_handler;
 	dev->detectmode_handler = params->detectmode_handler;
 	dev->sendrequest_handler = params->sendrequest_handler;
@@ -727,14 +727,14 @@ int smscore_register_device(struct smsdevice_params_t *params,
 	dev->postload_handler = params->postload_handler;
 
 	dev->device_flags = params->flags;
-	strcpy(dev->devpath, params->devpath);
+	strscpy(dev->devpath, params->devpath, sizeof(dev->devpath));
 
 	smscore_registry_settype(dev->devpath, params->device_type);
 
 	/* add device to devices list */
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 	list_add(&dev->entry, &g_smscore_devices);
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 
 	*coredev = dev;
 
@@ -786,7 +786,7 @@ static int smscore_init_ir(struct smscore_device_t *coredev)
 		else {
 			buffer = kmalloc(sizeof(struct sms_msg_data2) +
 						SMS_DMA_ALIGNMENT,
-						GFP_KERNEL | GFP_DMA);
+						GFP_KERNEL | coredev->gfp_buf_flags);
 			if (buffer) {
 				struct sms_msg_data2 *msg =
 				(struct sms_msg_data2 *)
@@ -890,14 +890,14 @@ int smscore_start_device(struct smscore_device_t *coredev)
 		return rc;
 	}
 
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 
 	rc = smscore_notify_callbacks(coredev, coredev->device, 1);
 	smscore_init_ir(coredev);
 
 	pr_debug("device %p started, rc %d\n", coredev, rc);
 
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 
 	return rc;
 }
@@ -908,7 +908,7 @@ static int smscore_load_firmware_family2(struct smscore_device_t *coredev,
 					 void *buffer, size_t size)
 {
 	struct sms_firmware *firmware = (struct sms_firmware *) buffer;
-	struct sms_msg_data4 *msg;
+	struct sms_msg_data5 *msg;
 	u32 mem_address,  calc_checksum = 0;
 	u32 i, *ptr;
 	u8 *payload = firmware->payload;
@@ -927,7 +927,7 @@ static int smscore_load_firmware_family2(struct smscore_device_t *coredev,
 	}
 
 	/* PAGE_SIZE buffer shall be enough and dma aligned */
-	msg = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
+	msg = kmalloc(PAGE_SIZE, GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!msg)
 		return -ENOMEM;
 
@@ -989,24 +989,20 @@ static int smscore_load_firmware_family2(struct smscore_device_t *coredev,
 		goto exit_fw_download;
 
 	if (coredev->mode == DEVICE_MODE_NONE) {
-		struct sms_msg_data *trigger_msg =
-			(struct sms_msg_data *) msg;
-
 		pr_debug("sending MSG_SMS_SWDOWNLOAD_TRIGGER_REQ\n");
 		SMS_INIT_MSG(&msg->x_msg_header,
 				MSG_SMS_SWDOWNLOAD_TRIGGER_REQ,
-				sizeof(struct sms_msg_hdr) +
-				sizeof(u32) * 5);
+				sizeof(*msg));
 
-		trigger_msg->msg_data[0] = firmware->start_address;
+		msg->msg_data[0] = firmware->start_address;
 					/* Entry point */
-		trigger_msg->msg_data[1] = 6; /* Priority */
-		trigger_msg->msg_data[2] = 0x200; /* Stack size */
-		trigger_msg->msg_data[3] = 0; /* Parameter */
-		trigger_msg->msg_data[4] = 4; /* Task ID */
+		msg->msg_data[1] = 6; /* Priority */
+		msg->msg_data[2] = 0x200; /* Stack size */
+		msg->msg_data[3] = 0; /* Parameter */
+		msg->msg_data[4] = 4; /* Task ID */
 
-		rc = smscore_sendrequest_and_wait(coredev, trigger_msg,
-					trigger_msg->x_msg_header.msg_length,
+		rc = smscore_sendrequest_and_wait(coredev, msg,
+					msg->x_msg_header.msg_length,
 					&coredev->trigger_done);
 	} else {
 		SMS_INIT_MSG(&msg->x_msg_header, MSG_SW_RELOAD_EXEC_REQ,
@@ -1162,7 +1158,7 @@ static int smscore_load_firmware_from_file(struct smscore_device_t *coredev,
 	}
 	pr_debug("read fw %s, buffer size=0x%zx\n", fw_filename, fw->size);
 	fw_buf = kmalloc(ALIGN(fw->size + sizeof(struct sms_firmware),
-			 SMS_ALLOC_ALIGNMENT), GFP_KERNEL | GFP_DMA);
+			 SMS_ALLOC_ALIGNMENT), GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!fw_buf) {
 		pr_err("failed to allocate firmware buffer\n");
 		rc = -ENOMEM;
@@ -1197,7 +1193,7 @@ void smscore_unregister_device(struct smscore_device_t *coredev)
 	int num_buffers = 0;
 	int retry = 0;
 
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 
 	/* Release input device (IR) resources */
 	sms_ir_exit(coredev);
@@ -1224,23 +1220,28 @@ void smscore_unregister_device(struct smscore_device_t *coredev)
 
 		pr_debug("waiting for %d buffer(s)\n",
 			 coredev->num_buffers - num_buffers);
-		kmutex_unlock(&g_smscore_deviceslock);
+		mutex_unlock(&g_smscore_deviceslock);
 		msleep(100);
-		kmutex_lock(&g_smscore_deviceslock);
+		mutex_lock(&g_smscore_deviceslock);
 	}
 
 	pr_debug("freed %d buffers\n", num_buffers);
 
-	if (coredev->common_buffer)
-		dma_free_coherent(NULL, coredev->common_buffer_size,
-			coredev->common_buffer, coredev->common_buffer_phys);
-
+	if (coredev->common_buffer) {
+		if (coredev->usb_device)
+			kfree(coredev->common_buffer);
+		else
+			dma_free_coherent(coredev->device,
+					  coredev->common_buffer_size,
+					  coredev->common_buffer,
+					  coredev->common_buffer_phys);
+	}
 	kfree(coredev->fw_buf);
 
 	list_del(&coredev->entry);
 	kfree(coredev);
 
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 
 	pr_debug("device %p destroyed\n", coredev);
 }
@@ -1249,7 +1250,7 @@ EXPORT_SYMBOL_GPL(smscore_unregister_device);
 static int smscore_detect_mode(struct smscore_device_t *coredev)
 {
 	void *buffer = kmalloc(sizeof(struct sms_msg_hdr) + SMS_DMA_ALIGNMENT,
-			       GFP_KERNEL | GFP_DMA);
+			       GFP_KERNEL | coredev->gfp_buf_flags);
 	struct sms_msg_hdr *msg =
 		(struct sms_msg_hdr *) SMS_ALIGN_ADDRESS(buffer);
 	int rc;
@@ -1298,7 +1299,7 @@ static int smscore_init_device(struct smscore_device_t *coredev, int mode)
 	int rc = 0;
 
 	buffer = kmalloc(sizeof(struct sms_msg_data) +
-			SMS_DMA_ALIGNMENT, GFP_KERNEL | GFP_DMA);
+			SMS_DMA_ALIGNMENT, GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -1387,7 +1388,7 @@ int smscore_set_device_mode(struct smscore_device_t *coredev, int mode)
 		coredev->device_flags &= ~SMS_DEVICE_NOT_READY;
 
 		buffer = kmalloc(sizeof(struct sms_msg_data) +
-				 SMS_DMA_ALIGNMENT, GFP_KERNEL | GFP_DMA);
+				 SMS_DMA_ALIGNMENT, GFP_KERNEL | coredev->gfp_buf_flags);
 		if (buffer) {
 			struct sms_msg_data *msg = (struct sms_msg_data *) SMS_ALIGN_ADDRESS(buffer);
 
@@ -1960,7 +1961,7 @@ int smscore_gpio_configure(struct smscore_device_t *coredev, u8 pin_num,
 	total_len = sizeof(struct sms_msg_hdr) + (sizeof(u32) * 6);
 
 	buffer = kmalloc(total_len + SMS_DMA_ALIGNMENT,
-			GFP_KERNEL | GFP_DMA);
+			GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -2032,7 +2033,7 @@ int smscore_gpio_set_level(struct smscore_device_t *coredev, u8 pin_num,
 			(3 * sizeof(u32)); /* keep it 3 ! */
 
 	buffer = kmalloc(total_len + SMS_DMA_ALIGNMENT,
-			GFP_KERNEL | GFP_DMA);
+			GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -2080,7 +2081,7 @@ int smscore_gpio_get_level(struct smscore_device_t *coredev, u8 pin_num,
 	total_len = sizeof(struct sms_msg_hdr) + (2 * sizeof(u32));
 
 	buffer = kmalloc(total_len + SMS_DMA_ALIGNMENT,
-			GFP_KERNEL | GFP_DMA);
+			GFP_KERNEL | coredev->gfp_buf_flags);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -2118,17 +2119,14 @@ static int __init smscore_module_init(void)
 {
 	INIT_LIST_HEAD(&g_smscore_notifyees);
 	INIT_LIST_HEAD(&g_smscore_devices);
-	kmutex_init(&g_smscore_deviceslock);
-
 	INIT_LIST_HEAD(&g_smscore_registry);
-	kmutex_init(&g_smscore_registrylock);
 
 	return 0;
 }
 
 static void __exit smscore_module_exit(void)
 {
-	kmutex_lock(&g_smscore_deviceslock);
+	mutex_lock(&g_smscore_deviceslock);
 	while (!list_empty(&g_smscore_notifyees)) {
 		struct smscore_device_notifyee_t *notifyee =
 			(struct smscore_device_notifyee_t *)
@@ -2137,9 +2135,9 @@ static void __exit smscore_module_exit(void)
 		list_del(&notifyee->entry);
 		kfree(notifyee);
 	}
-	kmutex_unlock(&g_smscore_deviceslock);
+	mutex_unlock(&g_smscore_deviceslock);
 
-	kmutex_lock(&g_smscore_registrylock);
+	mutex_lock(&g_smscore_registrylock);
 	while (!list_empty(&g_smscore_registry)) {
 		struct smscore_registry_entry_t *entry =
 			(struct smscore_registry_entry_t *)
@@ -2148,7 +2146,7 @@ static void __exit smscore_module_exit(void)
 		list_del(&entry->entry);
 		kfree(entry);
 	}
-	kmutex_unlock(&g_smscore_registrylock);
+	mutex_unlock(&g_smscore_registrylock);
 
 	pr_debug("\n");
 }

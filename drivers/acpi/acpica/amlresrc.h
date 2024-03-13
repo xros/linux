@@ -1,45 +1,11 @@
+/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0 */
 /******************************************************************************
  *
  * Module Name: amlresrc.h - AML resource descriptors
  *
+ * Copyright (C) 2000 - 2023, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 /* acpisrc:struct_defs -- for acpisrc conversion */
 
@@ -74,6 +40,7 @@
 #define ACPI_RESTAG_IORESTRICTION               "_IOR"
 #define ACPI_RESTAG_LENGTH                      "_LEN"
 #define ACPI_RESTAG_LINE                        "_LIN"
+#define ACPI_RESTAG_LOCALPORT                   "_PRT"
 #define ACPI_RESTAG_MEMATTRIBUTES               "_MTP"	/* Memory(0), Reserved(1), ACPI(2), NVS(3) */
 #define ACPI_RESTAG_MEMTYPE                     "_MEM"	/* non_cache(0), Cacheable(1) Cache+combine(2), Cache+prefetch(3) */
 #define ACPI_RESTAG_MAXADDR                     "_MAX"
@@ -83,6 +50,7 @@
 #define ACPI_RESTAG_MODE                        "_MOD"
 #define ACPI_RESTAG_PARITY                      "_PAR"
 #define ACPI_RESTAG_PHASE                       "_PHA"
+#define ACPI_RESTAG_PHYTYPE                     "_PHY"
 #define ACPI_RESTAG_PIN                         "_PIN"
 #define ACPI_RESTAG_PINCONFIG                   "_PPI"
 #define ACPI_RESTAG_PINCONFIG_TYPE              "_TYP"
@@ -102,6 +70,8 @@
 #define ACPI_RESTAG_TYPE                        "_TTP"	/* Translation(1), Static (0) */
 #define ACPI_RESTAG_XFERTYPE                    "_SIZ"	/* 8(0), 8And16(1), 16(2) */
 #define ACPI_RESTAG_VENDORDATA                  "_VEN"
+#define ACPI_RESTAG_FQN                         "_FQN"
+#define ACPI_RESTAG_FQD                         "_FQD"
 
 /* Default sizes for "small" resource descriptors */
 
@@ -291,7 +261,10 @@ struct aml_resource_address16 {
 struct aml_resource_extended_irq {
 	AML_RESOURCE_LARGE_HEADER_COMMON u8 flags;
 	u8 interrupt_count;
-	u32 interrupts[1];
+	union {
+		u32 interrupt;
+		 ACPI_FLEX_ARRAY(u32, interrupts);
+	};
 	/* res_source_index, res_source optional fields follow */
 };
 
@@ -350,11 +323,25 @@ struct aml_resource_gpio {
 #define AML_RESOURCE_I2C_SERIALBUSTYPE          1
 #define AML_RESOURCE_SPI_SERIALBUSTYPE          2
 #define AML_RESOURCE_UART_SERIALBUSTYPE         3
-#define AML_RESOURCE_MAX_SERIALBUSTYPE          3
+#define AML_RESOURCE_CSI2_SERIALBUSTYPE         4
+#define AML_RESOURCE_MAX_SERIALBUSTYPE          4
 #define AML_RESOURCE_VENDOR_SERIALBUSTYPE       192	/* Vendor defined is 0xC0-0xFF (NOT SUPPORTED) */
 
 struct aml_resource_common_serialbus {
 AML_RESOURCE_LARGE_HEADER_COMMON AML_RESOURCE_SERIAL_COMMON};
+
+struct aml_resource_csi2_serialbus {
+	AML_RESOURCE_LARGE_HEADER_COMMON AML_RESOURCE_SERIAL_COMMON
+	    /*
+	     * Optional fields follow immediately:
+	     * 1) Vendor Data bytes
+	     * 2) Resource Source String
+	     */
+};
+
+#define AML_RESOURCE_CSI2_REVISION              1	/* ACPI 6.4 */
+#define AML_RESOURCE_CSI2_TYPE_REVISION         1	/* ACPI 6.4 */
+#define AML_RESOURCE_CSI2_MIN_DATA_LEN          0	/* ACPI 6.4 */
 
 struct aml_resource_i2c_serialbus {
 	AML_RESOURCE_LARGE_HEADER_COMMON
@@ -442,6 +429,20 @@ struct aml_resource_pin_config {
 	 * 1) PIN list (Words)
 	 * 2) Resource Source String
 	 * 3) Vendor Data bytes
+	 */
+};
+
+#define AML_RESOURCE_CLOCK_INPUT_REVISION      1	/* ACPI 6.5 */
+
+struct aml_resource_clock_input {
+	AML_RESOURCE_LARGE_HEADER_COMMON u8 revision_id;
+	u16 flags;
+	u16 frequency_divisor;
+	u32 frequency_numerator;
+	/*
+	 * Optional fields follow immediately:
+	 * 1) Resource Source index
+	 * 2) Resource Source String
 	 */
 };
 
@@ -544,12 +545,14 @@ union aml_resource {
 	struct aml_resource_i2c_serialbus i2c_serial_bus;
 	struct aml_resource_spi_serialbus spi_serial_bus;
 	struct aml_resource_uart_serialbus uart_serial_bus;
+	struct aml_resource_csi2_serialbus csi2_serial_bus;
 	struct aml_resource_common_serialbus common_serial_bus;
 	struct aml_resource_pin_function pin_function;
 	struct aml_resource_pin_config pin_config;
 	struct aml_resource_pin_group pin_group;
 	struct aml_resource_pin_group_function pin_group_function;
 	struct aml_resource_pin_group_config pin_group_config;
+	struct aml_resource_clock_input clock_input;
 
 	/* Utility overlays */
 

@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ddbridge-i2c.c: Digital Devices bridge i2c driver
  *
  * Copyright (C) 2010-2017 Digital Devices GmbH
  *                         Ralph Metzler <rjkm@metzlerbros.de>
  *                         Marcus Metzler <mocm@metzlerbros.de>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 only, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -73,7 +64,10 @@ static int ddb_i2c_cmd(struct ddb_i2c *i2c, u32 adr, u32 cmd)
 		}
 		return -EIO;
 	}
-	if (val & 0x70000)
+	val &= 0x70000;
+	if (val == 0x20000)
+		dev_err(dev->dev, "I2C bus error\n");
+	if (val)
 		return -EIO;
 	return 0;
 }
@@ -81,7 +75,7 @@ static int ddb_i2c_cmd(struct ddb_i2c *i2c, u32 adr, u32 cmd)
 static int ddb_i2c_master_xfer(struct i2c_adapter *adapter,
 			       struct i2c_msg msg[], int num)
 {
-	struct ddb_i2c *i2c = (struct ddb_i2c *) i2c_get_adapdata(adapter);
+	struct ddb_i2c *i2c = (struct ddb_i2c *)i2c_get_adapdata(adapter);
 	struct ddb *dev = i2c->dev;
 	u8 addr = 0;
 
@@ -147,9 +141,9 @@ void ddb_i2c_release(struct ddb *dev)
 	}
 }
 
-static void i2c_handler(unsigned long priv)
+static void i2c_handler(void *priv)
 {
-	struct ddb_i2c *i2c = (struct ddb_i2c *) priv;
+	struct ddb_i2c *i2c = (struct ddb_i2c *)priv;
 
 	complete(&i2c->completion);
 }
@@ -171,20 +165,20 @@ static int ddb_i2c_add(struct ddb *dev, struct ddb_i2c *i2c,
 		(regmap->i2c->base + regmap->i2c->size * i);
 	ddbwritel(dev, I2C_SPEED_100, i2c->regs + I2C_TIMING);
 	ddbwritel(dev, ((i2c->rbuf & 0xffff) << 16) | (i2c->wbuf & 0xffff),
-		i2c->regs + I2C_TASKADDRESS);
+		  i2c->regs + I2C_TASKADDRESS);
 	init_completion(&i2c->completion);
 
 	adap = &i2c->adap;
 	i2c_set_adapdata(adap, i2c);
 #ifdef I2C_ADAP_CLASS_TV_DIGITAL
-	adap->class = I2C_ADAP_CLASS_TV_DIGITAL|I2C_CLASS_TV_ANALOG;
+	adap->class = I2C_ADAP_CLASS_TV_DIGITAL | I2C_CLASS_TV_ANALOG;
 #else
 #ifdef I2C_CLASS_TV_ANALOG
 	adap->class = I2C_CLASS_TV_ANALOG;
 #endif
 #endif
 	snprintf(adap->name, I2C_NAME_SIZE, "ddbridge_%02x.%x.%x",
-		dev->nr, i2c->link, i);
+		 dev->nr, i2c->link, i);
 	adap->algo = &ddb_i2c_algo;
 	adap->algo_data = (void *)i2c;
 	adap->dev.parent = dev->dev;
@@ -210,8 +204,7 @@ int ddb_i2c_init(struct ddb *dev)
 			if (!(dev->link[l].info->i2c_mask & (1 << i)))
 				continue;
 			i2c = &dev->i2c[num];
-			dev->handler_data[l][i + base] = (unsigned long) i2c;
-			dev->handler[l][i + base] = i2c_handler;
+			ddb_irq_set(dev, l, i + base, i2c_handler, i2c);
 			stat = ddb_i2c_add(dev, i2c, regmap, l, i, num);
 			if (stat)
 				break;
@@ -224,7 +217,9 @@ int ddb_i2c_init(struct ddb *dev)
 			adap = &i2c->adap;
 			i2c_del_adapter(adap);
 		}
-	} else
+	} else {
 		dev->i2c_num = num;
+	}
+
 	return stat;
 }

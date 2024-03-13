@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2016 - Marcin Malagowski <mrc@bourne.st>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -183,9 +174,9 @@ static void abp060mg_init_device(struct iio_dev *indio_dev, unsigned long id)
 		state->offset -= ABP060MG_NUM_COUNTS >> 1;
 }
 
-static int abp060mg_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int abp060mg_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct iio_dev *indio_dev;
 	struct abp_state *state;
 	unsigned long cfg_id = id->driver_data;
@@ -203,7 +194,6 @@ static int abp060mg_probe(struct i2c_client *client,
 
 	abp060mg_init_device(indio_dev, cfg_id);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->name = dev_name(&client->dev);
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &abp060mg_info;

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Thunderbolt DMA configuration based mailbox support
  *
  * Copyright (C) 2017, Intel Corporation
  * Authors: Michael Jamet <michael.jamet@intel.com>
  *          Mika Westerberg <mika.westerberg@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -170,24 +167,22 @@ static int dma_port_write(struct tb_ctl *ctl, const void *buffer, u64 route,
 
 static int dma_find_port(struct tb_switch *sw)
 {
-	int port, ret;
-	u32 type;
+	static const int ports[] = { 3, 5, 7 };
+	int i;
 
 	/*
-	 * The DMA (NHI) port is either 3 or 5 depending on the
-	 * controller. Try both starting from 5 which is more common.
+	 * The DMA (NHI) port is either 3, 5 or 7 depending on the
+	 * controller. Try all of them.
 	 */
-	port = 5;
-	ret = dma_port_read(sw->tb->ctl, &type, tb_route(sw), port, 2, 1,
-			    DMA_PORT_TIMEOUT);
-	if (!ret && (type & 0xffffff) == TB_TYPE_NHI)
-		return port;
+	for (i = 0; i < ARRAY_SIZE(ports); i++) {
+		u32 type;
+		int ret;
 
-	port = 3;
-	ret = dma_port_read(sw->tb->ctl, &type, tb_route(sw), port, 2, 1,
-			    DMA_PORT_TIMEOUT);
-	if (!ret && (type & 0xffffff) == TB_TYPE_NHI)
-		return port;
+		ret = dma_port_read(sw->tb->ctl, &type, tb_route(sw), ports[i],
+				    2, 1, DMA_PORT_TIMEOUT);
+		if (!ret && (type & 0xffffff) == TB_TYPE_NHI)
+			return ports[i];
+	}
 
 	return -ENODEV;
 }
@@ -304,15 +299,13 @@ static int dma_port_request(struct tb_dma_port *dma, u32 in,
 	return status_to_errno(out);
 }
 
-static int dma_port_flash_read_block(struct tb_dma_port *dma, u32 address,
-				     void *buf, u32 size)
+static int dma_port_flash_read_block(void *data, unsigned int dwaddress,
+				     void *buf, size_t dwords)
 {
+	struct tb_dma_port *dma = data;
 	struct tb_switch *sw = dma->sw;
-	u32 in, dwaddress, dwords;
 	int ret;
-
-	dwaddress = address / 4;
-	dwords = size / 4;
+	u32 in;
 
 	in = MAIL_IN_CMD_FLASH_READ << MAIL_IN_CMD_SHIFT;
 	if (dwords < MAIL_DATA_DWORDS)
@@ -328,28 +321,25 @@ static int dma_port_flash_read_block(struct tb_dma_port *dma, u32 address,
 			     dma->base + MAIL_DATA, dwords, DMA_PORT_TIMEOUT);
 }
 
-static int dma_port_flash_write_block(struct tb_dma_port *dma, u32 address,
-				      const void *buf, u32 size)
+static int dma_port_flash_write_block(void *data, unsigned int dwaddress,
+				      const void *buf, size_t dwords)
 {
+	struct tb_dma_port *dma = data;
 	struct tb_switch *sw = dma->sw;
-	u32 in, dwaddress, dwords;
 	int ret;
-
-	dwords = size / 4;
+	u32 in;
 
 	/* Write the block to MAIL_DATA registers */
 	ret = dma_port_write(sw->tb->ctl, buf, tb_route(sw), dma->port,
 			    dma->base + MAIL_DATA, dwords, DMA_PORT_TIMEOUT);
+	if (ret)
+		return ret;
 
 	in = MAIL_IN_CMD_FLASH_WRITE << MAIL_IN_CMD_SHIFT;
 
 	/* CSS header write is always done to the same magic address */
-	if (address >= DMA_PORT_CSS_ADDRESS) {
-		dwaddress = DMA_PORT_CSS_ADDRESS;
+	if (dwaddress >= DMA_PORT_CSS_ADDRESS)
 		in |= MAIL_IN_CSS;
-	} else {
-		dwaddress = address / 4;
-	}
 
 	in |= ((dwords - 1) << MAIL_IN_DWORDS_SHIFT) & MAIL_IN_DWORDS_MASK;
 	in |= (dwaddress << MAIL_IN_ADDRESS_SHIFT) & MAIL_IN_ADDRESS_MASK;
@@ -368,35 +358,8 @@ static int dma_port_flash_write_block(struct tb_dma_port *dma, u32 address,
 int dma_port_flash_read(struct tb_dma_port *dma, unsigned int address,
 			void *buf, size_t size)
 {
-	unsigned int retries = DMA_PORT_RETRIES;
-	unsigned int offset;
-
-	offset = address & 3;
-	address = address & ~3;
-
-	do {
-		u32 nbytes = min_t(u32, size, MAIL_DATA_DWORDS * 4);
-		int ret;
-
-		ret = dma_port_flash_read_block(dma, address, dma->buf,
-						ALIGN(nbytes, 4));
-		if (ret) {
-			if (ret == -ETIMEDOUT) {
-				if (retries--)
-					continue;
-				ret = -EIO;
-			}
-			return ret;
-		}
-
-		memcpy(buf, dma->buf + offset, nbytes);
-
-		size -= nbytes;
-		address += nbytes;
-		buf += nbytes;
-	} while (size > 0);
-
-	return 0;
+	return tb_nvm_read_data(address, buf, size, DMA_PORT_RETRIES,
+				dma_port_flash_read_block, dma);
 }
 
 /**
@@ -413,40 +376,11 @@ int dma_port_flash_read(struct tb_dma_port *dma, unsigned int address,
 int dma_port_flash_write(struct tb_dma_port *dma, unsigned int address,
 			 const void *buf, size_t size)
 {
-	unsigned int retries = DMA_PORT_RETRIES;
-	unsigned int offset;
+	if (address >= DMA_PORT_CSS_ADDRESS && size > DMA_PORT_CSS_MAX_SIZE)
+		return -E2BIG;
 
-	if (address >= DMA_PORT_CSS_ADDRESS) {
-		offset = 0;
-		if (size > DMA_PORT_CSS_MAX_SIZE)
-			return -E2BIG;
-	} else {
-		offset = address & 3;
-		address = address & ~3;
-	}
-
-	do {
-		u32 nbytes = min_t(u32, size, MAIL_DATA_DWORDS * 4);
-		int ret;
-
-		memcpy(dma->buf + offset, buf, nbytes);
-
-		ret = dma_port_flash_write_block(dma, address, buf, nbytes);
-		if (ret) {
-			if (ret == -ETIMEDOUT) {
-				if (retries--)
-					continue;
-				ret = -EIO;
-			}
-			return ret;
-		}
-
-		size -= nbytes;
-		address += nbytes;
-		buf += nbytes;
-	} while (size > 0);
-
-	return 0;
+	return tb_nvm_write_data(address, buf, size, DMA_PORT_RETRIES,
+				 dma_port_flash_write_block, dma);
 }
 
 /**

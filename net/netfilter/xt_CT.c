@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2010 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -27,7 +24,7 @@ static inline int xt_ct_target(struct sk_buff *skb, struct nf_conn *ct)
 		return XT_CONTINUE;
 
 	if (ct) {
-		atomic_inc(&ct->ct_general.use);
+		refcount_inc(&ct->ct_general.use);
 		nf_ct_set(skb, ct, IP_CT_NEW);
 	} else {
 		nf_ct_set(skb, ct, IP_CT_UNTRACKED);
@@ -82,105 +79,45 @@ xt_ct_set_helper(struct nf_conn *ct, const char *helper_name,
 
 	proto = xt_ct_find_proto(par);
 	if (!proto) {
-		pr_info("You must specify a L4 protocol, and not use "
-			"inversions on it.\n");
+		pr_info_ratelimited("You must specify a L4 protocol and not use inversions on it\n");
 		return -ENOENT;
 	}
 
 	helper = nf_conntrack_helper_try_module_get(helper_name, par->family,
 						    proto);
 	if (helper == NULL) {
-		pr_info("No such helper \"%s\"\n", helper_name);
+		pr_info_ratelimited("No such helper \"%s\"\n", helper_name);
 		return -ENOENT;
 	}
 
-	help = nf_ct_helper_ext_add(ct, helper, GFP_KERNEL);
+	help = nf_ct_helper_ext_add(ct, GFP_KERNEL);
 	if (help == NULL) {
 		nf_conntrack_helper_put(helper);
 		return -ENOMEM;
 	}
 
-	help->helper = helper;
+	rcu_assign_pointer(help->helper, helper);
 	return 0;
 }
-
-#ifdef CONFIG_NF_CONNTRACK_TIMEOUT
-static void __xt_ct_tg_timeout_put(struct ctnl_timeout *timeout)
-{
-	typeof(nf_ct_timeout_put_hook) timeout_put;
-
-	timeout_put = rcu_dereference(nf_ct_timeout_put_hook);
-	if (timeout_put)
-		timeout_put(timeout);
-}
-#endif
 
 static int
 xt_ct_set_timeout(struct nf_conn *ct, const struct xt_tgchk_param *par,
 		  const char *timeout_name)
 {
 #ifdef CONFIG_NF_CONNTRACK_TIMEOUT
-	typeof(nf_ct_timeout_find_get_hook) timeout_find_get;
 	const struct nf_conntrack_l4proto *l4proto;
-	struct ctnl_timeout *timeout;
-	struct nf_conn_timeout *timeout_ext;
-	int ret = 0;
 	u8 proto;
-
-	rcu_read_lock();
-	timeout_find_get = rcu_dereference(nf_ct_timeout_find_get_hook);
-	if (timeout_find_get == NULL) {
-		ret = -ENOENT;
-		pr_info("Timeout policy base is empty\n");
-		goto out;
-	}
 
 	proto = xt_ct_find_proto(par);
 	if (!proto) {
-		ret = -EINVAL;
-		pr_info("You must specify a L4 protocol, and not use "
-			"inversions on it.\n");
-		goto out;
+		pr_info_ratelimited("You must specify a L4 protocol and not "
+				    "use inversions on it");
+		return -EINVAL;
 	}
+	l4proto = nf_ct_l4proto_find(proto);
+	return nf_ct_set_timeout(par->net, ct, par->family, l4proto->l4proto,
+				 timeout_name);
 
-	timeout = timeout_find_get(par->net, timeout_name);
-	if (timeout == NULL) {
-		ret = -ENOENT;
-		pr_info("No such timeout policy \"%s\"\n", timeout_name);
-		goto out;
-	}
-
-	if (timeout->l3num != par->family) {
-		ret = -EINVAL;
-		pr_info("Timeout policy `%s' can only be used by L3 protocol "
-			"number %d\n", timeout_name, timeout->l3num);
-		goto err_put_timeout;
-	}
-	/* Make sure the timeout policy matches any existing protocol tracker,
-	 * otherwise default to generic.
-	 */
-	l4proto = __nf_ct_l4proto_find(par->family, proto);
-	if (timeout->l4proto->l4proto != l4proto->l4proto) {
-		ret = -EINVAL;
-		pr_info("Timeout policy `%s' can only be used by L4 protocol "
-			"number %d\n",
-			timeout_name, timeout->l4proto->l4proto);
-		goto err_put_timeout;
-	}
-	timeout_ext = nf_ct_timeout_ext_add(ct, timeout, GFP_ATOMIC);
-	if (!timeout_ext) {
-		ret = -ENOMEM;
-		goto err_put_timeout;
-	}
-
-	rcu_read_unlock();
-	return ret;
-
-err_put_timeout:
-	__xt_ct_tg_timeout_put(timeout);
-out:
-	rcu_read_unlock();
-	return ret;
 #else
 	return -EOPNOTSUPP;
 #endif
@@ -197,6 +134,21 @@ static u16 xt_ct_flags_to_dir(const struct xt_ct_target_info_v1 *info)
 	default:
 		return NF_CT_DEFAULT_ZONE_DIR;
 	}
+}
+
+static void xt_ct_put_helper(struct nf_conn_help *help)
+{
+	struct nf_conntrack_helper *helper;
+
+	if (!help)
+		return;
+
+	/* not yet exposed to other cpus, or ruleset
+	 * already detached (post-replacement).
+	 */
+	helper = rcu_dereference_raw(help->helper);
+	if (helper)
+		nf_conntrack_helper_put(helper);
 }
 
 static int xt_ct_tg_check(const struct xt_tgchk_param *par,
@@ -235,7 +187,6 @@ static int xt_ct_tg_check(const struct xt_tgchk_param *par,
 		goto err2;
 	}
 
-	ret = 0;
 	if ((info->ct_events || info->exp_events) &&
 	    !nf_ct_ecache_ext_add(ct, info->ct_events, info->exp_events,
 				  GFP_KERNEL)) {
@@ -244,26 +195,34 @@ static int xt_ct_tg_check(const struct xt_tgchk_param *par,
 	}
 
 	if (info->helper[0]) {
+		if (strnlen(info->helper, sizeof(info->helper)) == sizeof(info->helper)) {
+			ret = -ENAMETOOLONG;
+			goto err3;
+		}
+
 		ret = xt_ct_set_helper(ct, info->helper, par);
 		if (ret < 0)
 			goto err3;
 	}
 
 	if (info->timeout[0]) {
+		if (strnlen(info->timeout, sizeof(info->timeout)) == sizeof(info->timeout)) {
+			ret = -ENAMETOOLONG;
+			goto err4;
+		}
+
 		ret = xt_ct_set_timeout(ct, par, info->timeout);
 		if (ret < 0)
 			goto err4;
 	}
 	__set_bit(IPS_CONFIRMED_BIT, &ct->status);
-	nf_conntrack_get(&ct->ct_general);
 out:
 	info->ct = ct;
 	return 0;
 
 err4:
 	help = nfct_help(ct);
-	if (help)
-		nf_conntrack_helper_put(help->helper);
+	xt_ct_put_helper(help);
 err3:
 	nf_ct_tmpl_free(ct);
 err2:
@@ -317,26 +276,6 @@ static int xt_ct_tg_check_v2(const struct xt_tgchk_param *par)
 	return xt_ct_tg_check(par, par->targinfo);
 }
 
-static void xt_ct_destroy_timeout(struct nf_conn *ct)
-{
-#ifdef CONFIG_NF_CONNTRACK_TIMEOUT
-	struct nf_conn_timeout *timeout_ext;
-	typeof(nf_ct_timeout_put_hook) timeout_put;
-
-	rcu_read_lock();
-	timeout_put = rcu_dereference(nf_ct_timeout_put_hook);
-
-	if (timeout_put) {
-		timeout_ext = nf_ct_timeout_find(ct);
-		if (timeout_ext) {
-			timeout_put(timeout_ext->timeout);
-			RCU_INIT_POINTER(timeout_ext->timeout, NULL);
-		}
-	}
-	rcu_read_unlock();
-#endif
-}
-
 static void xt_ct_tg_destroy(const struct xt_tgdtor_param *par,
 			     struct xt_ct_target_info_v1 *info)
 {
@@ -345,12 +284,11 @@ static void xt_ct_tg_destroy(const struct xt_tgdtor_param *par,
 
 	if (ct) {
 		help = nfct_help(ct);
-		if (help)
-			nf_conntrack_helper_put(help->helper);
+		xt_ct_put_helper(help);
 
 		nf_ct_netns_put(par->net, par->family);
 
-		xt_ct_destroy_timeout(ct);
+		nf_ct_destroy_timeout(ct);
 		nf_ct_put(info->ct);
 	}
 }
@@ -425,21 +363,10 @@ notrack_tg(struct sk_buff *skb, const struct xt_action_param *par)
 	return XT_CONTINUE;
 }
 
-static int notrack_chk(const struct xt_tgchk_param *par)
-{
-	if (!par->net->xt.notrack_deprecated_warning) {
-		pr_info("netfilter: NOTRACK target is deprecated, "
-			"use CT instead or upgrade iptables\n");
-		par->net->xt.notrack_deprecated_warning = true;
-	}
-	return 0;
-}
-
 static struct xt_target notrack_tg_reg __read_mostly = {
 	.name		= "NOTRACK",
 	.revision	= 0,
 	.family		= NFPROTO_UNSPEC,
-	.checkentry	= notrack_chk,
 	.target		= notrack_tg,
 	.table		= "raw",
 	.me		= THIS_MODULE,

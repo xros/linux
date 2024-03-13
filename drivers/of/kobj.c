@@ -1,16 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/of.h>
 #include <linux/slab.h>
 
 #include "of_private.h"
 
 /* true when node is initialized */
-static int of_node_is_initialized(struct device_node *node)
+static int of_node_is_initialized(const struct device_node *node)
 {
 	return node && node->kobj.state_initialized;
 }
 
 /* true when node is attached (i.e. present on sysfs) */
-int of_node_is_attached(struct device_node *node)
+int of_node_is_attached(const struct device_node *node)
 {
 	return node && node->kobj.state_in_sysfs;
 }
@@ -23,7 +24,7 @@ static void of_node_release(struct kobject *kobj)
 }
 #endif /* CONFIG_OF_DYNAMIC */
 
-struct kobj_type of_node_ktype = {
+const struct kobj_type of_node_ktype = {
 	.release = of_node_release,
 };
 
@@ -118,7 +119,7 @@ int __of_attach_node_sysfs(struct device_node *np)
 	struct property *pp;
 	int rc;
 
-	if (!of_kset)
+	if (!IS_ENABLED(CONFIG_SYSFS) || !of_kset)
 		return 0;
 
 	np->kobj.kset = of_kset;
@@ -132,6 +133,7 @@ int __of_attach_node_sysfs(struct device_node *np)
 	}
 	if (!name)
 		return -ENOMEM;
+
 	rc = kobject_add(&np->kobj, parent, "%s", name);
 	kfree(name);
 	if (rc)
@@ -140,6 +142,7 @@ int __of_attach_node_sysfs(struct device_node *np)
 	for_each_property_of_node(np, pp)
 		__of_add_property_sysfs(np, pp);
 
+	of_node_get(np);
 	return 0;
 }
 
@@ -158,7 +161,5 @@ void __of_detach_node_sysfs(struct device_node *np)
 		kobject_del(&np->kobj);
 	}
 
-	/* finally remove the kobj_init ref */
 	of_node_put(np);
 }
-

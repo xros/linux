@@ -1,18 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Freescale Memory Controller kernel module
  *
  * Support Power-based SoCs including MPC85xx, MPC86xx, MPC83xx and
- * ARM-based Layerscape SoCs including LS2xxx. Originally split
- * out from mpc85xx_edac EDAC driver.
+ * ARM-based Layerscape SoCs including LS2xxx and LS1021A. Originally
+ * split out from mpc85xx_edac EDAC driver.
  *
  * Parts Copyrighted (c) 2013 by Freescale Semiconductor, Inc.
  *
  * Author: Dave Jiang <djiang@mvista.com>
  *
- * 2006-2007 (c) MontaVista Software, Inc. This file is licensed under
- * the terms of the GNU General Public License version 2. This program
- * is licensed "as is" without any warranty of any kind, whether express
- * or implied.
+ * 2006-2007 (c) MontaVista Software, Inc.
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -24,8 +22,7 @@
 #include <linux/smp.h>
 #include <linux/gfp.h>
 
-#include <linux/of_platform.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
 #include "edac_module.h"
 #include "fsl_ddr_edac.h"
@@ -51,6 +48,7 @@ static inline void ddr_out32(void __iomem *addr, u32 value)
 		iowrite32be(value, addr);
 }
 
+#ifdef CONFIG_EDAC_DEBUG
 /************************ MC SYSFS parts ***********************************/
 
 #define to_mci(k) container_of(k, struct mem_ctl_info, dev)
@@ -151,11 +149,14 @@ static DEVICE_ATTR(inject_data_lo, S_IRUGO | S_IWUSR,
 		   fsl_mc_inject_data_lo_show, fsl_mc_inject_data_lo_store);
 static DEVICE_ATTR(inject_ctrl, S_IRUGO | S_IWUSR,
 		   fsl_mc_inject_ctrl_show, fsl_mc_inject_ctrl_store);
+#endif /* CONFIG_EDAC_DEBUG */
 
 static struct attribute *fsl_ddr_dev_attrs[] = {
+#ifdef CONFIG_EDAC_DEBUG
 	&dev_attr_inject_data_hi.attr,
 	&dev_attr_inject_data_lo.attr,
 	&dev_attr_inject_ctrl.attr,
+#endif
 	NULL
 };
 
@@ -611,7 +612,7 @@ err:
 	return res;
 }
 
-int fsl_mc_err_remove(struct platform_device *op)
+void fsl_mc_err_remove(struct platform_device *op)
 {
 	struct mem_ctl_info *mci = dev_get_drvdata(&op->dev);
 	struct fsl_mc_pdata *pdata = mci->pvt_info;
@@ -628,5 +629,4 @@ int fsl_mc_err_remove(struct platform_device *op)
 
 	edac_mc_del_mc(&op->dev);
 	edac_mc_free(mci);
-	return 0;
 }

@@ -10,12 +10,16 @@
 #include <linux/sizes.h>
 #include <asm/kmem_layout.h>
 
+#define KASAN_SHADOW_SCALE_SHIFT 3
+
 /* Start of area covered by KASAN */
 #define KASAN_START_VADDR __XTENSA_UL_CONST(0x90000000)
 /* Start of the shadow map */
 #define KASAN_SHADOW_START (XCHAL_PAGE_TABLE_VADDR + XCHAL_PAGE_TABLE_SIZE)
 /* Size of the shadow map */
 #define KASAN_SHADOW_SIZE (-KASAN_START_VADDR >> KASAN_SHADOW_SCALE_SHIFT)
+/* End of the shadow map */
+#define KASAN_SHADOW_END (KASAN_SHADOW_START + KASAN_SHADOW_SIZE)
 /* Offset for mem to shadow address transformation */
 #define KASAN_SHADOW_OFFSET __XTENSA_UL_CONST(CONFIG_KASAN_SHADOW_OFFSET)
 

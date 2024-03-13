@@ -77,7 +77,6 @@ static int pm80x_onkey_probe(struct platform_device *pdev)
 
 	info->irq = platform_get_irq(pdev, 0);
 	if (info->irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource!\n");
 		err = -EINVAL;
 		goto out;
 	}
@@ -139,14 +138,13 @@ out:
 	return err;
 }
 
-static int pm80x_onkey_remove(struct platform_device *pdev)
+static void pm80x_onkey_remove(struct platform_device *pdev)
 {
 	struct pm80x_onkey_info *info = platform_get_drvdata(pdev);
 
 	pm80x_free_irq(info->pm80x, info->irq, info);
 	input_unregister_device(info->idev);
 	kfree(info);
-	return 0;
 }
 
 static struct platform_driver pm80x_onkey_driver = {
@@ -155,7 +153,7 @@ static struct platform_driver pm80x_onkey_driver = {
 		   .pm = &pm80x_onkey_pm_ops,
 		   },
 	.probe = pm80x_onkey_probe,
-	.remove = pm80x_onkey_remove,
+	.remove_new = pm80x_onkey_remove,
 };
 
 module_platform_driver(pm80x_onkey_driver);

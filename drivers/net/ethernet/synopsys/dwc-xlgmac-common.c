@@ -54,8 +54,8 @@ static void xlgmac_default_config(struct xlgmac_pdata *pdata)
 	pdata->phy_speed = SPEED_25000;
 	pdata->sysclk_rate = XLGMAC_SYSCLOCK;
 
-	strlcpy(pdata->drv_name, XLGMAC_DRV_NAME, sizeof(pdata->drv_name));
-	strlcpy(pdata->drv_ver, XLGMAC_DRV_VERSION, sizeof(pdata->drv_ver));
+	strscpy(pdata->drv_name, XLGMAC_DRV_NAME, sizeof(pdata->drv_name));
+	strscpy(pdata->drv_ver, XLGMAC_DRV_VERSION, sizeof(pdata->drv_ver));
 }
 
 static void xlgmac_init_all_ops(struct xlgmac_pdata *pdata)
@@ -78,7 +78,7 @@ static int xlgmac_init(struct xlgmac_pdata *pdata)
 	netdev->irq = pdata->dev_irq;
 	netdev->base_addr = (unsigned long)pdata->mac_regs;
 	xlgmac_read_mac_addr(pdata);
-	memcpy(netdev->dev_addr, pdata->mac_addr, netdev->addr_len);
+	eth_hw_addr_set(netdev, pdata->mac_addr);
 
 	/* Set all the function pointers */
 	xlgmac_init_all_ops(pdata);
@@ -333,9 +333,8 @@ void xlgmac_print_pkt(struct net_device *netdev,
 		      struct sk_buff *skb, bool tx_rx)
 {
 	struct ethhdr *eth = (struct ethhdr *)skb->data;
-	unsigned char *buf = skb->data;
 	unsigned char buffer[128];
-	unsigned int i, j;
+	unsigned int i;
 
 	netdev_dbg(netdev, "\n************** SKB dump ****************\n");
 
@@ -346,22 +345,13 @@ void xlgmac_print_pkt(struct net_device *netdev,
 	netdev_dbg(netdev, "Src MAC addr: %pM\n", eth->h_source);
 	netdev_dbg(netdev, "Protocol: %#06hx\n", ntohs(eth->h_proto));
 
-	for (i = 0, j = 0; i < skb->len;) {
-		j += snprintf(buffer + j, sizeof(buffer) - j, "%02hhx",
-			      buf[i++]);
+	for (i = 0; i < skb->len; i += 32) {
+		unsigned int len = min(skb->len - i, 32U);
 
-		if ((i % 32) == 0) {
-			netdev_dbg(netdev, "  %#06x: %s\n", i - 32, buffer);
-			j = 0;
-		} else if ((i % 16) == 0) {
-			buffer[j++] = ' ';
-			buffer[j++] = ' ';
-		} else if ((i % 4) == 0) {
-			buffer[j++] = ' ';
-		}
+		hex_dump_to_buffer(&skb->data[i], len, 32, 1,
+				   buffer, sizeof(buffer), false);
+		netdev_dbg(netdev, "  %#06x: %s\n", i, buffer);
 	}
-	if (i % 32)
-		netdev_dbg(netdev, "  %#06x: %s\n", i - (i % 32), buffer);
 
 	netdev_dbg(netdev, "\n************** SKB dump ****************\n");
 }
@@ -523,7 +513,7 @@ void xlgmac_get_all_hw_features(struct xlgmac_pdata *pdata)
 
 void xlgmac_print_all_hw_features(struct xlgmac_pdata *pdata)
 {
-	char *str = NULL;
+	char __maybe_unused *str = NULL;
 
 	XLGMAC_PR("\n");
 	XLGMAC_PR("=====================================================\n");

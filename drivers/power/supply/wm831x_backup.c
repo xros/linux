@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backup battery driver for Wolfson Microelectronics wm831x PMICs
  *
  * Copyright 2009 Wolfson Microelectronics PLC.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -200,18 +197,16 @@ static int wm831x_backup_probe(struct platform_device *pdev)
 	return PTR_ERR_OR_ZERO(devdata->backup);
 }
 
-static int wm831x_backup_remove(struct platform_device *pdev)
+static void wm831x_backup_remove(struct platform_device *pdev)
 {
 	struct wm831x_backup *devdata = platform_get_drvdata(pdev);
 
 	power_supply_unregister(devdata->backup);
-
-	return 0;
 }
 
 static struct platform_driver wm831x_backup_driver = {
 	.probe = wm831x_backup_probe,
-	.remove = wm831x_backup_remove,
+	.remove_new = wm831x_backup_remove,
 	.driver = {
 		.name = "wm831x-backup",
 	},

@@ -47,8 +47,12 @@ static irqreturn_t gemini_powerbutton_interrupt(int irq, void *data)
 	val &= 0x70U;
 	switch (val) {
 	case GEMINI_STAT_CIR:
-		dev_info(gpw->dev, "infrared poweroff\n");
-		orderly_poweroff(true);
+		/*
+		 * We do not yet have a driver for the infrared
+		 * controller so it can cause spurious poweroff
+		 * events. Ignore those for now.
+		 */
+		dev_info(gpw->dev, "infrared poweroff - ignored\n");
 		break;
 	case GEMINI_STAT_RTC:
 		dev_info(gpw->dev, "RTC poweroff\n");
@@ -87,7 +91,6 @@ static void gemini_poweroff(void)
 static int gemini_poweroff_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct resource *res;
 	struct gemini_powercon *gpw;
 	u32 val;
 	int irq;
@@ -97,14 +100,13 @@ static int gemini_poweroff_probe(struct platform_device *pdev)
 	if (!gpw)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	gpw->base = devm_ioremap_resource(dev, res);
+	gpw->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(gpw->base))
 		return PTR_ERR(gpw->base);
 
 	irq = platform_get_irq(pdev, 0);
-	if (!irq)
-		return -EINVAL;
+	if (irq < 0)
+		return irq;
 
 	gpw->dev = dev;
 
@@ -116,7 +118,27 @@ static int gemini_poweroff_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	/* Clear the power management IRQ */
+	/*
+	 * Enable the power controller. This is crucial on Gemini
+	 * systems: if this is not done, pressing the power button
+	 * will result in unconditional poweroff without any warning.
+	 * This makes the kernel handle the poweroff.
+	 */
+	val = readl(gpw->base + GEMINI_PWC_CTRLREG);
+	val |= GEMINI_CTRL_ENABLE;
+	writel(val, gpw->base + GEMINI_PWC_CTRLREG);
+
+	/* Clear the IRQ */
+	val = readl(gpw->base + GEMINI_PWC_CTRLREG);
+	val |= GEMINI_CTRL_IRQ_CLR;
+	writel(val, gpw->base + GEMINI_PWC_CTRLREG);
+
+	/* Wait for this to clear */
+	val = readl(gpw->base + GEMINI_PWC_STATREG);
+	while (val & 0x70U)
+		val = readl(gpw->base + GEMINI_PWC_STATREG);
+
+	/* Clear the IRQ again */
 	val = readl(gpw->base + GEMINI_PWC_CTRLREG);
 	val |= GEMINI_CTRL_IRQ_CLR;
 	writel(val, gpw->base + GEMINI_PWC_CTRLREG);
@@ -128,16 +150,6 @@ static int gemini_poweroff_probe(struct platform_device *pdev)
 
 	pm_power_off = gemini_poweroff;
 	gpw_poweroff = gpw;
-
-	/*
-	 * Enable the power controller. This is crucial on Gemini
-	 * systems: if this is not done, pressing the power button
-	 * will result in unconditional poweroff without any warning.
-	 * This makes the kernel handle the poweroff.
-	 */
-	val = readl(gpw->base + GEMINI_PWC_CTRLREG);
-	val |= GEMINI_CTRL_ENABLE;
-	writel(val, gpw->base + GEMINI_PWC_CTRLREG);
 
 	dev_info(dev, "Gemini poweroff driver registered\n");
 

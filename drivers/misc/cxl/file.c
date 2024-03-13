@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2014 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/spinlock.h>
@@ -41,8 +37,6 @@
 #define CXL_DEVT_IS_CARD(dev) (MINOR(dev) % CXL_DEV_MINORS == 0)
 
 static dev_t cxl_dev;
-
-static struct class *cxl_class;
 
 static int __afu_open(struct inode *inode, struct file *file, bool master)
 {
@@ -173,7 +167,7 @@ static long afu_ioctl_start_work(struct cxl_context *ctx,
 	 * flags are set it's invalid
 	 */
 	if (work.reserved1 || work.reserved2 || work.reserved3 ||
-	    work.reserved4 || work.reserved5 || work.reserved6 ||
+	    work.reserved4 || work.reserved5 ||
 	    (work.flags & ~CXL_START_WORK_ALL)) {
 		rc = -EINVAL;
 		goto out;
@@ -186,11 +180,15 @@ static long afu_ioctl_start_work(struct cxl_context *ctx,
 		rc =  -EINVAL;
 		goto out;
 	}
+
 	if ((rc = afu_register_irqs(ctx, work.num_interrupts)))
 		goto out;
 
 	if (work.flags & CXL_START_WORK_AMR)
 		amr = work.amr & mfspr(SPRN_UAMOR);
+
+	if (work.flags & CXL_START_WORK_TID)
+		ctx->assign_tidr = true;
 
 	ctx->mmio_err_ff = !!(work.flags & CXL_START_WORK_ERR_FF);
 
@@ -263,8 +261,15 @@ static long afu_ioctl_start_work(struct cxl_context *ctx,
 		goto out;
 	}
 
-	ctx->status = STARTED;
 	rc = 0;
+	if (work.flags & CXL_START_WORK_TID) {
+		work.tid = ctx->tidr;
+		if (copy_to_user(uwork, &work, sizeof(work)))
+			rc = -EFAULT;
+	}
+
+	ctx->status = STARTED;
+
 out:
 	mutex_unlock(&ctx->status_mutex);
 	return rc;
@@ -367,11 +372,11 @@ __poll_t afu_poll(struct file *file, struct poll_table_struct *poll)
 
 	spin_lock_irqsave(&ctx->lock, flags);
 	if (ctx_event_pending(ctx))
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 	else if (ctx->status == CLOSED)
 		/* Only error on closed when there are no futher events pending
 		 */
-		mask |= POLLERR;
+		mask |= EPOLLERR;
 	spin_unlock_irqrestore(&ctx->lock, flags);
 
 	pr_devel("afu_poll pe: %i returning %#x\n", ctx->pe, mask);
@@ -539,7 +544,7 @@ static const struct file_operations afu_master_fops = {
 };
 
 
-static char *cxl_devnode(struct device *dev, umode_t *mode)
+static char *cxl_devnode(const struct device *dev, umode_t *mode)
 {
 	if (cpu_has_feature(CPU_FTR_HVMODE) &&
 	    CXL_DEVT_IS_CARD(dev->devt)) {
@@ -552,7 +557,10 @@ static char *cxl_devnode(struct device *dev, umode_t *mode)
 	return kasprintf(GFP_KERNEL, "cxl/%s", dev_name(dev));
 }
 
-extern struct class *cxl_class;
+static const struct class cxl_class = {
+	.name =		"cxl",
+	.devnode =	cxl_devnode,
+};
 
 static int cxl_add_chardev(struct cxl_afu *afu, dev_t devt, struct cdev *cdev,
 			   struct device **chardev, char *postfix, char *desc,
@@ -562,16 +570,17 @@ static int cxl_add_chardev(struct cxl_afu *afu, dev_t devt, struct cdev *cdev,
 	int rc;
 
 	cdev_init(cdev, fops);
-	if ((rc = cdev_add(cdev, devt, 1))) {
+	rc = cdev_add(cdev, devt, 1);
+	if (rc) {
 		dev_err(&afu->dev, "Unable to add %s chardev: %i\n", desc, rc);
 		return rc;
 	}
 
-	dev = device_create(cxl_class, &afu->dev, devt, afu,
+	dev = device_create(&cxl_class, &afu->dev, devt, afu,
 			"afu%i.%i%s", afu->adapter->adapter_num, afu->slice, postfix);
 	if (IS_ERR(dev)) {
-		dev_err(&afu->dev, "Unable to create %s chardev in sysfs: %i\n", desc, rc);
 		rc = PTR_ERR(dev);
+		dev_err(&afu->dev, "Unable to create %s chardev in sysfs: %i\n", desc, rc);
 		goto err;
 	}
 
@@ -625,14 +634,14 @@ void cxl_chardev_afu_remove(struct cxl_afu *afu)
 
 int cxl_register_afu(struct cxl_afu *afu)
 {
-	afu->dev.class = cxl_class;
+	afu->dev.class = &cxl_class;
 
 	return device_register(&afu->dev);
 }
 
 int cxl_register_adapter(struct cxl *adapter)
 {
-	adapter->dev.class = cxl_class;
+	adapter->dev.class = &cxl_class;
 
 	/*
 	 * Future: When we support dynamically reprogramming the PSL & AFU we
@@ -670,13 +679,11 @@ int __init cxl_file_init(void)
 
 	pr_devel("CXL device allocated, MAJOR %i\n", MAJOR(cxl_dev));
 
-	cxl_class = class_create(THIS_MODULE, "cxl");
-	if (IS_ERR(cxl_class)) {
+	rc = class_register(&cxl_class);
+	if (rc) {
 		pr_err("Unable to create CXL class\n");
-		rc = PTR_ERR(cxl_class);
 		goto err;
 	}
-	cxl_class->devnode = cxl_devnode;
 
 	return 0;
 
@@ -688,5 +695,5 @@ err:
 void cxl_file_exit(void)
 {
 	unregister_chrdev_region(cxl_dev, CXL_NUM_MINORS);
-	class_destroy(cxl_class);
+	class_unregister(&cxl_class);
 }

@@ -8,9 +8,7 @@
 #include <linux/errno.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
 #include <linux/interrupt.h>
-#include <linux/of_device.h>
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>
 
@@ -482,20 +480,6 @@ static void leon_clear_clock_irq(void)
 
 static void leon_load_profile_irq(int cpu, unsigned int limit)
 {
-}
-
-void __init leon_trans_init(struct device_node *dp)
-{
-	if (strcmp(dp->type, "cpu") == 0 && strcmp(dp->name, "<NULL>") == 0) {
-		struct property *p;
-		p = of_find_property(dp, "mid", (void *)0);
-		if (p) {
-			int mid;
-			dp->name = prom_early_alloc(5 + 1);
-			memcpy(&mid, p->value, p->length);
-			sprintf((char *)dp->name, "cpu%.2d", mid);
-		}
-	}
 }
 
 #ifdef CONFIG_SMP

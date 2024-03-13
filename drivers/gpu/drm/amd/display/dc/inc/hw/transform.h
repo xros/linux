@@ -30,7 +30,7 @@
 #include "dc_hw_types.h"
 #include "fixed31_32.h"
 
-#define CSC_TEMPERATURE_MATRIX_SIZE 9
+#define CSC_TEMPERATURE_MATRIX_SIZE 12
 
 struct bit_depth_reduction_params;
 
@@ -162,9 +162,7 @@ struct scl_inits {
 	struct fixed31_32 h;
 	struct fixed31_32 h_c;
 	struct fixed31_32 v;
-	struct fixed31_32 v_bot;
 	struct fixed31_32 v_c;
-	struct fixed31_32 v_c_bot;
 };
 
 struct scaler_data {
@@ -250,8 +248,10 @@ struct transform_funcs {
 
 	void (*ipp_setup)(
 			struct transform *xfm_base,
-			enum surface_pixel_format input_format,
-			enum expansion_mode mode);
+			enum surface_pixel_format format,
+			enum expansion_mode mode,
+			struct dc_csc_transform input_csc_color_matrix,
+			enum dc_color_space input_color_space);
 
 	void (*ipp_full_bypass)(struct transform *xfm_base);
 
@@ -288,6 +288,9 @@ enum dscl_data_processing_format {
 struct dpp_caps {
 	/* DSCL processing pixel data in fixed or float format */
 	enum dscl_data_processing_format dscl_data_proc_format;
+
+	/* max LB partitions */
+	unsigned int max_lb_partitions;
 
 	/* Calculates the number of partitions in the line buffer.
 	 * The implementation of this function is overloaded for

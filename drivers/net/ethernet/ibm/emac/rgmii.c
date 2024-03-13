@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * drivers/net/ethernet/ibm/emac/rgmii.c
  *
@@ -14,17 +15,13 @@
  * Based on original work by
  * 	Matt Porter <mporter@kernel.crashing.org>
  * 	Copyright 2004 MontaVista Software, Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
  */
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/ethtool.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/platform_device.h>
 #include <asm/io.h>
 
 #include "emac.h"
@@ -52,43 +49,28 @@
 /* RGMII bridge supports only GMII/TBI and RGMII/RTBI PHYs */
 static inline int rgmii_valid_mode(int phy_mode)
 {
-	return  phy_mode == PHY_MODE_GMII ||
-		phy_mode == PHY_MODE_MII ||
-		phy_mode == PHY_MODE_RGMII ||
-		phy_mode == PHY_MODE_TBI ||
-		phy_mode == PHY_MODE_RTBI;
-}
-
-static inline const char *rgmii_mode_name(int mode)
-{
-	switch (mode) {
-	case PHY_MODE_RGMII:
-		return "RGMII";
-	case PHY_MODE_TBI:
-		return "TBI";
-	case PHY_MODE_GMII:
-		return "GMII";
-	case PHY_MODE_MII:
-		return "MII";
-	case PHY_MODE_RTBI:
-		return "RTBI";
-	default:
-		BUG();
-	}
+	return  phy_interface_mode_is_rgmii(phy_mode) ||
+		phy_mode == PHY_INTERFACE_MODE_GMII ||
+		phy_mode == PHY_INTERFACE_MODE_MII ||
+		phy_mode == PHY_INTERFACE_MODE_TBI ||
+		phy_mode == PHY_INTERFACE_MODE_RTBI;
 }
 
 static inline u32 rgmii_mode_mask(int mode, int input)
 {
 	switch (mode) {
-	case PHY_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_ID:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
+	case PHY_INTERFACE_MODE_RGMII_TXID:
 		return RGMII_FER_RGMII(input);
-	case PHY_MODE_TBI:
+	case PHY_INTERFACE_MODE_TBI:
 		return RGMII_FER_TBI(input);
-	case PHY_MODE_GMII:
+	case PHY_INTERFACE_MODE_GMII:
 		return RGMII_FER_GMII(input);
-	case PHY_MODE_MII:
+	case PHY_INTERFACE_MODE_MII:
 		return RGMII_FER_MII(input);
-	case PHY_MODE_RTBI:
+	case PHY_INTERFACE_MODE_RTBI:
 		return RGMII_FER_RTBI(input);
 	default:
 		BUG();
@@ -115,7 +97,7 @@ int rgmii_attach(struct platform_device *ofdev, int input, int mode)
 	out_be32(&p->fer, in_be32(&p->fer) | rgmii_mode_mask(mode, input));
 
 	printk(KERN_NOTICE "%pOF: input %d in %s mode\n",
-	       ofdev->dev.of_node, input, rgmii_mode_name(mode));
+	       ofdev->dev.of_node, input, phy_modes(mode));
 
 	++dev->users;
 
@@ -262,7 +244,7 @@ static int rgmii_probe(struct platform_device *ofdev)
 	}
 
 	/* Check for RGMII flags */
-	if (of_get_property(ofdev->dev.of_node, "has-mdio", NULL))
+	if (of_property_read_bool(ofdev->dev.of_node, "has-mdio"))
 		dev->flags |= EMAC_RGMII_FLAG_HAS_MDIO;
 
 	/* CAB lacks the right properties, fix this up */
@@ -291,7 +273,7 @@ static int rgmii_probe(struct platform_device *ofdev)
 	return rc;
 }
 
-static int rgmii_remove(struct platform_device *ofdev)
+static void rgmii_remove(struct platform_device *ofdev)
 {
 	struct rgmii_instance *dev = platform_get_drvdata(ofdev);
 
@@ -299,8 +281,6 @@ static int rgmii_remove(struct platform_device *ofdev)
 
 	iounmap(dev->base);
 	kfree(dev);
-
-	return 0;
 }
 
 static const struct of_device_id rgmii_match[] =
@@ -320,7 +300,7 @@ static struct platform_driver rgmii_driver = {
 		.of_match_table = rgmii_match,
 	},
 	.probe = rgmii_probe,
-	.remove = rgmii_remove,
+	.remove_new = rgmii_remove,
 };
 
 int __init rgmii_init(void)

@@ -19,11 +19,15 @@ struct IR_i2c {
 	u32                    polling_interval; /* in ms */
 
 	struct delayed_work    work;
-	char                   name[32];
 	char                   phys[32];
 	int                    (*get_key)(struct IR_i2c *ir,
 					  enum rc_proto *protocol,
 					  u32 *scancode, u8 *toggle);
+	/* tx */
+	struct i2c_client      *tx_c;
+	struct mutex	       lock;	/* do not poll Rx during Tx */
+	unsigned int	       carrier;
+	unsigned int	       duty_cycle;
 };
 
 enum ir_kbd_get_key_fn {
@@ -31,6 +35,7 @@ enum ir_kbd_get_key_fn {
 	IR_KBD_GET_KEY_PIXELVIEW,
 	IR_KBD_GET_KEY_HAUP,
 	IR_KBD_GET_KEY_KNC1,
+	IR_KBD_GET_KEY_GENIATECH,
 	IR_KBD_GET_KEY_FUSIONHDTV,
 	IR_KBD_GET_KEY_HAUP_XVR,
 	IR_KBD_GET_KEY_AVERMEDIA_CARDBUS,

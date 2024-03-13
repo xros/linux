@@ -61,7 +61,7 @@ INCLUDE FILES
 #include <linux/slab.h>
 #include <asm/div64.h>
 
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "drx39xxj.h"
 
 #include "drxj.h"
@@ -380,10 +380,10 @@ DEFINES
 */
 
 /*****************************************************************************/
-/* Audio block 0x103 is write only. To avoid shadowing in driver accessing    */
-/* RAM adresses directly. This must be READ ONLY to avoid problems.           */
-/* Writing to the interface adresses is more than only writing the RAM        */
-/* locations                                                                  */
+/* Audio block 0x103 is write only. To avoid shadowing in driver accessing   */
+/* RAM addresses directly. This must be READ ONLY to avoid problems.         */
+/* Writing to the interface addresses are more than only writing the RAM     */
+/* locations                                                                 */
 /*****************************************************************************/
 /*
 * \brief RAM location of MODUS registers
@@ -656,8 +656,8 @@ static struct drxj_data drxj_data_g = {
 	false,			/* flag: true=bypass             */
 	ATV_TOP_VID_PEAK__PRE,	/* shadow of ATV_TOP_VID_PEAK__A */
 	ATV_TOP_NOISE_TH__PRE,	/* shadow of ATV_TOP_NOISE_TH__A */
-	true,			/* flag CVBS ouput enable        */
-	false,			/* flag SIF ouput enable         */
+	true,			/* flag CVBS output enable       */
+	false,			/* flag SIF output enable        */
 	DRXJ_SIF_ATTENUATION_0DB,	/* current SIF att setting       */
 	{			/* qam_rf_agc_cfg */
 	 DRX_STANDARD_ITU_B,	/* standard            */
@@ -832,7 +832,7 @@ static struct drx_common_attr drxj_default_comm_attr_g = {
 	false,			/* If true mirror frequency spectrum            */
 	{
 	 /* MPEG output configuration */
-	 true,			/* If true, enable MPEG ouput    */
+	 true,			/* If true, enable MPEG output   */
 	 false,			/* If true, insert RS byte       */
 	 false,			/* If true, parallel out otherwise serial */
 	 false,			/* If true, invert DATA signals  */
@@ -848,7 +848,7 @@ static struct drx_common_attr drxj_default_comm_attr_g = {
 	 DRX_MPEG_STR_WIDTH_1	/* MPEG Start width in clock cycles */
 	 },
 	/* Initilisations below can be omitted, they require no user input and
-	   are initialy 0, NULL or false. The compiler will initialize them to these
+	   are initially 0, NULL or false. The compiler will initialize them to these
 	   values when omitted.  */
 	false,			/* is_opened */
 
@@ -869,7 +869,7 @@ static struct drx_common_attr drxj_default_comm_attr_g = {
 	DRX_POWER_UP,
 
 	/* Tuner */
-	1,			/* nr of I2C port to wich tuner is     */
+	1,			/* nr of I2C port to which tuner is    */
 	0L,			/* minimum RF input frequency, in kHz  */
 	0L,			/* maximum RF input frequency, in kHz  */
 	false,			/* Rf Agc Polarity                     */
@@ -1656,7 +1656,7 @@ static int drxdap_fasi_write_block(struct i2c_device_addr *dev_addr,
 		   sequense will be visible: (1) write address {i2c addr,
 		   4 bytes chip address} (2) write data {i2c addr, 4 bytes data }
 		   (3) write address (4) write data etc...
-		   Address must be rewriten because HI is reset after data transport and
+		   Address must be rewritten because HI is reset after data transport and
 		   expects an address.
 		 */
 		todo = (block_size < datasize ? block_size : datasize);
@@ -1820,7 +1820,7 @@ static int drxdap_fasi_write_reg32(struct i2c_device_addr *dev_addr,
 * \param wdata    Data to write
 * \param rdata    Buffer for data to read
 * \return int
-* \retval 0 Succes
+* \retval 0 Success
 * \retval -EIO Timeout, I2C error, illegal bank
 *
 * 16 bits register read modify write access using short addressing format only.
@@ -1897,7 +1897,7 @@ static int drxj_dap_read_modify_write_reg16(struct i2c_device_addr *dev_addr,
 * \param addr
 * \param data
 * \return int
-* \retval 0 Succes
+* \retval 0 Success
 * \retval -EIO Timeout, I2C error, illegal bank
 *
 * 16 bits register read access via audio token ring interface.
@@ -2004,7 +2004,7 @@ static int drxj_dap_read_reg16(struct i2c_device_addr *dev_addr,
 * \param addr
 * \param data
 * \return int
-* \retval 0 Succes
+* \retval 0 Success
 * \retval -EIO Timeout, I2C error, illegal bank
 *
 * 16 bits register write access via audio token ring interface.
@@ -2094,7 +2094,7 @@ static int drxj_dap_write_reg16(struct i2c_device_addr *dev_addr,
 * \param datasize size of data buffer in bytes
 * \param data     pointer to data buffer
 * \return int
-* \retval 0 Succes
+* \retval 0 Success
 * \retval -EIO Timeout, I2C error, illegal bank
 *
 */
@@ -2151,9 +2151,13 @@ int drxj_dap_atomic_read_write_block(struct i2c_device_addr *dev_addr,
 	if (read_flag) {
 		/* read data from buffer */
 		for (i = 0; i < (datasize / 2); i++) {
-			drxj_dap_read_reg16(dev_addr,
-					    (DRXJ_HI_ATOMIC_BUF_START + i),
-					   &word, 0);
+			rc = drxj_dap_read_reg16(dev_addr,
+						 (DRXJ_HI_ATOMIC_BUF_START + i),
+						 &word, 0);
+			if (rc) {
+				pr_err("error %d\n", rc);
+				goto rw_error;
+			}
 			data[2 * i] = (u8) (word & 0xFF);
 			data[(2 * i) + 1] = (u8) (word >> 8);
 		}
@@ -2178,7 +2182,7 @@ int drxj_dap_atomic_read_reg32(struct i2c_device_addr *dev_addr,
 				     u32 *data, u32 flags)
 {
 	u8 buf[sizeof(*data)] = { 0 };
-	int rc = -EIO;
+	int rc;
 	u32 word = 0;
 
 	if (!data)
@@ -2302,7 +2306,7 @@ hi_command(struct i2c_device_addr *dev_addr, const struct drxj_hi_cmd *cmd, u16 
 			pr_err("error %d\n", rc);
 			goto rw_error;
 		}
-		/* fallthrough */
+		fallthrough;
 	case SIO_HI_RA_RAM_CMD_BRDCTRL:
 		rc = drxj_dap_write_reg16(dev_addr, SIO_HI_RA_RAM_PAR_2__A, cmd->param2, 0);
 		if (rc != 0) {
@@ -2314,14 +2318,13 @@ hi_command(struct i2c_device_addr *dev_addr, const struct drxj_hi_cmd *cmd, u16 
 			pr_err("error %d\n", rc);
 			goto rw_error;
 		}
-		/* fallthrough */
+		fallthrough;
 	case SIO_HI_RA_RAM_CMD_NULL:
 		/* No parameters */
 		break;
 
 	default:
 		return -EINVAL;
-		break;
 	}
 
 	/* Write command */
@@ -2334,7 +2337,7 @@ hi_command(struct i2c_device_addr *dev_addr, const struct drxj_hi_cmd *cmd, u16 
 	if ((cmd->cmd) == SIO_HI_RA_RAM_CMD_RESET)
 		msleep(1);
 
-	/* Detect power down to ommit reading result */
+	/* Detect power down to omit reading result */
 	powerdown_cmd = (bool) ((cmd->cmd == SIO_HI_RA_RAM_CMD_CONFIG) &&
 				  (((cmd->
 				     param5) & SIO_HI_RA_RAM_PAR_5_CFG_SLEEP__M)
@@ -2344,6 +2347,7 @@ hi_command(struct i2c_device_addr *dev_addr, const struct drxj_hi_cmd *cmd, u16 
 		do {
 			nr_retries++;
 			if (nr_retries > DRXJ_MAX_RETRIES) {
+				rc = -ETIMEDOUT;
 				pr_err("timeout\n");
 				goto rw_error;
 			}
@@ -2750,7 +2754,7 @@ ctrl_set_cfg_mpeg_output(struct drx_demod_instance *demod, struct drx_cfg_mpeg_o
 	common_attr = (struct drx_common_attr *) demod->my_common_attr;
 
 	if (cfg_data->enable_mpeg_output == true) {
-		/* quick and dirty patch to set MPEG incase current std is not
+		/* quick and dirty patch to set MPEG in case current std is not
 		   producing MPEG */
 		switch (ext_attr->standard) {
 		case DRX_STANDARD_8VSB:
@@ -2837,8 +2841,7 @@ ctrl_set_cfg_mpeg_output(struct drx_demod_instance *demod, struct drx_cfg_mpeg_o
 			/* coef = 188/204                          */
 			max_bit_rate =
 			    (ext_attr->curr_symbol_rate / 8) * nr_bits * 188;
-			/* pass through as b/c Annex A/c need following settings */
-			/* fall-through */
+			fallthrough;	/* as b/c Annex A/C need following settings */
 		case DRX_STANDARD_ITU_B:
 			rc = drxj_dap_write_reg16(dev_addr, FEC_OC_FCT_USAGE__A, FEC_OC_FCT_USAGE__PRE, 0);
 			if (rc != 0) {
@@ -2891,7 +2894,7 @@ ctrl_set_cfg_mpeg_output(struct drx_demod_instance *demod, struct drx_cfg_mpeg_o
 			break;
 		default:
 			break;
-		}		/* swtich (standard) */
+		}		/* switch (standard) */
 
 		/* Check insertion of the Reed-Solomon parity bytes */
 		rc = drxj_dap_read_reg16(dev_addr, FEC_OC_MODE__A, &fec_oc_reg_mode, 0);
@@ -3552,8 +3555,8 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 		if (!ext_attr->has_smatx)
 			return -EIO;
 		switch (uio_cfg->mode) {
-		case DRX_UIO_MODE_FIRMWARE_SMA:	/* falltrough */
-		case DRX_UIO_MODE_FIRMWARE_SAW:	/* falltrough */
+		case DRX_UIO_MODE_FIRMWARE_SMA:
+		case DRX_UIO_MODE_FIRMWARE_SAW:
 		case DRX_UIO_MODE_READWRITE:
 			ext_attr->uio_sma_tx_mode = uio_cfg->mode;
 			break;
@@ -3576,7 +3579,7 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 		if (!ext_attr->has_smarx)
 			return -EIO;
 		switch (uio_cfg->mode) {
-		case DRX_UIO_MODE_FIRMWARE0:	/* falltrough */
+		case DRX_UIO_MODE_FIRMWARE0:
 		case DRX_UIO_MODE_READWRITE:
 			ext_attr->uio_sma_rx_mode = uio_cfg->mode;
 			break;
@@ -3591,7 +3594,6 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 			break;
 		default:
 			return -EINVAL;
-			break;
 		}		/* switch ( uio_cfg->mode ) */
 		break;
       /*====================================================================*/
@@ -3600,7 +3602,7 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 		if (!ext_attr->has_gpio)
 			return -EIO;
 		switch (uio_cfg->mode) {
-		case DRX_UIO_MODE_FIRMWARE0:	/* falltrough */
+		case DRX_UIO_MODE_FIRMWARE0:
 		case DRX_UIO_MODE_READWRITE:
 			ext_attr->uio_gpio_mode = uio_cfg->mode;
 			break;
@@ -3615,7 +3617,6 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 			break;
 		default:
 			return -EINVAL;
-			break;
 		}		/* switch ( uio_cfg->mode ) */
 		break;
       /*====================================================================*/
@@ -3636,10 +3637,9 @@ static int ctrl_set_uio_cfg(struct drx_demod_instance *demod, struct drxuio_cfg 
 			}
 			ext_attr->uio_irqn_mode = uio_cfg->mode;
 			break;
-		case DRX_UIO_MODE_FIRMWARE0:	/* falltrough */
+		case DRX_UIO_MODE_FIRMWARE0:
 		default:
 			return -EINVAL;
-			break;
 		}		/* switch ( uio_cfg->mode ) */
 		break;
       /*====================================================================*/
@@ -4001,31 +4001,36 @@ static int scu_command(struct i2c_device_addr *dev_addr, struct drxjscu_cmd *cmd
 		if (rc != 0) {
 			pr_err("error %d\n", rc);
 			goto rw_error;
-		}	/* fallthrough */
+		}
+		fallthrough;
 	case 4:
 		rc = drxj_dap_write_reg16(dev_addr, SCU_RAM_PARAM_3__A, *(cmd->parameter + 3), 0);
 		if (rc != 0) {
 			pr_err("error %d\n", rc);
 			goto rw_error;
-		}	/* fallthrough */
+		}
+		fallthrough;
 	case 3:
 		rc = drxj_dap_write_reg16(dev_addr, SCU_RAM_PARAM_2__A, *(cmd->parameter + 2), 0);
 		if (rc != 0) {
 			pr_err("error %d\n", rc);
 			goto rw_error;
-		}	/* fallthrough */
+		}
+		fallthrough;
 	case 2:
 		rc = drxj_dap_write_reg16(dev_addr, SCU_RAM_PARAM_1__A, *(cmd->parameter + 1), 0);
 		if (rc != 0) {
 			pr_err("error %d\n", rc);
 			goto rw_error;
-		}	/* fallthrough */
+		}
+		fallthrough;
 	case 1:
 		rc = drxj_dap_write_reg16(dev_addr, SCU_RAM_PARAM_0__A, *(cmd->parameter + 0), 0);
 		if (rc != 0) {
 			pr_err("error %d\n", rc);
 			goto rw_error;
-		}	/* fallthrough */
+		}
+		fallthrough;
 	case 0:
 		/* do nothing */
 		break;
@@ -4065,25 +4070,29 @@ static int scu_command(struct i2c_device_addr *dev_addr, struct drxjscu_cmd *cmd
 			if (rc != 0) {
 				pr_err("error %d\n", rc);
 				goto rw_error;
-			}	/* fallthrough */
+			}
+			fallthrough;
 		case 3:
 			rc = drxj_dap_read_reg16(dev_addr, SCU_RAM_PARAM_2__A, cmd->result + 2, 0);
 			if (rc != 0) {
 				pr_err("error %d\n", rc);
 				goto rw_error;
-			}	/* fallthrough */
+			}
+			fallthrough;
 		case 2:
 			rc = drxj_dap_read_reg16(dev_addr, SCU_RAM_PARAM_1__A, cmd->result + 1, 0);
 			if (rc != 0) {
 				pr_err("error %d\n", rc);
 				goto rw_error;
-			}	/* fallthrough */
+			}
+			fallthrough;
 		case 1:
 			rc = drxj_dap_read_reg16(dev_addr, SCU_RAM_PARAM_0__A, cmd->result + 0, 0);
 			if (rc != 0) {
 				pr_err("error %d\n", rc);
 				goto rw_error;
-			}	/* fallthrough */
+			}
+			fallthrough;
 		case 0:
 			/* do nothing */
 			break;
@@ -4124,7 +4133,7 @@ rw_error:
 * \param datasize size of data buffer in bytes
 * \param data     pointer to data buffer
 * \return int
-* \retval 0 Succes
+* \retval 0 Success
 * \retval -EIO Timeout, I2C error, illegal bank
 *
 */
@@ -4198,7 +4207,7 @@ int drxj_dap_scu_atomic_read_reg16(struct i2c_device_addr *dev_addr,
 					 u16 *data, u32 flags)
 {
 	u8 buf[2] = { 0 };
-	int rc = -EIO;
+	int rc;
 	u16 word = 0;
 
 	if (!data)
@@ -4226,7 +4235,7 @@ int drxj_dap_scu_atomic_write_reg16(struct i2c_device_addr *dev_addr,
 					  u16 data, u32 flags)
 {
 	u8 buf[2];
-	int rc = -EIO;
+	int rc;
 
 	buf[0] = (u8) (data & 0xff);
 	buf[1] = (u8) ((data >> 8) & 0xff);
@@ -4767,11 +4776,11 @@ set_frequency(struct drx_demod_instance *demod,
 	bool select_pos_image = false;
 	bool rf_mirror;
 	bool tuner_mirror;
-	bool image_to_select = true;
+	bool image_to_select;
 	s32 fm_frequency_shift = 0;
 
-	rf_mirror = (ext_attr->mirror == DRX_MIRROR_YES) ? true : false;
-	tuner_mirror = demod->my_common_attr->mirror_freq_spect ? false : true;
+	rf_mirror = ext_attr->mirror == DRX_MIRROR_YES;
+	tuner_mirror = !demod->my_common_attr->mirror_freq_spect;
 	/*
 	   Program frequency shifter
 	   No need to account for mirroring on RF
@@ -4788,7 +4797,7 @@ set_frequency(struct drx_demod_instance *demod,
 		   Sound carrier is already 3Mhz above centre frequency due
 		   to tuner setting so now add an extra shift of 1MHz... */
 		fm_frequency_shift = 1000;
-		/*fall through */
+		fallthrough;
 	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_NTSC:
 	case DRX_STANDARD_PAL_SECAM_BG:
@@ -8756,7 +8765,7 @@ static int qam_flip_spec(struct drx_demod_instance *demod, struct drx_channel *c
 		goto rw_error;
 	}
 	ext_attr->iqm_fs_rate_ofs = iqm_fs_rate_ofs;
-	ext_attr->pos_image = (ext_attr->pos_image) ? false : true;
+	ext_attr->pos_image = !ext_attr->pos_image;
 
 	/* freeze dq/fq updating */
 	rc = drxj_dap_read_reg16(dev_addr, QAM_DQ_MODE__A, &data, 0);
@@ -8986,7 +8995,7 @@ qam64auto(struct drx_demod_instance *demod,
 	     ((jiffies_to_msecs(jiffies) - start_time) <
 	      (DRXJ_QAM_MAX_WAITTIME + timeout_ofs))
 	    );
-	/* Returning control to apllication ... */
+	/* Returning control to application ... */
 
 	return 0;
 rw_error:
@@ -9306,7 +9315,7 @@ get_qamrs_err_count(struct i2c_device_addr *dev_addr,
 		return -EINVAL;
 
 	/* all reported errors are received in the  */
-	/* most recently finished measurment period */
+	/* most recently finished measurement period */
 	/*   no of pre RS bit errors */
 	rc = drxj_dap_read_reg16(dev_addr, FEC_RS_NR_BIT_ERRORS__A, &nr_bit_errors, 0);
 	if (rc != 0) {
@@ -9530,7 +9539,8 @@ ctrl_get_qam_sig_quality(struct drx_demod_instance *demod)
 		qam_sl_sig_power = DRXJ_QAM_SL_SIG_POWER_QAM256 << 2;
 		break;
 	default:
-		return -EIO;
+		rc = -EIO;
+		goto rw_error;
 	}
 
 	/* ------------------------------ */
@@ -9686,7 +9696,7 @@ rw_error:
       (3) SIF AGC (used to amplify the output signal in case input to low)
 
       The SIF AGC is now coupled to the RF/IF AGCs.
-      The SIF AGC is needed for both SIF ouput and the internal SIF signal to
+      The SIF AGC is needed for both SIF output and the internal SIF signal to
       the AUD block.
 
       RF and IF AGCs DACs are part of AFE, Video and SIF AGC DACs are part of
@@ -9699,11 +9709,11 @@ rw_error:
        later on because of the schedule)
 
       Several HW/SCU "settings" can be used for ATV. The standard selection
-      will reset most of these settings. To avoid that the end user apllication
+      will reset most of these settings. To avoid that the end user application
       has to perform these settings each time the ATV or FM standards is
       selected the driver will shadow these settings. This enables the end user
       to perform the settings only once after a drx_open(). The driver must
-      write the shadow settings to HW/SCU incase:
+      write the shadow settings to HW/SCU in case:
 	 ( setstandard FM/ATV) ||
 	 ( settings have changed && FM/ATV standard is active)
       The shadow settings will be stored in the device specific data container.
@@ -9905,7 +9915,7 @@ rw_error:
 #define IMPULSE_COSINE_ALPHA_0_5    { 2, 0, -2, -2, 2, 5, 2, -10, -20, -14, 20, 74, 125, 145}	/*sqrt raised-cosine filter with alpha=0.5 */
 #define IMPULSE_COSINE_ALPHA_RO_0_5 { 0, 0, 1, 2, 3, 0, -7, -15, -16,  0, 34, 77, 114, 128}	/*full raised-cosine filter with alpha=0.5 (receiver only) */
 
-/* Coefficients for the nyquist fitler (total: 27 taps) */
+/* Coefficients for the nyquist filter (total: 27 taps) */
 #define NYQFILTERLEN 27
 
 static int ctrl_set_oob(struct drx_demod_instance *demod, struct drxoob *oob_param)
@@ -10472,11 +10482,11 @@ ctrl_set_channel(struct drx_demod_instance *demod, struct drx_channel *channel)
 	    (standard == DRX_STANDARD_NTSC)) {
 		switch (channel->bandwidth) {
 		case DRX_BANDWIDTH_6MHZ:
-		case DRX_BANDWIDTH_UNKNOWN:	/* fall through */
+		case DRX_BANDWIDTH_UNKNOWN:
 			channel->bandwidth = DRX_BANDWIDTH_6MHZ;
 			break;
-		case DRX_BANDWIDTH_8MHZ:	/* fall through */
-		case DRX_BANDWIDTH_7MHZ:	/* fall through */
+		case DRX_BANDWIDTH_8MHZ:
+		case DRX_BANDWIDTH_7MHZ:
 		default:
 			return -EINVAL;
 		}
@@ -10508,10 +10518,10 @@ ctrl_set_channel(struct drx_demod_instance *demod, struct drx_channel *channel)
 		}
 
 		switch (channel->constellation) {
-		case DRX_CONSTELLATION_QAM16:	/* fall through */
-		case DRX_CONSTELLATION_QAM32:	/* fall through */
-		case DRX_CONSTELLATION_QAM64:	/* fall through */
-		case DRX_CONSTELLATION_QAM128:	/* fall through */
+		case DRX_CONSTELLATION_QAM16:
+		case DRX_CONSTELLATION_QAM32:
+		case DRX_CONSTELLATION_QAM64:
+		case DRX_CONSTELLATION_QAM128:
 		case DRX_CONSTELLATION_QAM256:
 			bandwidth_temp = channel->symbolrate * bw_rolloff_factor;
 			bandwidth = bandwidth_temp / 100;
@@ -10625,8 +10635,8 @@ ctrl_set_channel(struct drx_demod_instance *demod, struct drx_channel *channel)
 		}
 		break;
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 		rc = set_qam_channel(demod, channel, tuner_freq_offset);
 		if (rc != 0) {
@@ -10817,7 +10827,7 @@ ctrl_lock_status(struct drx_demod_instance *demod, enum drx_lock_status *lock_st
 		    SCU_RAM_COMMAND_CMD_DEMOD_GET_LOCK;
 		break;
 #endif
-	case DRX_STANDARD_UNKNOWN:	/* fallthrough */
+	case DRX_STANDARD_UNKNOWN:
 	default:
 		return -EIO;
 	}
@@ -10885,8 +10895,8 @@ ctrl_set_standard(struct drx_demod_instance *demod, enum drx_standard *standard)
 	 */
 	switch (prev_standard) {
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 		rc = power_down_qam(demod, false);
 		if (rc != 0) {
@@ -10905,9 +10915,10 @@ ctrl_set_standard(struct drx_demod_instance *demod, enum drx_standard *standard)
 	case DRX_STANDARD_UNKNOWN:
 		/* Do nothing */
 		break;
-	case DRX_STANDARD_AUTO:	/* fallthrough */
+	case DRX_STANDARD_AUTO:
 	default:
-		return -EINVAL;
+		rc = -EINVAL;
+		goto rw_error;
 	}
 
 	/*
@@ -10918,8 +10929,8 @@ ctrl_set_standard(struct drx_demod_instance *demod, enum drx_standard *standard)
 
 	switch (*standard) {
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 		do {
 			u16 dummy;
@@ -10941,7 +10952,6 @@ ctrl_set_standard(struct drx_demod_instance *demod, enum drx_standard *standard)
 	default:
 		ext_attr->standard = DRX_STANDARD_UNKNOWN;
 		return -EINVAL;
-		break;
 	}
 
 	return 0;
@@ -11060,9 +11070,8 @@ ctrl_power_mode(struct drx_demod_instance *demod, enum drx_power_mode *mode)
 		sio_cc_pwd_mode = SIO_CC_PWD_MODE_LEVEL_OSC;
 		break;
 	default:
-		/* Unknow sleep mode */
+		/* Unknown sleep mode */
 		return -EINVAL;
-		break;
 	}
 
 	/* Check if device needs to be powered up */
@@ -11074,7 +11083,7 @@ ctrl_power_mode(struct drx_demod_instance *demod, enum drx_power_mode *mode)
 		}
 	}
 
-	if ((*mode == DRX_POWER_UP)) {
+	if (*mode == DRX_POWER_UP) {
 		/* Restore analog & pin configuration */
 
 		/* Initialize default AFE configuration for VSB */
@@ -11108,12 +11117,12 @@ ctrl_power_mode(struct drx_demod_instance *demod, enum drx_power_mode *mode)
 				goto rw_error;
 			}
 			break;
-		case DRX_STANDARD_PAL_SECAM_BG:	/* fallthrough */
-		case DRX_STANDARD_PAL_SECAM_DK:	/* fallthrough */
-		case DRX_STANDARD_PAL_SECAM_I:	/* fallthrough */
-		case DRX_STANDARD_PAL_SECAM_L:	/* fallthrough */
-		case DRX_STANDARD_PAL_SECAM_LP:	/* fallthrough */
-		case DRX_STANDARD_NTSC:	/* fallthrough */
+		case DRX_STANDARD_PAL_SECAM_BG:
+		case DRX_STANDARD_PAL_SECAM_DK:
+		case DRX_STANDARD_PAL_SECAM_I:
+		case DRX_STANDARD_PAL_SECAM_L:
+		case DRX_STANDARD_PAL_SECAM_LP:
+		case DRX_STANDARD_NTSC:
 		case DRX_STANDARD_FM:
 			rc = power_down_atv(demod, ext_attr->standard, true);
 			if (rc != 0) {
@@ -11124,7 +11133,7 @@ ctrl_power_mode(struct drx_demod_instance *demod, enum drx_power_mode *mode)
 		case DRX_STANDARD_UNKNOWN:
 			/* Do nothing */
 			break;
-		case DRX_STANDARD_AUTO:	/* fallthrough */
+		case DRX_STANDARD_AUTO:
 		default:
 			return -EIO;
 		}
@@ -11217,8 +11226,8 @@ ctrl_set_cfg_pre_saw(struct drx_demod_instance *demod, struct drxj_cfg_pre_saw *
 		ext_attr->vsb_pre_saw_cfg = *pre_saw;
 		break;
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 		ext_attr->qam_pre_saw_cfg = *pre_saw;
 		break;
@@ -11261,10 +11270,10 @@ ctrl_set_cfg_afe_gain(struct drx_demod_instance *demod, struct drxj_cfg_afe_gain
 	ext_attr = (struct drxj_data *) demod->my_ext_attr;
 
 	switch (afe_gain->standard) {
-	case DRX_STANDARD_8VSB:	/* fallthrough */
+	case DRX_STANDARD_8VSB:	fallthrough;
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 #endif
 		/* Do nothing */
@@ -11298,8 +11307,8 @@ ctrl_set_cfg_afe_gain(struct drx_demod_instance *demod, struct drxj_cfg_afe_gain
 		ext_attr->vsb_pga_cfg = gain * 13 + 140;
 		break;
 #ifndef DRXJ_VSB_ONLY
-	case DRX_STANDARD_ITU_A:	/* fallthrough */
-	case DRX_STANDARD_ITU_B:	/* fallthrough */
+	case DRX_STANDARD_ITU_A:
+	case DRX_STANDARD_ITU_B:
 	case DRX_STANDARD_ITU_C:
 		ext_attr->qam_pga_cfg = gain * 13 + 140;
 		break;
@@ -11456,7 +11465,8 @@ static int drxj_open(struct drx_demod_instance *demod)
 
 		if (DRX_ISPOWERDOWNMODE(demod->my_common_attr->current_power_mode)) {
 			pr_err("Should powerup before loading the firmware.");
-			return -EINVAL;
+			rc = -EINVAL;
+			goto rw_error;
 		}
 
 		rc = drx_ctrl_u_code(demod, &ucode_info, UCODE_UPLOAD);
@@ -11723,7 +11733,7 @@ eof:
  *		- In case of UCODE_UPLOAD: I2C error.
  *		- In case of UCODE_VERIFY: I2C error or image on device
  *		  is not equal to image provided to this control function.
- * 	-EINVAL:
+ *	-EINVAL:
  *		- Invalid arguments.
  *		- Provided image is corrupt
  */
@@ -11807,8 +11817,8 @@ static int drx_ctrl_u_code(struct drx_demod_instance *demod,
 		block_hdr.CRC = be16_to_cpu(*(__be16 *)(mc_data));
 		mc_data += sizeof(u16);
 
-		pr_debug("%u: addr %u, size %u, flags 0x%04x, CRC 0x%04x\n",
-			(unsigned)(mc_data - mc_data_init), block_hdr.addr,
+		pr_debug("%zd: addr %u, size %u, flags 0x%04x, CRC 0x%04x\n",
+			(mc_data - mc_data_init), block_hdr.addr,
 			 block_hdr.size, block_hdr.flags, block_hdr.CRC);
 
 		/* Check block header on:
@@ -11838,8 +11848,8 @@ static int drx_ctrl_u_code(struct drx_demod_instance *demod,
 							mc_block_nr_bytes,
 							mc_data, 0x0000)) {
 				rc = -EIO;
-				pr_err("error writing firmware at pos %u\n",
-				       (unsigned)(mc_data - mc_data_init));
+				pr_err("error writing firmware at pos %zd\n",
+				       mc_data - mc_data_init);
 				goto release;
 			}
 			break;
@@ -11862,8 +11872,8 @@ static int drx_ctrl_u_code(struct drx_demod_instance *demod,
 						    (u16)bytes_to_comp,
 						    (u8 *)mc_data_buffer,
 						    0x0000)) {
-					pr_err("error reading firmware at pos %u\n",
-					       (unsigned)(mc_data - mc_data_init));
+					pr_err("error reading firmware at pos %zd\n",
+					       mc_data - mc_data_init);
 					return -EIO;
 				}
 
@@ -11871,8 +11881,8 @@ static int drx_ctrl_u_code(struct drx_demod_instance *demod,
 						bytes_to_comp);
 
 				if (result) {
-					pr_err("error verifying firmware at pos %u\n",
-					       (unsigned)(mc_data - mc_data_init));
+					pr_err("error verifying firmware at pos %zd\n",
+					       mc_data - mc_data_init);
 					return -EIO;
 				}
 
@@ -11884,7 +11894,6 @@ static int drx_ctrl_u_code(struct drx_demod_instance *demod,
 		}
 		default:
 			return -EINVAL;
-			break;
 
 		}
 		mc_data += mc_block_nr_bytes;
@@ -12284,7 +12293,8 @@ struct dvb_frontend *drx39xxj_attach(struct i2c_adapter *i2c)
 	if (state == NULL)
 		goto error;
 
-	demod = kmalloc(sizeof(struct drx_demod_instance), GFP_KERNEL);
+	demod = kmemdup(&drxj_default_demod_g,
+			sizeof(struct drx_demod_instance), GFP_KERNEL);
 	if (demod == NULL)
 		goto error;
 
@@ -12308,8 +12318,6 @@ struct dvb_frontend *drx39xxj_attach(struct i2c_adapter *i2c)
 	state->demod = demod;
 
 	/* setup the demod data */
-	memcpy(demod, &drxj_default_demod_g, sizeof(struct drx_demod_instance));
-
 	demod->my_i2c_dev_addr = demod_addr;
 	demod->my_common_attr = demod_comm_attr;
 	demod->my_i2c_dev_addr->user_data = state;
@@ -12364,15 +12372,15 @@ error:
 
 	return NULL;
 }
-EXPORT_SYMBOL(drx39xxj_attach);
+EXPORT_SYMBOL_GPL(drx39xxj_attach);
 
 static const struct dvb_frontend_ops drx39xxj_ops = {
 	.delsys = { SYS_ATSC, SYS_DVBC_ANNEX_B },
 	.info = {
 		 .name = "Micronas DRX39xxj family Frontend",
-		 .frequency_stepsize = 62500,
-		 .frequency_min = 51000000,
-		 .frequency_max = 858000000,
+		 .frequency_min_hz =  51 * MHz,
+		 .frequency_max_hz = 858 * MHz,
+		 .frequency_stepsize_hz = 62500,
 		 .caps = FE_CAN_QAM_64 | FE_CAN_QAM_256 | FE_CAN_8VSB
 	},
 

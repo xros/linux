@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/nommu.c
  *
@@ -20,10 +21,18 @@
 #include <asm/cputype.h>
 #include <asm/mpu.h>
 #include <asm/procinfo.h>
+#include <asm/idmap.h>
 
 #include "mm.h"
 
 unsigned long vectors_base;
+
+/*
+ * empty_zero_page is a special page that is used for
+ * zero-initialized data and COW.
+ */
+struct page *empty_zero_page;
+EXPORT_SYMBOL(empty_zero_page);
 
 #ifdef CONFIG_ARM_MPU
 struct mpu_rgn_info mpu_rgn_info;
@@ -31,7 +40,7 @@ struct mpu_rgn_info mpu_rgn_info;
 
 #ifdef CONFIG_CPU_CP15
 #ifdef CONFIG_CPU_HIGH_VECTOR
-static unsigned long __init setup_vectors_base(void)
+unsigned long setup_vectors_base(void)
 {
 	unsigned long reg = get_cr();
 
@@ -53,11 +62,12 @@ static inline bool security_extensions_enabled(void)
 {
 	/* Check CPUID Identification Scheme before ID_PFR1 read */
 	if ((read_cpuid_id() & 0x000f0000) == 0x000f0000)
-		return !!cpuid_feature_extract(CPUID_EXT_PFR1, 4);
+		return cpuid_feature_extract(CPUID_EXT_PFR1, 4) ||
+			cpuid_feature_extract(CPUID_EXT_PFR1, 20);
 	return 0;
 }
 
-static unsigned long __init setup_vectors_base(void)
+unsigned long setup_vectors_base(void)
 {
 	unsigned long base = 0, reg = get_cr();
 
@@ -99,6 +109,38 @@ void __init arm_mm_memblock_reserve(void)
 	memblock_reserve(0, 1);
 }
 
+static void __init adjust_lowmem_bounds_mpu(void)
+{
+	unsigned long pmsa = read_cpuid_ext(CPUID_EXT_MMFR0) & MMFR0_PMSA;
+
+	switch (pmsa) {
+	case MMFR0_PMSAv7:
+		pmsav7_adjust_lowmem_bounds();
+		break;
+	case MMFR0_PMSAv8:
+		pmsav8_adjust_lowmem_bounds();
+		break;
+	default:
+		break;
+	}
+}
+
+static void __init mpu_setup(void)
+{
+	unsigned long pmsa = read_cpuid_ext(CPUID_EXT_MMFR0) & MMFR0_PMSA;
+
+	switch (pmsa) {
+	case MMFR0_PMSAv7:
+		pmsav7_setup();
+		break;
+	case MMFR0_PMSAv8:
+		pmsav8_setup();
+		break;
+	default:
+		break;
+	}
+}
+
 void __init adjust_lowmem_bounds(void)
 {
 	phys_addr_t end;
@@ -114,9 +156,21 @@ void __init adjust_lowmem_bounds(void)
  */
 void __init paging_init(const struct machine_desc *mdesc)
 {
+	void *zero_page;
+
 	early_trap_init((void *)vectors_base);
 	mpu_setup();
+
+	/* allocate the zero page. */
+	zero_page = (void *)memblock_alloc(PAGE_SIZE, PAGE_SIZE);
+	if (!zero_page)
+		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
+		      __func__, PAGE_SIZE, PAGE_SIZE);
+
 	bootmem_init();
+
+	empty_zero_page = virt_to_page(zero_page);
+	flush_dcache_page(empty_zero_page);
 }
 
 /*
@@ -126,17 +180,17 @@ void setup_mm_for_reboot(void)
 {
 }
 
+void flush_dcache_folio(struct folio *folio)
+{
+	__cpuc_flush_dcache_area(folio_address(folio), folio_size(folio));
+}
+EXPORT_SYMBOL(flush_dcache_folio);
+
 void flush_dcache_page(struct page *page)
 {
 	__cpuc_flush_dcache_area(page_address(page), PAGE_SIZE);
 }
 EXPORT_SYMBOL(flush_dcache_page);
-
-void flush_kernel_dcache_page(struct page *page)
-{
-	__cpuc_flush_dcache_area(page_address(page), PAGE_SIZE);
-}
-EXPORT_SYMBOL(flush_kernel_dcache_page);
 
 void copy_to_user_page(struct vm_area_struct *vma, struct page *page,
 		       unsigned long uaddr, void *dst, const void *src,
@@ -172,15 +226,11 @@ void __iomem *ioremap(resource_size_t res_cookie, size_t size)
 EXPORT_SYMBOL(ioremap);
 
 void __iomem *ioremap_cache(resource_size_t res_cookie, size_t size)
-	__alias(ioremap_cached);
-
-void __iomem *ioremap_cached(resource_size_t res_cookie, size_t size)
 {
 	return __arm_ioremap_caller(res_cookie, size, MT_DEVICE_CACHED,
 				    __builtin_return_address(0));
 }
 EXPORT_SYMBOL(ioremap_cache);
-EXPORT_SYMBOL(ioremap_cached);
 
 void __iomem *ioremap_wc(resource_size_t res_cookie, size_t size)
 {
@@ -206,14 +256,7 @@ void *arch_memremap_wb(phys_addr_t phys_addr, size_t size)
 	return (void *)phys_addr;
 }
 
-void __iounmap(volatile void __iomem *addr)
-{
-}
-EXPORT_SYMBOL(__iounmap);
-
-void (*arch_iounmap)(volatile void __iomem *);
-
-void iounmap(volatile void __iomem *addr)
+void iounmap(volatile void __iomem *io_addr)
 {
 }
 EXPORT_SYMBOL(iounmap);

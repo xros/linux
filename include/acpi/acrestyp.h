@@ -1,45 +1,11 @@
+/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0 */
 /******************************************************************************
  *
  * Name: acrestyp.h - Defines, types, and structures for resource descriptors
  *
+ * Copyright (C) 2000 - 2023, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #ifndef __ACRESTYP_H__
 #define __ACRESTYP_H__
@@ -173,10 +139,13 @@ struct acpi_resource_irq {
 	u8 descriptor_length;
 	u8 triggering;
 	u8 polarity;
-	u8 sharable;
+	u8 shareable;
 	u8 wake_capable;
 	u8 interrupt_count;
-	u8 interrupts[1];
+	union {
+		u8 interrupt;
+		 ACPI_FLEX_ARRAY(u8, interrupts);
+	};
 };
 
 struct acpi_resource_dma {
@@ -184,7 +153,10 @@ struct acpi_resource_dma {
 	u8 bus_master;
 	u8 transfer;
 	u8 channel_count;
-	u8 channels[1];
+	union {
+		u8 channel;
+		 ACPI_FLEX_ARRAY(u8, channels);
+	};
 };
 
 struct acpi_resource_start_dependent {
@@ -228,7 +200,7 @@ struct acpi_resource_fixed_dma {
 
 struct acpi_resource_vendor {
 	u16 byte_length;
-	u8 byte_data[1];
+	u8 byte_data[];
 };
 
 /* Vendor resource with UUID info (introduced in ACPI 3.0) */
@@ -237,7 +209,7 @@ struct acpi_resource_vendor_typed {
 	u16 byte_length;
 	u8 uuid_subtype;
 	u8 uuid[ACPI_UUID_LENGTH];
-	u8 byte_data[1];
+	u8 byte_data[];
 };
 
 struct acpi_resource_end_tag {
@@ -362,11 +334,14 @@ struct acpi_resource_extended_irq {
 	u8 producer_consumer;
 	u8 triggering;
 	u8 polarity;
-	u8 sharable;
+	u8 shareable;
 	u8 wake_capable;
 	u8 interrupt_count;
 	struct acpi_resource_source resource_source;
-	u32 interrupts[1];
+	union {
+		u32 interrupt;
+		 ACPI_FLEX_ARRAY(u32, interrupts);
+	};
 };
 
 struct acpi_resource_generic_register {
@@ -382,7 +357,7 @@ struct acpi_resource_gpio {
 	u8 connection_type;
 	u8 producer_consumer;	/* For values, see Producer/Consumer above */
 	u8 pin_config;
-	u8 sharable;		/* For values, see Interrupt Attributes above */
+	u8 shareable;		/* For values, see Interrupt Attributes above */
 	u8 wake_capable;	/* For values, see Interrupt Attributes above */
 	u8 io_restriction;
 	u8 triggering;		/* For values, see Interrupt Attributes above */
@@ -415,7 +390,7 @@ struct acpi_resource_gpio {
 #define ACPI_IO_RESTRICT_OUTPUT                 2
 #define ACPI_IO_RESTRICT_NONE_PRESERVE          3
 
-/* Common structure for I2C, SPI, and UART serial descriptors */
+/* Common structure for I2C, SPI, UART, CSI2 serial descriptors */
 
 #define ACPI_RESOURCE_SERIAL_COMMON \
 	u8                                      revision_id; \
@@ -437,6 +412,7 @@ ACPI_RESOURCE_SERIAL_COMMON};
 #define ACPI_RESOURCE_SERIAL_TYPE_I2C           1
 #define ACPI_RESOURCE_SERIAL_TYPE_SPI           2
 #define ACPI_RESOURCE_SERIAL_TYPE_UART          3
+#define ACPI_RESOURCE_SERIAL_TYPE_CSI2          4
 
 /* Values for slave_mode field above */
 
@@ -539,10 +515,15 @@ struct acpi_resource_uart_serialbus {
 #define ACPI_UART_CLEAR_TO_SEND                 (1<<6)
 #define ACPI_UART_REQUEST_TO_SEND               (1<<7)
 
+struct acpi_resource_csi2_serialbus {
+	ACPI_RESOURCE_SERIAL_COMMON u8 local_port_instance;
+	u8 phy_type;
+};
+
 struct acpi_resource_pin_function {
 	u8 revision_id;
 	u8 pin_config;
-	u8 sharable;		/* For values, see Interrupt Attributes above */
+	u8 shareable;		/* For values, see Interrupt Attributes above */
 	u16 function_number;
 	u16 pin_table_length;
 	u16 vendor_length;
@@ -554,7 +535,7 @@ struct acpi_resource_pin_function {
 struct acpi_resource_pin_config {
 	u8 revision_id;
 	u8 producer_consumer;	/* For values, see Producer/Consumer above */
-	u8 sharable;		/* For values, see Interrupt Attributes above */
+	u8 shareable;		/* For values, see Interrupt Attributes above */
 	u8 pin_config_type;
 	u32 pin_config_value;
 	u16 pin_table_length;
@@ -562,6 +543,15 @@ struct acpi_resource_pin_config {
 	struct acpi_resource_source resource_source;
 	u16 *pin_table;
 	u8 *vendor_data;
+};
+
+struct acpi_resource_clock_input {
+	u8 revision_id;
+	u8 mode;
+	u8 scale;
+	u16 frequency_divisor;
+	u32 frequency_numerator;
+	struct acpi_resource_source resource_source;
 };
 
 /* Values for pin_config_type field above */
@@ -594,7 +584,7 @@ struct acpi_resource_pin_group {
 struct acpi_resource_pin_group_function {
 	u8 revision_id;
 	u8 producer_consumer;	/* For values, see Producer/Consumer above */
-	u8 sharable;		/* For values, see Interrupt Attributes above */
+	u8 shareable;		/* For values, see Interrupt Attributes above */
 	u16 function_number;
 	u16 vendor_length;
 	struct acpi_resource_source resource_source;
@@ -605,7 +595,7 @@ struct acpi_resource_pin_group_function {
 struct acpi_resource_pin_group_config {
 	u8 revision_id;
 	u8 producer_consumer;	/* For values, see Producer/Consumer above */
-	u8 sharable;		/* For values, see Interrupt Attributes above */
+	u8 shareable;		/* For values, see Interrupt Attributes above */
 	u8 pin_config_type;	/* For values, see pin_config_type above */
 	u32 pin_config_value;
 	u16 vendor_length;
@@ -641,7 +631,8 @@ struct acpi_resource_pin_group_config {
 #define ACPI_RESOURCE_TYPE_PIN_GROUP            22	/* ACPI 6.2 */
 #define ACPI_RESOURCE_TYPE_PIN_GROUP_FUNCTION   23	/* ACPI 6.2 */
 #define ACPI_RESOURCE_TYPE_PIN_GROUP_CONFIG     24	/* ACPI 6.2 */
-#define ACPI_RESOURCE_TYPE_MAX                  24
+#define ACPI_RESOURCE_TYPE_CLOCK_INPUT          25	/* ACPI 6.5 */
+#define ACPI_RESOURCE_TYPE_MAX                  25
 
 /* Master union for resource descriptors */
 
@@ -668,12 +659,14 @@ union acpi_resource_data {
 	struct acpi_resource_i2c_serialbus i2c_serial_bus;
 	struct acpi_resource_spi_serialbus spi_serial_bus;
 	struct acpi_resource_uart_serialbus uart_serial_bus;
+	struct acpi_resource_csi2_serialbus csi2_serial_bus;
 	struct acpi_resource_common_serialbus common_serial_bus;
 	struct acpi_resource_pin_function pin_function;
 	struct acpi_resource_pin_config pin_config;
 	struct acpi_resource_pin_group pin_group;
 	struct acpi_resource_pin_group_function pin_group_function;
 	struct acpi_resource_pin_group_config pin_group_config;
+	struct acpi_resource_clock_input clock_input;
 
 	/* Common fields */
 
@@ -706,7 +699,10 @@ struct acpi_pci_routing_table {
 	u32 pin;
 	u64 address;		/* here for 64-bit alignment */
 	u32 source_index;
-	char source[4];		/* pad to 64 bits so sizeof() works in all cases */
+	union {
+		char pad[4];	/* pad to 64 bits so sizeof() works in all cases */
+		 ACPI_FLEX_ARRAY(char, source);
+	};
 };
 
 #endif				/* __ACRESTYP_H__ */

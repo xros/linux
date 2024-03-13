@@ -1,23 +1,18 @@
-/*
- * Fifo-attached Serial Interface (FSI) support for SH7724
- *
- * Copyright (C) 2009 Renesas Solutions Corp.
- * Kuninori Morimoto <morimoto.kuninori@renesas.com>
- *
- * Based on ssi.c
- * Copyright (c) 2007 Manuel Lauss <mano@roarinelk.homelinux.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Fifo-attached Serial Interface (FSI) support for SH7724
+//
+// Copyright (C) 2009 Renesas Solutions Corp.
+// Kuninori Morimoto <morimoto.kuninori@renesas.com>
+//
+// Based on ssi.c
+// Copyright (c) 2007 Manuel Lauss <mano@roarinelk.homelinux.net>
 
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
 #include <linux/io.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/scatterlist.h>
 #include <linux/sh_dma.h>
 #include <linux/slab.h>
@@ -223,7 +218,7 @@ struct fsi_stream {
 	u32 bus_option;
 
 	/*
-	 * thse are initialized by fsi_handler_init()
+	 * these are initialized by fsi_handler_init()
 	 */
 	struct fsi_stream_handler *handler;
 	struct fsi_priv		*priv;
@@ -410,9 +405,9 @@ static int fsi_is_play(struct snd_pcm_substream *substream)
 
 static struct snd_soc_dai *fsi_get_dai(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
-	return  rtd->cpu_dai;
+	return  snd_soc_rtd_to_cpu(rtd, 0);
 }
 
 static struct fsi_priv *fsi_get_priv_frm_dai(struct snd_soc_dai *dai)
@@ -784,7 +779,7 @@ static int fsi_clk_init(struct device *dev,
 			return -EINVAL;
 		}
 		if (clock->div == clock->own) {
-			dev_err(dev, "cpu doens't support div clock\n");
+			dev_err(dev, "cpu doesn't support div clock\n");
 			return -EINVAL;
 		}
 	}
@@ -820,13 +815,26 @@ static int fsi_clk_enable(struct device *dev,
 			return ret;
 		}
 
-		clk_enable(clock->xck);
-		clk_enable(clock->ick);
-		clk_enable(clock->div);
+		ret = clk_enable(clock->xck);
+		if (ret)
+			goto err;
+		ret = clk_enable(clock->ick);
+		if (ret)
+			goto disable_xck;
+		ret = clk_enable(clock->div);
+		if (ret)
+			goto disable_ick;
 
 		clock->count++;
 	}
 
+	return ret;
+
+disable_ick:
+	clk_disable(clock->ick);
+disable_xck:
+	clk_disable(clock->xck);
+err:
 	return ret;
 }
 
@@ -1371,7 +1379,9 @@ static int fsi_dma_probe(struct fsi_priv *fsi, struct fsi_stream *io, struct dev
 	io->chan = dma_request_channel(mask, shdma_chan_filter,
 				       (void *)io->dma_id);
 #else
-	io->chan = dma_request_slave_channel(dev, is_play ? "tx" : "rx");
+	io->chan = dma_request_chan(dev, is_play ? "tx" : "rx");
+	if (IS_ERR(io->chan))
+		io->chan = NULL;
 #endif
 	if (io->chan) {
 		struct dma_slave_config cfg = {};
@@ -1636,12 +1646,12 @@ static int fsi_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct fsi_priv *fsi = fsi_get_priv_frm_dai(dai);
 	int ret;
 
-	/* set master/slave audio interface */
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	/* set clock master audio interface */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BC_FC:
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
-		fsi->clk_master = 1; /* codec is slave, cpu is master */
+	case SND_SOC_DAIFMT_BP_FP:
+		fsi->clk_master = 1; /* cpu is master */
 		break;
 	default:
 		return -EINVAL;
@@ -1698,12 +1708,27 @@ static int fsi_dai_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+/*
+ * Select below from Sound Card, not auto
+ *	SND_SOC_DAIFMT_CBC_CFC
+ *	SND_SOC_DAIFMT_CBP_CFP
+ */
+static u64 fsi_dai_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops fsi_dai_ops = {
 	.startup	= fsi_dai_startup,
 	.shutdown	= fsi_dai_shutdown,
 	.trigger	= fsi_dai_trigger,
 	.set_fmt	= fsi_dai_set_fmt,
 	.hw_params	= fsi_dai_hw_params,
+	.auto_selectable_formats	= &fsi_dai_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 /*
@@ -1722,7 +1747,8 @@ static const struct snd_pcm_hardware fsi_pcm_hardware = {
 	.fifo_size		= 256,
 };
 
-static int fsi_pcm_open(struct snd_pcm_substream *substream)
+static int fsi_pcm_open(struct snd_soc_component *component,
+			struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int ret = 0;
@@ -1735,19 +1761,8 @@ static int fsi_pcm_open(struct snd_pcm_substream *substream)
 	return ret;
 }
 
-static int fsi_hw_params(struct snd_pcm_substream *substream,
-			 struct snd_pcm_hw_params *hw_params)
-{
-	return snd_pcm_lib_malloc_pages(substream,
-					params_buffer_bytes(hw_params));
-}
-
-static int fsi_hw_free(struct snd_pcm_substream *substream)
-{
-	return snd_pcm_lib_free_pages(substream);
-}
-
-static snd_pcm_uframes_t fsi_pointer(struct snd_pcm_substream *substream)
+static snd_pcm_uframes_t fsi_pointer(struct snd_soc_component *component,
+				     struct snd_pcm_substream *substream)
 {
 	struct fsi_priv *fsi = fsi_get_priv(substream);
 	struct fsi_stream *io = fsi_stream_get(fsi, substream);
@@ -1755,28 +1770,22 @@ static snd_pcm_uframes_t fsi_pointer(struct snd_pcm_substream *substream)
 	return fsi_sample2frame(fsi, io->buff_sample_pos);
 }
 
-static const struct snd_pcm_ops fsi_pcm_ops = {
-	.open		= fsi_pcm_open,
-	.ioctl		= snd_pcm_lib_ioctl,
-	.hw_params	= fsi_hw_params,
-	.hw_free	= fsi_hw_free,
-	.pointer	= fsi_pointer,
-};
-
 /*
- *		snd_soc_platform
+ *		snd_soc_component
  */
 
 #define PREALLOC_BUFFER		(32 * 1024)
 #define PREALLOC_BUFFER_MAX	(32 * 1024)
 
-static int fsi_pcm_new(struct snd_soc_pcm_runtime *rtd)
+static int fsi_pcm_new(struct snd_soc_component *component,
+		       struct snd_soc_pcm_runtime *rtd)
 {
-	return snd_pcm_lib_preallocate_pages_for_all(
+	snd_pcm_set_managed_buffer_all(
 		rtd->pcm,
 		SNDRV_DMA_TYPE_DEV,
 		rtd->card->snd_card->dev,
 		PREALLOC_BUFFER, PREALLOC_BUFFER_MAX);
+	return 0;
 }
 
 /*
@@ -1818,13 +1827,11 @@ static struct snd_soc_dai_driver fsi_soc_dai[] = {
 	},
 };
 
-static const struct snd_soc_platform_driver fsi_soc_platform = {
-	.ops		= &fsi_pcm_ops,
-	.pcm_new	= fsi_pcm_new,
-};
-
 static const struct snd_soc_component_driver fsi_soc_component = {
 	.name		= "fsi",
+	.open		= fsi_pcm_open,
+	.pointer	= fsi_pointer,
+	.pcm_construct	= fsi_pcm_new,
 };
 
 /*
@@ -1849,7 +1856,7 @@ static void fsi_of_parse(char *name,
 
 	for (i = 0; i < ARRAY_SIZE(of_parse_property); i++) {
 		sprintf(prop, "%s,%s", name, of_parse_property[i].name);
-		if (of_get_property(np, prop, NULL))
+		if (of_property_present(np, prop))
 			flags |= of_parse_property[i].val;
 	}
 	info->flags = flags;
@@ -1960,8 +1967,7 @@ static int fsi_probe(struct platform_device *pdev)
 	if (!master)
 		return -ENOMEM;
 
-	master->base = devm_ioremap_nocache(&pdev->dev,
-					    res->start, resource_size(res));
+	master->base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
 	if (!master->base) {
 		dev_err(&pdev->dev, "Unable to ioremap FSI registers.\n");
 		return -ENXIO;
@@ -2007,23 +2013,15 @@ static int fsi_probe(struct platform_device *pdev)
 		goto exit_fsib;
 	}
 
-	ret = snd_soc_register_platform(&pdev->dev, &fsi_soc_platform);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "cannot snd soc register\n");
-		goto exit_fsib;
-	}
-
-	ret = snd_soc_register_component(&pdev->dev, &fsi_soc_component,
+	ret = devm_snd_soc_register_component(&pdev->dev, &fsi_soc_component,
 				    fsi_soc_dai, ARRAY_SIZE(fsi_soc_dai));
 	if (ret < 0) {
 		dev_err(&pdev->dev, "cannot snd component register\n");
-		goto exit_snd_soc;
+		goto exit_fsib;
 	}
 
 	return ret;
 
-exit_snd_soc:
-	snd_soc_unregister_platform(&pdev->dev);
 exit_fsib:
 	pm_runtime_disable(&pdev->dev);
 	fsi_stream_remove(&master->fsib);
@@ -2033,7 +2031,7 @@ exit_fsia:
 	return ret;
 }
 
-static int fsi_remove(struct platform_device *pdev)
+static void fsi_remove(struct platform_device *pdev)
 {
 	struct fsi_master *master;
 
@@ -2041,13 +2039,8 @@ static int fsi_remove(struct platform_device *pdev)
 
 	pm_runtime_disable(&pdev->dev);
 
-	snd_soc_unregister_component(&pdev->dev);
-	snd_soc_unregister_platform(&pdev->dev);
-
 	fsi_stream_remove(&master->fsia);
 	fsi_stream_remove(&master->fsib);
-
-	return 0;
 }
 
 static void __fsi_suspend(struct fsi_priv *fsi,
@@ -2114,7 +2107,7 @@ static struct platform_driver fsi_driver = {
 		.of_match_table = fsi_of_match,
 	},
 	.probe		= fsi_probe,
-	.remove		= fsi_remove,
+	.remove_new	= fsi_remove,
 	.id_table	= fsi_id_table,
 };
 

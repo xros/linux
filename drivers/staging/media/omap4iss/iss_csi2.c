@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * TI OMAP4 ISS V4L2 Driver - CSI PHY module
  *
  * Copyright (C) 2012 Texas Instruments, Inc.
  *
  * Author: Sergio Aguirre <sergio.a.aguirre@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/delay.h>
@@ -542,7 +538,7 @@ static int csi2_configure(struct iss_csi2_device *csi2)
 	if (csi2->contexts[0].enabled || csi2->ctrl.if_enable)
 		return -EBUSY;
 
-	pad = media_entity_remote_pad(&csi2->pads[CSI2_PAD_SINK]);
+	pad = media_pad_remote_pad_first(&csi2->pads[CSI2_PAD_SINK]);
 	sensor = media_entity_to_v4l2_subdev(pad->entity);
 	pdata = sensor->host_priv;
 
@@ -716,7 +712,7 @@ static void csi2_isr_ctx(struct iss_csi2_device *csi2,
 
 	/* Skip interrupts until we reach the frame skip count. The CSI2 will be
 	 * automatically disabled, as the frame skip count has been programmed
-	 * in the CSI2_CTx_CTRL1::COUNT field, so reenable it.
+	 * in the CSI2_CTx_CTRL1::COUNT field, so re-enable it.
 	 *
 	 * It would have been nice to rely on the FRAME_NUMBER interrupt instead
 	 * but it turned out that the interrupt is only generated when the CSI2
@@ -829,19 +825,19 @@ static const struct iss_video_operations csi2_issvideo_ops = {
 
 static struct v4l2_mbus_framefmt *
 __csi2_get_format(struct iss_csi2_device *csi2,
-		  struct v4l2_subdev_pad_config *cfg,
+		  struct v4l2_subdev_state *sd_state,
 		  unsigned int pad,
 		  enum v4l2_subdev_format_whence which)
 {
 	if (which == V4L2_SUBDEV_FORMAT_TRY)
-		return v4l2_subdev_get_try_format(&csi2->subdev, cfg, pad);
+		return v4l2_subdev_state_get_format(sd_state, pad);
 
 	return &csi2->formats[pad];
 }
 
 static void
 csi2_try_format(struct iss_csi2_device *csi2,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		unsigned int pad,
 		struct v4l2_mbus_framefmt *fmt,
 		enum v4l2_subdev_format_whence which)
@@ -872,7 +868,8 @@ csi2_try_format(struct iss_csi2_device *csi2,
 		 * compression.
 		 */
 		pixelcode = fmt->code;
-		format = __csi2_get_format(csi2, cfg, CSI2_PAD_SINK, which);
+		format = __csi2_get_format(csi2, sd_state, CSI2_PAD_SINK,
+					   which);
 		memcpy(fmt, format, sizeof(*fmt));
 
 		/*
@@ -893,12 +890,12 @@ csi2_try_format(struct iss_csi2_device *csi2,
 /*
  * csi2_enum_mbus_code - Handle pixel format enumeration
  * @sd     : pointer to v4l2 subdev structure
- * @cfg    : V4L2 subdev pad config
+ * @sd_state: V4L2 subdev state
  * @code   : pointer to v4l2_subdev_mbus_code_enum structure
  * return -EINVAL or zero on success
  */
 static int csi2_enum_mbus_code(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_pad_config *cfg,
+			       struct v4l2_subdev_state *sd_state,
 			       struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct iss_csi2_device *csi2 = v4l2_get_subdevdata(sd);
@@ -911,7 +908,7 @@ static int csi2_enum_mbus_code(struct v4l2_subdev *sd,
 
 		code->code = csi2_input_fmts[code->index];
 	} else {
-		format = __csi2_get_format(csi2, cfg, CSI2_PAD_SINK,
+		format = __csi2_get_format(csi2, sd_state, CSI2_PAD_SINK,
 					   code->which);
 		switch (code->index) {
 		case 0:
@@ -935,7 +932,7 @@ static int csi2_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int csi2_enum_frame_size(struct v4l2_subdev *sd,
-				struct v4l2_subdev_pad_config *cfg,
+				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct iss_csi2_device *csi2 = v4l2_get_subdevdata(sd);
@@ -947,7 +944,7 @@ static int csi2_enum_frame_size(struct v4l2_subdev *sd,
 	format.code = fse->code;
 	format.width = 1;
 	format.height = 1;
-	csi2_try_format(csi2, cfg, fse->pad, &format, fse->which);
+	csi2_try_format(csi2, sd_state, fse->pad, &format, fse->which);
 	fse->min_width = format.width;
 	fse->min_height = format.height;
 
@@ -957,7 +954,7 @@ static int csi2_enum_frame_size(struct v4l2_subdev *sd,
 	format.code = fse->code;
 	format.width = -1;
 	format.height = -1;
-	csi2_try_format(csi2, cfg, fse->pad, &format, fse->which);
+	csi2_try_format(csi2, sd_state, fse->pad, &format, fse->which);
 	fse->max_width = format.width;
 	fse->max_height = format.height;
 
@@ -967,18 +964,18 @@ static int csi2_enum_frame_size(struct v4l2_subdev *sd,
 /*
  * csi2_get_format - Handle get format by pads subdev method
  * @sd : pointer to v4l2 subdev structure
- * @cfg: V4L2 subdev pad config
+ * @sd_state: V4L2 subdev state
  * @fmt: pointer to v4l2 subdev format structure
  * return -EINVAL or zero on success
  */
 static int csi2_get_format(struct v4l2_subdev *sd,
-			   struct v4l2_subdev_pad_config *cfg,
+			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct iss_csi2_device *csi2 = v4l2_get_subdevdata(sd);
 	struct v4l2_mbus_framefmt *format;
 
-	format = __csi2_get_format(csi2, cfg, fmt->pad, fmt->which);
+	format = __csi2_get_format(csi2, sd_state, fmt->pad, fmt->which);
 	if (!format)
 		return -EINVAL;
 
@@ -989,30 +986,31 @@ static int csi2_get_format(struct v4l2_subdev *sd,
 /*
  * csi2_set_format - Handle set format by pads subdev method
  * @sd : pointer to v4l2 subdev structure
- * @cfg: V4L2 subdev pad config
+ * @sd_state: V4L2 subdev state
  * @fmt: pointer to v4l2 subdev format structure
  * return -EINVAL or zero on success
  */
 static int csi2_set_format(struct v4l2_subdev *sd,
-			   struct v4l2_subdev_pad_config *cfg,
+			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *fmt)
 {
 	struct iss_csi2_device *csi2 = v4l2_get_subdevdata(sd);
 	struct v4l2_mbus_framefmt *format;
 
-	format = __csi2_get_format(csi2, cfg, fmt->pad, fmt->which);
+	format = __csi2_get_format(csi2, sd_state, fmt->pad, fmt->which);
 	if (!format)
 		return -EINVAL;
 
-	csi2_try_format(csi2, cfg, fmt->pad, &fmt->format, fmt->which);
+	csi2_try_format(csi2, sd_state, fmt->pad, &fmt->format, fmt->which);
 	*format = fmt->format;
 
 	/* Propagate the format from sink to source */
 	if (fmt->pad == CSI2_PAD_SINK) {
-		format = __csi2_get_format(csi2, cfg, CSI2_PAD_SOURCE,
+		format = __csi2_get_format(csi2, sd_state, CSI2_PAD_SOURCE,
 					   fmt->which);
 		*format = fmt->format;
-		csi2_try_format(csi2, cfg, CSI2_PAD_SOURCE, format, fmt->which);
+		csi2_try_format(csi2, sd_state, CSI2_PAD_SOURCE, format,
+				fmt->which);
 	}
 
 	return 0;
@@ -1054,7 +1052,7 @@ static int csi2_init_formats(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	format.format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
 	format.format.width = 4096;
 	format.format.height = 4096;
-	csi2_set_format(sd, fh ? fh->pad : NULL, &format);
+	csi2_set_format(sd, fh ? fh->state : NULL, &format);
 
 	return 0;
 }
@@ -1261,7 +1259,7 @@ static int csi2_init_entities(struct iss_csi2_device *csi2, const char *subname)
 	struct media_pad *pads = csi2->pads;
 	struct media_entity *me = &sd->entity;
 	int ret;
-	char name[V4L2_SUBDEV_NAME_SIZE];
+	char name[32];
 
 	v4l2_subdev_init(sd, &csi2_ops);
 	sd->internal_ops = &csi2_internal_ops;

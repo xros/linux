@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/atm/suni.c - S/UNI PHY driver
  *
@@ -20,7 +21,6 @@
 #include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/capability.h>
-#include <linux/atm_suni.h>
 #include <linux/slab.h>
 #include <asm/param.h>
 #include <linux/uaccess.h>
@@ -387,4 +387,5 @@ int suni_init(struct atm_dev *dev)
 
 EXPORT_SYMBOL(suni_init);
 
+MODULE_DESCRIPTION("S/UNI PHY driver");
 MODULE_LICENSE("GPL");

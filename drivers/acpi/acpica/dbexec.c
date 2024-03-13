@@ -1,45 +1,9 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /*******************************************************************************
  *
  * Module Name: dbexec - debugger control method execution
  *
  ******************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -122,7 +86,8 @@ void acpi_db_delete_objects(u32 count, union acpi_object *objects)
  *
  * RETURN:      Status
  *
- * DESCRIPTION: Execute a control method.
+ * DESCRIPTION: Execute a control method. Used to evaluate objects via the
+ *              "EXECUTE" or "EVALUATE" commands.
  *
  ******************************************************************************/
 
@@ -196,12 +161,12 @@ acpi_db_execute_method(struct acpi_db_method_info *info,
 		}
 
 		ACPI_EXCEPTION((AE_INFO, status,
-				"while executing %s from debugger",
+				"while executing %s from AML Debugger",
 				info->pathname));
 
 		if (status == AE_BUFFER_OVERFLOW) {
 			ACPI_ERROR((AE_INFO,
-				    "Possible overflow of internal debugger "
+				    "Possible buffer overflow within AML Debugger "
 				    "buffer (size 0x%X needed 0x%X)",
 				    ACPI_DEBUG_BUFFER_SIZE,
 				    (u32)return_obj->length));
@@ -350,11 +315,12 @@ acpi_db_execution_walk(acpi_handle obj_handle,
 
 	status = acpi_evaluate_object(node, NULL, NULL, &return_obj);
 
+	acpi_gbl_method_executing = FALSE;
+
 	acpi_os_printf("Evaluation of [%4.4s] returned %s\n",
 		       acpi_ut_get_node_name(node),
 		       acpi_format_exception(status));
 
-	acpi_gbl_method_executing = FALSE;
 	return (AE_OK);
 }
 
@@ -370,7 +336,8 @@ acpi_db_execution_walk(acpi_handle obj_handle,
  * RETURN:      None
  *
  * DESCRIPTION: Execute a control method. Name is relative to the current
- *              scope.
+ *              scope. Function used for the "EXECUTE", "EVALUATE", and
+ *              "ALL" commands
  *
  ******************************************************************************/
 
@@ -408,6 +375,12 @@ acpi_db_execute(char *name, char **args, acpi_object_type *types, u32 flags)
 		return;
 	}
 
+	if ((flags & EX_ALL) && (strlen(name) > 4)) {
+		acpi_os_printf("Input name (%s) must be a 4-char NameSeg\n",
+			       name);
+		return;
+	}
+
 	name_string = ACPI_ALLOCATE(strlen(name) + 1);
 	if (!name_string) {
 		return;
@@ -425,13 +398,24 @@ acpi_db_execute(char *name, char **args, acpi_object_type *types, u32 flags)
 		return;
 	}
 
-	acpi_gbl_db_method_info.name = name_string;
-	acpi_gbl_db_method_info.args = args;
-	acpi_gbl_db_method_info.types = types;
-	acpi_gbl_db_method_info.flags = flags;
+	/* Command (ALL <nameseg>) to execute all methods of a particular name */
 
-	return_obj.pointer = NULL;
-	return_obj.length = ACPI_ALLOCATE_BUFFER;
+	else if (flags & EX_ALL) {
+		acpi_gbl_db_method_info.name = name_string;
+		return_obj.pointer = NULL;
+		return_obj.length = ACPI_ALLOCATE_BUFFER;
+		acpi_db_evaluate_all(name_string);
+		ACPI_FREE(name_string);
+		return;
+	} else {
+		acpi_gbl_db_method_info.name = name_string;
+		acpi_gbl_db_method_info.args = args;
+		acpi_gbl_db_method_info.types = types;
+		acpi_gbl_db_method_info.flags = flags;
+
+		return_obj.pointer = NULL;
+		return_obj.length = ACPI_ALLOCATE_BUFFER;
+	}
 
 	status = acpi_db_execute_setup(&acpi_gbl_db_method_info);
 	if (ACPI_FAILURE(status)) {
@@ -486,10 +470,11 @@ acpi_db_execute(char *name, char **args, acpi_object_type *types, u32 flags)
 				       (u32)return_obj.length);
 
 			acpi_db_dump_external_object(return_obj.pointer, 1);
+			acpi_os_printf("\n");
 
 			/* Dump a _PLD buffer if present */
 
-			if (ACPI_COMPARE_NAME
+			if (ACPI_COMPARE_NAMESEG
 			    ((ACPI_CAST_PTR
 			      (struct acpi_namespace_node,
 			       acpi_gbl_db_method_info.method)->name.ascii),

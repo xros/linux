@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0
 obj-y += vsyscall.o vsyscall-syscall.o vsyscall-syms.o
 
-$(obj)/vsyscall-syscall.o: \
-	$(foreach F,trapa,$(obj)/vsyscall-$F.so)
+$(obj)/vsyscall-syscall.o: $(obj)/vsyscall-trapa.so
 
 # Teach kbuild about targets
-targets += $(foreach F,trapa,vsyscall-$F.o vsyscall-$F.so)
+targets += vsyscall-trapa.o vsyscall-traps.so
 targets += vsyscall-note.o vsyscall.lds vsyscall-dummy.o
 
 # The DSO images are built using a special linker script
@@ -15,8 +14,7 @@ quiet_cmd_syscall = SYSCALL $@
 
 export CPPFLAGS_vsyscall.lds += -P -C -Ush
 
-vsyscall-flags = -shared -s -Wl,-soname=linux-gate.so.1 \
-		$(call cc-ldoption, -Wl$(comma)--hash-style=sysv)
+vsyscall-flags = -shared -s -Wl,-soname=linux-gate.so.1 -Wl,--hash-style=sysv
 
 SYSCFLAGS_vsyscall-trapa.so	= $(vsyscall-flags)
 

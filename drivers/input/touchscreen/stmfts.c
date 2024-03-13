@@ -2,7 +2,7 @@
 // STMicroelectronics FTS Touchscreen device driver
 //
 // Copyright (c) 2017 Samsung Electronics Co., Ltd.
-// Copyright (c) 2017 Andi Shyti <andi.shyti@samsung.com>
+// Copyright (c) 2017 Andi Shyti <andi@etezian.org>
 
 #include <linux/delay.h>
 #include <linux/i2c.h>
@@ -106,27 +106,29 @@ struct stmfts_data {
 	bool running;
 };
 
-static void stmfts_brightness_set(struct led_classdev *led_cdev,
+static int stmfts_brightness_set(struct led_classdev *led_cdev,
 					enum led_brightness value)
 {
 	struct stmfts_data *sdata = container_of(led_cdev,
 					struct stmfts_data, led_cdev);
 	int err;
 
-	if (value == sdata->led_status || !sdata->ledvdd)
-		return;
-
-	if (!value) {
-		regulator_disable(sdata->ledvdd);
-	} else {
-		err = regulator_enable(sdata->ledvdd);
-		if (err)
-			dev_warn(&sdata->client->dev,
-				 "failed to disable ledvdd regulator: %d\n",
-				 err);
+	if (value != sdata->led_status && sdata->ledvdd) {
+		if (!value) {
+			regulator_disable(sdata->ledvdd);
+		} else {
+			err = regulator_enable(sdata->ledvdd);
+			if (err) {
+				dev_warn(&sdata->client->dev,
+					 "failed to disable ledvdd regulator: %d\n",
+					 err);
+				return err;
+			}
+		}
+		sdata->led_status = value;
 	}
 
-	sdata->led_status = value;
+	return 0;
 }
 
 static enum led_brightness stmfts_brightness_get(struct led_classdev *led_cdev)
@@ -196,7 +198,7 @@ static void stmfts_report_contact_release(struct stmfts_data *sdata,
 	u8 slot_id = (event[0] & STMFTS_MASK_TOUCH_ID) >> 4;
 
 	input_mt_slot(sdata->input, slot_id);
-	input_mt_report_slot_state(sdata->input, MT_TOOL_FINGER, false);
+	input_mt_report_slot_inactive(sdata->input);
 
 	input_sync(sdata->input);
 }
@@ -253,7 +255,7 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 		case STMFTS_EV_SLEEP_OUT_CONTROLLER_READY:
 		case STMFTS_EV_STATUS:
 			complete(&sdata->cmd_done);
-			/* fall through */
+			fallthrough;
 
 		case STMFTS_EV_NO_EVENT:
 		case STMFTS_EV_DEBUG:
@@ -335,13 +337,15 @@ static int stmfts_input_open(struct input_dev *dev)
 	struct stmfts_data *sdata = input_get_drvdata(dev);
 	int err;
 
-	err = pm_runtime_get_sync(&sdata->client->dev);
-	if (err < 0)
+	err = pm_runtime_resume_and_get(&sdata->client->dev);
+	if (err)
 		return err;
 
 	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
-	if (err)
+	if (err) {
+		pm_runtime_put_sync(&sdata->client->dev);
 		return err;
+	}
 
 	mutex_lock(&sdata->mutex);
 	sdata->running = true;
@@ -477,7 +481,7 @@ static ssize_t stmfts_sysfs_hover_enable_write(struct device *dev,
 
 	mutex_lock(&sdata->mutex);
 
-	if (value & sdata->hover_enabled)
+	if (value && sdata->hover_enabled)
 		goto out;
 
 	if (sdata->running)
@@ -513,10 +517,7 @@ static struct attribute *stmfts_sysfs_attrs[] = {
 	&dev_attr_hover_enable.attr,
 	NULL
 };
-
-static struct attribute_group stmfts_attribute_group = {
-	.attrs = stmfts_sysfs_attrs
-};
+ATTRIBUTE_GROUPS(stmfts_sysfs);
 
 static int stmfts_power_on(struct stmfts_data *sdata)
 {
@@ -608,7 +609,7 @@ static int stmfts_enable_led(struct stmfts_data *sdata)
 	sdata->led_cdev.name = STMFTS_DEV_NAME;
 	sdata->led_cdev.max_brightness = LED_ON;
 	sdata->led_cdev.brightness = LED_OFF;
-	sdata->led_cdev.brightness_set = stmfts_brightness_set;
+	sdata->led_cdev.brightness_set_blocking = stmfts_brightness_set;
 	sdata->led_cdev.brightness_get = stmfts_brightness_get;
 
 	err = devm_led_classdev_register(&sdata->client->dev, &sdata->led_cdev);
@@ -620,8 +621,7 @@ static int stmfts_enable_led(struct stmfts_data *sdata)
 	return 0;
 }
 
-static int stmfts_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int stmfts_probe(struct i2c_client *client)
 {
 	int err;
 	struct stmfts_data *sdata;
@@ -682,15 +682,19 @@ static int stmfts_probe(struct i2c_client *client,
 
 	input_set_drvdata(sdata->input, sdata);
 
+	/*
+	 * stmfts_power_on expects interrupt to be disabled, but
+	 * at this point the device is still off and I do not trust
+	 * the status of the irq line that can generate some spurious
+	 * interrupts. To be on the safe side it's better to not enable
+	 * the interrupts during their request.
+	 */
 	err = devm_request_threaded_irq(&client->dev, client->irq,
 					NULL, stmfts_irq_handler,
-					IRQF_ONESHOT,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
 					"stmfts_irq", sdata);
 	if (err)
 		return err;
-
-	/* stmfts_power_on expects interrupt to be disabled */
-	disable_irq(client->irq);
 
 	dev_dbg(&client->dev, "initializing ST-Microelectronics FTS...\n");
 
@@ -720,23 +724,18 @@ static int stmfts_probe(struct i2c_client *client,
 		}
 	}
 
-	err = devm_device_add_group(&client->dev, &stmfts_attribute_group);
-	if (err)
-		return err;
-
 	pm_runtime_enable(&client->dev);
+	device_enable_async_suspend(&client->dev);
 
 	return 0;
 }
 
-static int stmfts_remove(struct i2c_client *client)
+static void stmfts_remove(struct i2c_client *client)
 {
 	pm_runtime_disable(&client->dev);
-
-	return 0;
 }
 
-static int __maybe_unused stmfts_runtime_suspend(struct device *dev)
+static int stmfts_runtime_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
@@ -748,7 +747,7 @@ static int __maybe_unused stmfts_runtime_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused stmfts_runtime_resume(struct device *dev)
+static int stmfts_runtime_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
@@ -760,7 +759,7 @@ static int __maybe_unused stmfts_runtime_resume(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused stmfts_suspend(struct device *dev)
+static int stmfts_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
@@ -769,7 +768,7 @@ static int __maybe_unused stmfts_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused stmfts_resume(struct device *dev)
+static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
@@ -777,8 +776,8 @@ static int __maybe_unused stmfts_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops stmfts_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(stmfts_suspend, stmfts_resume)
-	SET_RUNTIME_PM_OPS(stmfts_runtime_suspend, stmfts_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(stmfts_suspend, stmfts_resume)
+	RUNTIME_PM_OPS(stmfts_runtime_suspend, stmfts_runtime_resume, NULL)
 };
 
 #ifdef CONFIG_OF
@@ -798,8 +797,10 @@ MODULE_DEVICE_TABLE(i2c, stmfts_id);
 static struct i2c_driver stmfts_driver = {
 	.driver = {
 		.name = STMFTS_DEV_NAME,
+		.dev_groups = stmfts_sysfs_groups,
 		.of_match_table = of_match_ptr(stmfts_of_match),
-		.pm = &stmfts_pm_ops,
+		.pm = pm_ptr(&stmfts_pm_ops),
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = stmfts_probe,
 	.remove = stmfts_remove,

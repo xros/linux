@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux driver for devices based on the DiBcom DiB0700 USB bridge
- *
- *	This program is free software; you can redistribute it and/or modify it
- *	under the terms of the GNU General Public License as published by the Free
- *	Software Foundation, version 2.
  *
  *  Copyright (C) 2005-6 DiBcom, SA
  */
@@ -375,8 +372,10 @@ struct i2c_algorithm dib0700_i2c_algo = {
 	.functionality = dib0700_i2c_func,
 };
 
-int dib0700_identify_state(struct usb_device *udev, struct dvb_usb_device_properties *props,
-			struct dvb_usb_device_description **desc, int *cold)
+int dib0700_identify_state(struct usb_device *udev,
+			   const struct dvb_usb_device_properties *props,
+			   const struct dvb_usb_device_description **desc,
+			   int *cold)
 {
 	s16 ret;
 	u8 *b;
@@ -584,7 +583,7 @@ out:
 int dib0700_streaming_ctrl(struct dvb_usb_adapter *adap, int onoff)
 {
 	struct dib0700_state *st = adap->dev->priv;
-	int ret;
+	int ret, adapt_nr;
 
 	if ((onoff != 0) && (st->fw_version >= 0x10201)) {
 		/* for firmware later than 1.20.1,
@@ -611,26 +610,24 @@ int dib0700_streaming_ctrl(struct dvb_usb_adapter *adap, int onoff)
 
 	st->buf[3] = 0x00;
 
-	deb_info("modifying (%d) streaming state for %d\n", onoff, adap->id);
-
-	st->channel_state &= ~0x3;
 	if ((adap->fe_adap[0].stream.props.endpoint != 2)
-			&& (adap->fe_adap[0].stream.props.endpoint != 3)) {
-		deb_info("the endpoint number (%i) is not correct, use the adapter id instead", adap->fe_adap[0].stream.props.endpoint);
-		if (onoff)
-			st->channel_state |=	1 << (adap->id);
-		else
-			st->channel_state |=	1 << ~(adap->id);
+	    && (adap->fe_adap[0].stream.props.endpoint != 3)) {
+		deb_info("the endpoint number (%i) is not correct, use the adapter id instead\n",
+			 adap->fe_adap[0].stream.props.endpoint);
+		adapt_nr = adap->id;
 	} else {
-		if (onoff)
-			st->channel_state |=	1 << (adap->fe_adap[0].stream.props.endpoint-2);
-		else
-			st->channel_state |=	1 << (3-adap->fe_adap[0].stream.props.endpoint);
+		adapt_nr = adap->fe_adap[0].stream.props.endpoint - 2;
 	}
+
+	if (onoff)
+		st->channel_state |= 1 << adapt_nr;
+	else
+		st->channel_state &= ~(1 << adapt_nr);
 
 	st->buf[2] |= st->channel_state;
 
-	deb_info("data for streaming: %x %x\n", st->buf[1], st->buf[2]);
+	deb_info("adapter %d, streaming %s: %*ph\n",
+		adapt_nr, onoff ? "ON" : "OFF", 3, st->buf);
 
 	ret = dib0700_ctrl_wr(adap->dev, st->buf, 4);
 	mutex_unlock(&adap->dev->usb_mutex);
@@ -821,7 +818,7 @@ int dib0700_rc_setup(struct dvb_usb_device *d, struct usb_interface *intf)
 
 	/* Starting in firmware 1.20, the RC info is provided on a bulk pipe */
 
-	if (intf->altsetting[0].desc.bNumEndpoints < rc_ep + 1)
+	if (intf->cur_altsetting->desc.bNumEndpoints < rc_ep + 1)
 		return -ENODEV;
 
 	purb = usb_alloc_urb(0, GFP_KERNEL);
@@ -841,7 +838,7 @@ int dib0700_rc_setup(struct dvb_usb_device *d, struct usb_interface *intf)
 	 * Some devices like the Hauppauge NovaTD model 52009 use an interrupt
 	 * endpoint, while others use a bulk one.
 	 */
-	e = &intf->altsetting[0].endpoint[rc_ep].desc;
+	e = &intf->cur_altsetting->endpoint[rc_ep].desc;
 	if (usb_endpoint_dir_in(e)) {
 		if (usb_endpoint_xfer_bulk(e)) {
 			pipe = usb_rcvbulkpipe(d->udev, rc_ep);
@@ -911,10 +908,34 @@ static int dib0700_probe(struct usb_interface *intf,
 	return -ENODEV;
 }
 
+static void dib0700_disconnect(struct usb_interface *intf)
+{
+	struct dvb_usb_device *d = usb_get_intfdata(intf);
+	struct dib0700_state *st = d->priv;
+	struct i2c_client *client;
+
+	/* remove I2C client for tuner */
+	client = st->i2c_client_tuner;
+	if (client) {
+		module_put(client->dev.driver->owner);
+		i2c_unregister_device(client);
+	}
+
+	/* remove I2C client for demodulator */
+	client = st->i2c_client_demod;
+	if (client) {
+		module_put(client->dev.driver->owner);
+		i2c_unregister_device(client);
+	}
+
+	dvb_usb_device_exit(intf);
+}
+
+
 static struct usb_driver dib0700_driver = {
 	.name       = "dvb_usb_dib0700",
 	.probe      = dib0700_probe,
-	.disconnect = dvb_usb_device_exit,
+	.disconnect = dib0700_disconnect,
 	.id_table   = dib0700_usb_id_table,
 };
 

@@ -123,9 +123,7 @@
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
-#include <linux/of_address.h>
 #include <linux/of_platform.h>
-#include <linux/of_device.h>
 #include <linux/clk.h>
 #include <linux/property.h>
 #include <linux/acpi.h>
@@ -135,17 +133,6 @@
 #include "xgbe-common.h"
 
 #ifdef CONFIG_ACPI
-static const struct acpi_device_id xgbe_acpi_match[];
-
-static struct xgbe_version_data *xgbe_acpi_vdata(struct xgbe_prv_data *pdata)
-{
-	const struct acpi_device_id *id;
-
-	id = acpi_match_device(xgbe_acpi_match, pdata->dev);
-
-	return id ? (struct xgbe_version_data *)id->driver_data : NULL;
-}
-
 static int xgbe_acpi_support(struct xgbe_prv_data *pdata)
 {
 	struct device *dev = pdata->dev;
@@ -173,11 +160,6 @@ static int xgbe_acpi_support(struct xgbe_prv_data *pdata)
 	return 0;
 }
 #else   /* CONFIG_ACPI */
-static struct xgbe_version_data *xgbe_acpi_vdata(struct xgbe_prv_data *pdata)
-{
-	return NULL;
-}
-
 static int xgbe_acpi_support(struct xgbe_prv_data *pdata)
 {
 	return -EINVAL;
@@ -185,17 +167,6 @@ static int xgbe_acpi_support(struct xgbe_prv_data *pdata)
 #endif  /* CONFIG_ACPI */
 
 #ifdef CONFIG_OF
-static const struct of_device_id xgbe_of_match[];
-
-static struct xgbe_version_data *xgbe_of_vdata(struct xgbe_prv_data *pdata)
-{
-	const struct of_device_id *id;
-
-	id = of_match_device(xgbe_of_match, pdata->dev);
-
-	return id ? (struct xgbe_version_data *)id->data : NULL;
-}
-
 static int xgbe_of_support(struct xgbe_prv_data *pdata)
 {
 	struct device *dev = pdata->dev;
@@ -244,11 +215,6 @@ static struct platform_device *xgbe_of_get_phy_pdev(struct xgbe_prv_data *pdata)
 	return phy_pdev;
 }
 #else   /* CONFIG_OF */
-static struct xgbe_version_data *xgbe_of_vdata(struct xgbe_prv_data *pdata)
-{
-	return NULL;
-}
-
 static int xgbe_of_support(struct xgbe_prv_data *pdata)
 {
 	return -EINVAL;
@@ -290,18 +256,11 @@ static struct platform_device *xgbe_get_phy_pdev(struct xgbe_prv_data *pdata)
 	return phy_pdev;
 }
 
-static struct xgbe_version_data *xgbe_get_vdata(struct xgbe_prv_data *pdata)
-{
-	return pdata->use_acpi ? xgbe_acpi_vdata(pdata)
-			       : xgbe_of_vdata(pdata);
-}
-
 static int xgbe_platform_probe(struct platform_device *pdev)
 {
 	struct xgbe_prv_data *pdata;
 	struct device *dev = &pdev->dev;
 	struct platform_device *phy_pdev;
-	struct resource *res;
 	const char *phy_mode;
 	unsigned int phy_memnum, phy_irqnum;
 	unsigned int dma_irqnum, dma_irqend;
@@ -322,7 +281,7 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 	pdata->use_acpi = dev->of_node ? 0 : 1;
 
 	/* Get the version data */
-	pdata->vdata = xgbe_get_vdata(pdata);
+	pdata->vdata = (struct xgbe_version_data *)device_get_match_data(dev);
 
 	phy_pdev = xgbe_get_phy_pdev(pdata);
 	if (!phy_pdev) {
@@ -339,7 +298,7 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 		 *   the PHY resources listed last
 		 */
 		phy_memnum = xgbe_resource_count(pdev, IORESOURCE_MEM) - 3;
-		phy_irqnum = xgbe_resource_count(pdev, IORESOURCE_IRQ) - 1;
+		phy_irqnum = platform_irq_count(pdev) - 1;
 		dma_irqnum = 1;
 		dma_irqend = phy_irqnum;
 	} else {
@@ -349,12 +308,11 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 		phy_memnum = 0;
 		phy_irqnum = 0;
 		dma_irqnum = 1;
-		dma_irqend = xgbe_resource_count(pdev, IORESOURCE_IRQ);
+		dma_irqend = platform_irq_count(pdev);
 	}
 
 	/* Obtain the mmio areas for the device */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	pdata->xgmac_regs = devm_ioremap_resource(dev, res);
+	pdata->xgmac_regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pdata->xgmac_regs)) {
 		dev_err(dev, "xgmac ioremap failed\n");
 		ret = PTR_ERR(pdata->xgmac_regs);
@@ -363,8 +321,7 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 	if (netif_msg_probe(pdata))
 		dev_dbg(dev, "xgmac_regs = %p\n", pdata->xgmac_regs);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	pdata->xpcs_regs = devm_ioremap_resource(dev, res);
+	pdata->xpcs_regs = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(pdata->xpcs_regs)) {
 		dev_err(dev, "xpcs ioremap failed\n");
 		ret = PTR_ERR(pdata->xpcs_regs);
@@ -373,8 +330,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 	if (netif_msg_probe(pdata))
 		dev_dbg(dev, "xpcs_regs  = %p\n", pdata->xpcs_regs);
 
-	res = platform_get_resource(phy_pdev, IORESOURCE_MEM, phy_memnum++);
-	pdata->rxtx_regs = devm_ioremap_resource(dev, res);
+	pdata->rxtx_regs = devm_platform_ioremap_resource(phy_pdev,
+							  phy_memnum++);
 	if (IS_ERR(pdata->rxtx_regs)) {
 		dev_err(dev, "rxtx ioremap failed\n");
 		ret = PTR_ERR(pdata->rxtx_regs);
@@ -383,8 +340,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 	if (netif_msg_probe(pdata))
 		dev_dbg(dev, "rxtx_regs  = %p\n", pdata->rxtx_regs);
 
-	res = platform_get_resource(phy_pdev, IORESOURCE_MEM, phy_memnum++);
-	pdata->sir0_regs = devm_ioremap_resource(dev, res);
+	pdata->sir0_regs = devm_platform_ioremap_resource(phy_pdev,
+							  phy_memnum++);
 	if (IS_ERR(pdata->sir0_regs)) {
 		dev_err(dev, "sir0 ioremap failed\n");
 		ret = PTR_ERR(pdata->sir0_regs);
@@ -393,8 +350,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 	if (netif_msg_probe(pdata))
 		dev_dbg(dev, "sir0_regs  = %p\n", pdata->sir0_regs);
 
-	res = platform_get_resource(phy_pdev, IORESOURCE_MEM, phy_memnum++);
-	pdata->sir1_regs = devm_ioremap_resource(dev, res);
+	pdata->sir1_regs = devm_platform_ioremap_resource(phy_pdev,
+							  phy_memnum++);
 	if (IS_ERR(pdata->sir1_regs)) {
 		dev_err(dev, "sir1 ioremap failed\n");
 		ret = PTR_ERR(pdata->sir1_regs);
@@ -467,10 +424,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 
 	/* Get the device interrupt */
 	ret = platform_get_irq(pdev, 0);
-	if (ret < 0) {
-		dev_err(dev, "platform_get_irq 0 failed\n");
+	if (ret < 0)
 		goto err_io;
-	}
 	pdata->dev_irq = ret;
 
 	/* Get the per channel DMA interrupts */
@@ -479,12 +434,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 
 		for (i = 0; (i < max) && (dma_irqnum < dma_irqend); i++) {
 			ret = platform_get_irq(pdata->platdev, dma_irqnum++);
-			if (ret < 0) {
-				netdev_err(pdata->netdev,
-					   "platform_get_irq %u failed\n",
-					   dma_irqnum - 1);
+			if (ret < 0)
 				goto err_io;
-			}
 
 			pdata->channel_irq[i] = ret;
 		}
@@ -496,10 +447,8 @@ static int xgbe_platform_probe(struct platform_device *pdev)
 
 	/* Get the auto-negotiation interrupt */
 	ret = platform_get_irq(phy_pdev, phy_irqnum++);
-	if (ret < 0) {
-		dev_err(dev, "platform_get_irq phy 0 failed\n");
+	if (ret < 0)
 		goto err_io;
-	}
 	pdata->an_irq = ret;
 
 	/* Configure the netdev resource */
@@ -523,7 +472,7 @@ err_alloc:
 	return ret;
 }
 
-static int xgbe_platform_remove(struct platform_device *pdev)
+static void xgbe_platform_remove(struct platform_device *pdev)
 {
 	struct xgbe_prv_data *pdata = platform_get_drvdata(pdev);
 
@@ -532,8 +481,6 @@ static int xgbe_platform_remove(struct platform_device *pdev)
 	platform_device_put(pdata->phy_platdev);
 
 	xgbe_free_pdata(pdata);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -626,7 +573,7 @@ static struct platform_driver xgbe_driver = {
 		.pm = &xgbe_platform_pm_ops,
 	},
 	.probe = xgbe_platform_probe,
-	.remove = xgbe_platform_remove,
+	.remove_new = xgbe_platform_remove,
 };
 
 int xgbe_platform_init(void)

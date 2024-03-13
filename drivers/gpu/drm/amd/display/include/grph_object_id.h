@@ -162,6 +162,7 @@ enum connector_id {
 	CONNECTOR_ID_MXM = 21,
 	CONNECTOR_ID_WIRELESS = 22,
 	CONNECTOR_ID_MIRACAST = 23,
+	CONNECTOR_ID_USBC = 24,
 
 	CONNECTOR_ID_VIRTUAL = 100
 };
@@ -184,6 +185,12 @@ enum engine_id {
 	ENGINE_ID_DACA,
 	ENGINE_ID_DACB,
 	ENGINE_ID_VCE,	/* wireless display pseudo-encoder */
+	ENGINE_ID_HPO_0,
+	ENGINE_ID_HPO_1,
+	ENGINE_ID_HPO_DP_0,
+	ENGINE_ID_HPO_DP_1,
+	ENGINE_ID_HPO_DP_2,
+	ENGINE_ID_HPO_DP_3,
 	ENGINE_ID_VIRTUAL,
 
 	ENGINE_ID_COUNT,
@@ -197,6 +204,11 @@ enum transmitter_color_depth {
 	TRANSMITTER_COLOR_DEPTH_48       /* 16 bits */
 };
 
+enum dp_alt_mode {
+	DP_Alt_mode__Unknown = 0,
+	DP_Alt_mode__Connect,
+	DP_Alt_mode__NoConnect,
+};
 /*
  *****************************************************************************
  * graphics_object_id struct
@@ -233,10 +245,6 @@ static inline struct graphics_object_id dal_graphics_object_id_init(
 	return result;
 }
 
-bool dal_graphics_object_id_is_equal(
-	struct graphics_object_id id1,
-	struct graphics_object_id id2);
-
 /* Based on internal data members memory layout */
 static inline uint32_t dal_graphics_object_id_to_uint(
 	struct graphics_object_id id)
@@ -248,7 +256,7 @@ static inline enum controller_id dal_graphics_object_id_get_controller_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_CONTROLLER)
-		return id.id;
+		return (enum controller_id) id.id;
 	return CONTROLLER_ID_UNDEFINED;
 }
 
@@ -256,7 +264,7 @@ static inline enum clock_source_id dal_graphics_object_id_get_clock_source_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_CLOCK_SOURCE)
-		return id.id;
+		return (enum clock_source_id) id.id;
 	return CLOCK_SOURCE_ID_UNDEFINED;
 }
 
@@ -264,7 +272,7 @@ static inline enum encoder_id dal_graphics_object_id_get_encoder_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_ENCODER)
-		return id.id;
+		return (enum encoder_id) id.id;
 	return ENCODER_ID_UNKNOWN;
 }
 
@@ -272,7 +280,7 @@ static inline enum connector_id dal_graphics_object_id_get_connector_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_CONNECTOR)
-		return id.id;
+		return (enum connector_id) id.id;
 	return CONNECTOR_ID_UNKNOWN;
 }
 
@@ -280,7 +288,7 @@ static inline enum audio_id dal_graphics_object_id_get_audio_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_AUDIO)
-		return id.id;
+		return (enum audio_id) id.id;
 	return AUDIO_ID_UNKNOWN;
 }
 
@@ -288,7 +296,18 @@ static inline enum engine_id dal_graphics_object_id_get_engine_id(
 	struct graphics_object_id id)
 {
 	if (id.type == OBJECT_TYPE_ENGINE)
-		return id.id;
+		return (enum engine_id) id.id;
 	return ENGINE_ID_UNKNOWN;
+}
+
+static inline bool dal_graphics_object_id_equal(
+	struct graphics_object_id id_1,
+	struct graphics_object_id id_2)
+{
+	if ((id_1.id == id_2.id) && (id_1.enum_id == id_2.enum_id) &&
+		(id_1.type == id_2.type)) {
+		return true;
+	}
+	return false;
 }
 #endif

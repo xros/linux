@@ -1,22 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DA9150 Charger Driver
  *
  * Copyright (c) 2014 Dialog Semiconductor
  *
  * Author: Adam Thomson <Adam.Thomson.Opensource@diasemi.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
 #include <linux/interrupt.h>
 #include <linux/power_supply.h>
 #include <linux/notifier.h>
@@ -470,10 +464,8 @@ static int da9150_charger_register_irq(struct platform_device *pdev,
 	int irq, ret;
 
 	irq = platform_get_irq_byname(pdev, irq_name);
-	if (irq < 0) {
-		dev_err(dev, "Failed to get IRQ CHG_STATUS: %d\n", irq);
+	if (irq < 0)
 		return irq;
-	}
 
 	ret = request_threaded_irq(irq, NULL, handler, IRQF_ONESHOT, irq_name,
 				   charger);
@@ -486,15 +478,12 @@ static int da9150_charger_register_irq(struct platform_device *pdev,
 static void da9150_charger_unregister_irq(struct platform_device *pdev,
 					  const char *irq_name)
 {
-	struct device *dev = &pdev->dev;
 	struct da9150_charger *charger = platform_get_drvdata(pdev);
 	int irq;
 
 	irq = platform_get_irq_byname(pdev, irq_name);
-	if (irq < 0) {
-		dev_err(dev, "Failed to get IRQ CHG_STATUS: %d\n", irq);
+	if (irq < 0)
 		return;
-	}
 
 	free_irq(irq, charger);
 }
@@ -646,7 +635,7 @@ ibus_chan_fail:
 	return ret;
 }
 
-static int da9150_charger_remove(struct platform_device *pdev)
+static void da9150_charger_remove(struct platform_device *pdev)
 {
 	struct da9150_charger *charger = platform_get_drvdata(pdev);
 	int irq;
@@ -666,6 +655,7 @@ static int da9150_charger_remove(struct platform_device *pdev)
 
 	if (!IS_ERR_OR_NULL(charger->usb_phy))
 		usb_unregister_notifier(charger->usb_phy, &charger->otg_nb);
+	cancel_work_sync(&charger->otg_work);
 
 	power_supply_unregister(charger->battery);
 	power_supply_unregister(charger->usb);
@@ -675,8 +665,6 @@ static int da9150_charger_remove(struct platform_device *pdev)
 	iio_channel_release(charger->vbus_chan);
 	iio_channel_release(charger->tjunc_chan);
 	iio_channel_release(charger->vbat_chan);
-
-	return 0;
 }
 
 static struct platform_driver da9150_charger_driver = {
@@ -684,7 +672,7 @@ static struct platform_driver da9150_charger_driver = {
 		.name = "da9150-charger",
 	},
 	.probe = da9150_charger_probe,
-	.remove = da9150_charger_remove,
+	.remove_new = da9150_charger_remove,
 };
 
 module_platform_driver(da9150_charger_driver);

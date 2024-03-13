@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xfs.h"
@@ -24,7 +12,6 @@
 #include "xfs_sysfs.h"
 #include "xfs_log.h"
 #include "xfs_log_priv.h"
-#include "xfs_stats.h"
 #include "xfs_mount.h"
 
 struct xfs_sysfs_attr {
@@ -77,27 +64,15 @@ static const struct sysfs_ops xfs_sysfs_ops = {
 	.store = xfs_sysfs_object_store,
 };
 
-/*
- * xfs_mount kobject. The mp kobject also serves as the per-mount parent object
- * that is identified by the fsname under sysfs.
- */
-
-static inline struct xfs_mount *
-to_mp(struct kobject *kobject)
-{
-	struct xfs_kobj *kobj = to_kobj(kobject);
-
-	return container_of(kobj, struct xfs_mount, m_kobj);
-}
-
 static struct attribute *xfs_mp_attrs[] = {
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_mp);
 
-struct kobj_type xfs_mp_ktype = {
+const struct kobj_type xfs_mp_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_mp_attrs,
+	.default_groups = xfs_mp_groups,
 };
 
 #ifdef DEBUG
@@ -131,7 +106,7 @@ bug_on_assert_show(
 	struct kobject		*kobject,
 	char			*buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bug_on_assert ? 1 : 0);
+	return sysfs_emit(buf, "%d\n", xfs_globals.bug_on_assert);
 }
 XFS_SYSFS_ATTR_RW(bug_on_assert);
 
@@ -161,20 +136,203 @@ log_recovery_delay_show(
 	struct kobject	*kobject,
 	char		*buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.log_recovery_delay);
+	return sysfs_emit(buf, "%d\n", xfs_globals.log_recovery_delay);
 }
 XFS_SYSFS_ATTR_RW(log_recovery_delay);
+
+STATIC ssize_t
+mount_delay_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < 0 || val > 60)
+		return -EINVAL;
+
+	xfs_globals.mount_delay = val;
+
+	return count;
+}
+
+STATIC ssize_t
+mount_delay_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return sysfs_emit(buf, "%d\n", xfs_globals.mount_delay);
+}
+XFS_SYSFS_ATTR_RW(mount_delay);
+
+static ssize_t
+always_cow_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	ssize_t		ret;
+
+	ret = kstrtobool(buf, &xfs_globals.always_cow);
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+static ssize_t
+always_cow_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return sysfs_emit(buf, "%d\n", xfs_globals.always_cow);
+}
+XFS_SYSFS_ATTR_RW(always_cow);
+
+#ifdef DEBUG
+/*
+ * Override how many threads the parallel work queue is allowed to create.
+ * This has to be a debug-only global (instead of an errortag) because one of
+ * the main users of parallel workqueues is mount time quotacheck.
+ */
+STATIC ssize_t
+pwork_threads_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -1 || val > num_possible_cpus())
+		return -EINVAL;
+
+	xfs_globals.pwork_threads = val;
+
+	return count;
+}
+
+STATIC ssize_t
+pwork_threads_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return sysfs_emit(buf, "%d\n", xfs_globals.pwork_threads);
+}
+XFS_SYSFS_ATTR_RW(pwork_threads);
+
+/*
+ * The "LARP" (Logged extended Attribute Recovery Persistence) debugging knob
+ * sets the XFS_DA_OP_LOGGED flag on all xfs_attr_set operations performed on
+ * V5 filesystems.  As a result, the intermediate progress of all setxattr and
+ * removexattr operations are tracked via the log and can be restarted during
+ * recovery.  This is useful for testing xattr recovery prior to merging of the
+ * parent pointer feature which requires it to maintain consistency, and may be
+ * enabled for userspace xattrs in the future.
+ */
+static ssize_t
+larp_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	ssize_t		ret;
+
+	ret = kstrtobool(buf, &xfs_globals.larp);
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+STATIC ssize_t
+larp_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.larp);
+}
+XFS_SYSFS_ATTR_RW(larp);
+#endif /* DEBUG */
+
+STATIC ssize_t
+bload_leaf_slack_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	xfs_globals.bload_leaf_slack = val;
+	return count;
+}
+
+STATIC ssize_t
+bload_leaf_slack_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bload_leaf_slack);
+}
+XFS_SYSFS_ATTR_RW(bload_leaf_slack);
+
+STATIC ssize_t
+bload_node_slack_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	xfs_globals.bload_node_slack = val;
+	return count;
+}
+
+STATIC ssize_t
+bload_node_slack_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bload_node_slack);
+}
+XFS_SYSFS_ATTR_RW(bload_node_slack);
 
 static struct attribute *xfs_dbg_attrs[] = {
 	ATTR_LIST(bug_on_assert),
 	ATTR_LIST(log_recovery_delay),
+	ATTR_LIST(mount_delay),
+	ATTR_LIST(always_cow),
+#ifdef DEBUG
+	ATTR_LIST(pwork_threads),
+	ATTR_LIST(larp),
+#endif
+	ATTR_LIST(bload_leaf_slack),
+	ATTR_LIST(bload_node_slack),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_dbg);
 
-struct kobj_type xfs_dbg_ktype = {
+const struct kobj_type xfs_dbg_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_dbg_attrs,
+	.default_groups = xfs_dbg_groups,
 };
 
 #endif /* DEBUG */
@@ -227,11 +385,12 @@ static struct attribute *xfs_stats_attrs[] = {
 	ATTR_LIST(stats_clear),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_stats);
 
-struct kobj_type xfs_stats_ktype = {
+const struct kobj_type xfs_stats_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_stats_attrs,
+	.default_groups = xfs_stats_groups,
 };
 
 /* xlog */
@@ -258,7 +417,7 @@ log_head_lsn_show(
 	block = log->l_curr_block;
 	spin_unlock(&log->l_icloglock);
 
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, block);
+	return sysfs_emit(buf, "%d:%d\n", cycle, block);
 }
 XFS_SYSFS_ATTR_RO(log_head_lsn);
 
@@ -272,7 +431,7 @@ log_tail_lsn_show(
 	struct xlog *log = to_xlog(kobject);
 
 	xlog_crack_atomic_lsn(&log->l_tail_lsn, &cycle, &block);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, block);
+	return sysfs_emit(buf, "%d:%d\n", cycle, block);
 }
 XFS_SYSFS_ATTR_RO(log_tail_lsn);
 
@@ -287,7 +446,7 @@ reserve_grant_head_show(
 	struct xlog *log = to_xlog(kobject);
 
 	xlog_crack_grant_head(&log->l_reserve_head.grant, &cycle, &bytes);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%d:%d\n", cycle, bytes);
 }
 XFS_SYSFS_ATTR_RO(reserve_grant_head);
 
@@ -301,7 +460,7 @@ write_grant_head_show(
 	struct xlog *log = to_xlog(kobject);
 
 	xlog_crack_grant_head(&log->l_write_head.grant, &cycle, &bytes);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%d:%d\n", cycle, bytes);
 }
 XFS_SYSFS_ATTR_RO(write_grant_head);
 
@@ -312,11 +471,12 @@ static struct attribute *xfs_log_attrs[] = {
 	ATTR_LIST(write_grant_head),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_log);
 
-struct kobj_type xfs_log_ktype = {
+const struct kobj_type xfs_log_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_log_attrs,
+	.default_groups = xfs_log_groups,
 };
 
 /*
@@ -356,7 +516,7 @@ max_retries_show(
 	else
 		retries = cfg->max_retries;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", retries);
+	return sysfs_emit(buf, "%d\n", retries);
 }
 
 static ssize_t
@@ -397,7 +557,7 @@ retry_timeout_seconds_show(
 	else
 		timeout = jiffies_to_msecs(cfg->retry_timeout) / MSEC_PER_SEC;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", timeout);
+	return sysfs_emit(buf, "%d\n", timeout);
 }
 
 static ssize_t
@@ -435,7 +595,7 @@ fail_at_unmount_show(
 {
 	struct xfs_mount	*mp = err_to_mp(kobject);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", mp->m_fail_unmount);
+	return sysfs_emit(buf, "%d\n", mp->m_fail_unmount);
 }
 
 static ssize_t
@@ -465,15 +625,15 @@ static struct attribute *xfs_error_attrs[] = {
 	ATTR_LIST(retry_timeout_seconds),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_error);
 
-
-static struct kobj_type xfs_error_cfg_ktype = {
+static const struct kobj_type xfs_error_cfg_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_error_attrs,
+	.default_groups = xfs_error_groups,
 };
 
-static struct kobj_type xfs_error_ktype = {
+static const struct kobj_type xfs_error_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
 };

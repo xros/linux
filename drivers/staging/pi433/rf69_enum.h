@@ -1,201 +1,126 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * enumerations for HopeRf rf69 radio module
  *
  * Copyright (C) 2016 Wolf-Entwicklungen
  *	Marcus Wolf <linux@wolf-entwicklungen.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #ifndef RF69_ENUM_H
 #define RF69_ENUM_H
 
-enum optionOnOff
-{
-    optionOff,
-    optionOn
+enum mode {
+	mode_sleep,
+	standby,
+	synthesizer,
+	transmit,
+	receive
 };
 
-enum mode
-{
-    mode_sleep,
-    standby,
-    synthesizer,
-    transmit,
-    receive
+enum modulation {
+	OOK,
+	FSK,
+	UNDEF
 };
 
-enum dataMode
-{
-    packet,
-    continuous,
-    continuousNoSync
+enum mod_shaping {
+	SHAPING_OFF,
+	SHAPING_1_0,
+	SHAPING_0_5,
+	SHAPING_0_3,
+	SHAPING_BR,
+	SHAPING_2BR
 };
 
-enum modulation
-{
-    OOK,
-    FSK
+enum pa_ramp {
+	ramp3400,
+	ramp2000,
+	ramp1000,
+	ramp500,
+	ramp250,
+	ramp125,
+	ramp100,
+	ramp62,
+	ramp50,
+	ramp40,
+	ramp31,
+	ramp25,
+	ramp20,
+	ramp15,
+	ramp12,
+	ramp10
 };
 
-enum modShaping
-{
-    shapingOff,
-    shaping1_0,
-    shaping0_5,
-    shaping0_3,
-    shapingBR,
-    shaping2BR
+enum antenna_impedance {
+	fifty_ohm,
+	two_hundred_ohm
 };
 
-enum paRamp
-{
-    ramp3400,
-    ramp2000,
-    ramp1000,
-    ramp500,
-    ramp250,
-    ramp125,
-    ramp100,
-    ramp62,
-    ramp50,
-    ramp40,
-    ramp31,
-    ramp25,
-    ramp20,
-    ramp15,
-    ramp12,
-    ramp10
+enum lna_gain {
+	automatic,
+	max,
+	max_minus_6,
+	max_minus_12,
+	max_minus_24,
+	max_minus_36,
+	max_minus_48,
+	undefined
 };
 
-enum antennaImpedance
-{
-    fiftyOhm,
-    twohundretOhm
+enum mantisse {
+	mantisse16,
+	mantisse20,
+	mantisse24
 };
 
-enum lnaGain
-{
-    automatic,
-    max,
-    maxMinus6,
-    maxMinus12,
-    maxMinus24,
-    maxMinus36,
-    maxMinus48,
-    undefined
+enum threshold_decrement {
+	dec_every8th,
+	dec_every4th,
+	dec_every2nd,
+	dec_once,
+	dec_twice,
+	dec_4times,
+	dec_8times,
+	dec_16times
 };
 
-enum dccPercent
-{
-    dcc16Percent,
-    dcc8Percent,
-    dcc4Percent,
-    dcc2Percent,
-    dcc1Percent,
-    dcc0_5Percent,
-    dcc0_25Percent,
-    dcc0_125Percent
+enum fifo_fill_condition {
+	after_sync_interrupt,
+	always
 };
 
-enum mantisse
-{
-    mantisse16,
-    mantisse20,
-    mantisse24
+enum packet_format {
+	/*
+	 * Used when the size of payload is fixed in advance. This mode of
+	 * operation may be of interest to minimize RF overhead by 1 byte as
+	 * no length byte field is required
+	 */
+	packet_length_fix,
+	/*
+	 * Used when the size of payload isn't known in advance. It requires the
+	 * transmitter to send the length byte in each packet so the receiver
+	 * would know how to operate properly
+	 */
+	packet_length_var
 };
 
-enum thresholdType
-{
-    fixed,
-    peak,
-    average
+enum tx_start_condition {
+	/* the number of bytes in the FIFO exceeds FIFO_THRESHOLD */
+	fifo_level,
+	/* at least one byte in the FIFO */
+	fifo_not_empty
 };
 
-enum thresholdStep
-{
-    step_0_5db,
-    step_1_0db,
-    step_1_5db,
-    step_2_0db,
-    step_3_0db,
-    step_4_0db,
-    step_5_0db,
-    step_6_0db
+enum address_filtering {
+	filtering_off,
+	node_address,
+	node_or_broadcast_address
 };
 
-enum thresholdDecrement
-{
-    dec_every8th,
-    dec_every4th,
-    dec_every2nd,
-    dec_once,
-    dec_twice,
-    dec_4times,
-    dec_8times,
-    dec_16times
+enum dagc {
+	normal_mode,
+	improve,
+	improve_for_low_modulation_index
 };
-
-enum flag
-{
-    modeSwitchCompleted,
-    readyToReceive,
-    readyToSend,
-    pllLocked,
-    rssiExceededThreshold,
-    timeout,
-    automode,
-    syncAddressMatch,
-    fifoFull,
-//    fifoNotEmpty, collision with next enum; replaced by following enum...
-    fifoEmpty,
-    fifoLevelBelowThreshold,
-    fifoOverrun,
-    packetSent,
-    payloadReady,
-    crcOk,
-    batteryLow
-};
-
-enum fifoFillCondition
-{
-    afterSyncInterrupt,
-    always
-};
-
-enum packetFormat
-{
-    packetLengthFix,
-    packetLengthVar
-};
-
-enum txStartCondition
-{
-    fifoLevel,
-    fifoNotEmpty
-};
-
-enum addressFiltering
-{
-    filteringOff,
-    nodeAddress,
-    nodeOrBroadcastAddress
-};
-
-enum dagc
-{
-    normalMode,
-    improve,
-    improve4LowModulationIndex
-};
-
 
 #endif

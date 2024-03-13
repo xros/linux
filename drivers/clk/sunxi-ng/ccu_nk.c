@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2016 Maxime Ripard
  * Maxime Ripard <maxime.ripard@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
  */
 
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 
 #include "ccu_gate.h"
 #include "ccu_nk.h"
@@ -18,8 +15,8 @@ struct _ccu_nk {
 	unsigned long	k, min_k, max_k;
 };
 
-static void ccu_nk_find_best(unsigned long parent, unsigned long rate,
-			     struct _ccu_nk *nk)
+static unsigned long ccu_nk_find_best(unsigned long parent, unsigned long rate,
+				      struct _ccu_nk *nk)
 {
 	unsigned long best_rate = 0;
 	unsigned int best_k = 0, best_n = 0;
@@ -42,6 +39,8 @@ static void ccu_nk_find_best(unsigned long parent, unsigned long rate,
 
 	nk->k = best_k;
 	nk->n = best_n;
+
+	return best_rate;
 }
 
 static void ccu_nk_disable(struct clk_hw *hw)
@@ -107,8 +106,7 @@ static long ccu_nk_round_rate(struct clk_hw *hw, unsigned long rate,
 	_nk.min_k = nk->k.min ?: 1;
 	_nk.max_k = nk->k.max ?: 1 << nk->k.width;
 
-	ccu_nk_find_best(*parent_rate, rate, &_nk);
-	rate = *parent_rate * _nk.n * _nk.k;
+	rate = ccu_nk_find_best(*parent_rate, rate, &_nk);
 
 	if (nk->common.features & CCU_FEATURE_FIXED_POSTDIV)
 		rate = rate / nk->fixed_post_div;
@@ -160,3 +158,4 @@ const struct clk_ops ccu_nk_ops = {
 	.round_rate	= ccu_nk_round_rate,
 	.set_rate	= ccu_nk_set_rate,
 };
+EXPORT_SYMBOL_NS_GPL(ccu_nk_ops, SUNXI_CCU);

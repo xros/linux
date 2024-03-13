@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IMG Multi-threaded DMA Controller (MDC)
  *
  * Copyright (C) 2009,2012,2013 Imagination Technologies Ltd.
  * Copyright (C) 2014 Google, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -20,7 +17,6 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_dma.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -694,7 +690,6 @@ static unsigned int mdc_get_new_events(struct mdc_chan *mchan)
 static int mdc_terminate_all(struct dma_chan *chan)
 {
 	struct mdc_chan *mchan = to_mdc_chan(chan);
-	struct mdc_tx_desc *mdesc;
 	unsigned long flags;
 	LIST_HEAD(head);
 
@@ -703,19 +698,26 @@ static int mdc_terminate_all(struct dma_chan *chan)
 	mdc_chan_writel(mchan, MDC_CONTROL_AND_STATUS_CANCEL,
 			MDC_CONTROL_AND_STATUS);
 
-	mdesc = mchan->desc;
-	mchan->desc = NULL;
+	if (mchan->desc) {
+		vchan_terminate_vdesc(&mchan->desc->vd);
+		mchan->desc = NULL;
+	}
 	vchan_get_all_descriptors(&mchan->vc, &head);
 
 	mdc_get_new_events(mchan);
 
 	spin_unlock_irqrestore(&mchan->vc.lock, flags);
 
-	if (mdesc)
-		mdc_desc_free(&mdesc->vd);
 	vchan_dma_desc_free_list(&mchan->vc, &head);
 
 	return 0;
+}
+
+static void mdc_synchronize(struct dma_chan *chan)
+{
+	struct mdc_chan *mchan = to_mdc_chan(chan);
+
+	vchan_synchronize(&mchan->vc);
 }
 
 static int mdc_slave_config(struct dma_chan *chan,
@@ -883,7 +885,6 @@ static int img_mdc_runtime_resume(struct device *dev)
 static int mdc_dma_probe(struct platform_device *pdev)
 {
 	struct mdc_dma *mdma;
-	struct resource *res;
 	unsigned int i;
 	u32 val;
 	int ret;
@@ -895,8 +896,7 @@ static int mdc_dma_probe(struct platform_device *pdev)
 
 	mdma->soc = of_device_get_match_data(&pdev->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mdma->regs = devm_ioremap_resource(&pdev->dev, res);
+	mdma->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mdma->regs))
 		return PTR_ERR(mdma->regs);
 
@@ -952,6 +952,7 @@ static int mdc_dma_probe(struct platform_device *pdev)
 	mdma->dma_dev.device_tx_status = mdc_tx_status;
 	mdma->dma_dev.device_issue_pending = mdc_issue_pending;
 	mdma->dma_dev.device_terminate_all = mdc_terminate_all;
+	mdma->dma_dev.device_synchronize = mdc_synchronize;
 	mdma->dma_dev.device_config = mdc_slave_config;
 
 	mdma->dma_dev.directions = BIT(DMA_DEV_TO_MEM) | BIT(DMA_MEM_TO_DEV);
@@ -1016,7 +1017,7 @@ suspend:
 	return ret;
 }
 
-static int mdc_dma_remove(struct platform_device *pdev)
+static void mdc_dma_remove(struct platform_device *pdev)
 {
 	struct mdc_dma *mdma = platform_get_drvdata(pdev);
 	struct mdc_chan *mchan, *next;
@@ -1036,8 +1037,6 @@ static int mdc_dma_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		img_mdc_runtime_suspend(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1077,7 +1076,7 @@ static struct platform_driver mdc_dma_driver = {
 		.of_match_table = of_match_ptr(mdc_dma_of_match),
 	},
 	.probe = mdc_dma_probe,
-	.remove = mdc_dma_remove,
+	.remove_new = mdc_dma_remove,
 };
 module_platform_driver(mdc_dma_driver);
 

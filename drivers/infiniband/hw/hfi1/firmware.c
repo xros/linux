@@ -1,53 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2017 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #include <linux/firmware.h>
 #include <linux/mutex.h>
-#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/crc32.h>
 
@@ -68,7 +25,6 @@
 #define ALT_FW_FABRIC_NAME "hfi1_fabric_d.fw"
 #define ALT_FW_SBUS_NAME "hfi1_sbus_d.fw"
 #define ALT_FW_PCIE_NAME "hfi1_pcie_d.fw"
-#define HOST_INTERFACE_VERSION 1
 
 MODULE_FIRMWARE(DEFAULT_FW_8051_NAME_ASIC);
 MODULE_FIRMWARE(DEFAULT_FW_FABRIC_NAME);
@@ -976,46 +932,6 @@ int wait_fm_ready(struct hfi1_devdata *dd, u32 mstimeout)
 }
 
 /*
- * Clear all reset bits, releasing the 8051.
- * Wait for firmware to be ready to accept host requests.
- * Then, set host version bit.
- *
- * This function executes even if the 8051 is in reset mode when
- * dd->dc_shutdown == 1.
- *
- * Expects dd->dc8051_lock to be held.
- */
-int release_and_wait_ready_8051_firmware(struct hfi1_devdata *dd)
-{
-	int ret;
-
-	lockdep_assert_held(&dd->dc8051_lock);
-	/* clear all reset bits, releasing the 8051 */
-	write_csr(dd, DC_DC8051_CFG_RST, 0ull);
-
-	/*
-	 * Wait for firmware to be ready to accept host
-	 * requests.
-	 */
-	ret = wait_fm_ready(dd, TIMEOUT_8051_START);
-	if (ret) {
-		dd_dev_err(dd, "8051 start timeout, current FW state 0x%x\n",
-			   get_firmware_state(dd));
-		return ret;
-	}
-
-	ret = write_host_interface_version(dd, HOST_INTERFACE_VERSION);
-	if (ret != HCMD_SUCCESS) {
-		dd_dev_err(dd,
-			   "Failed to set host interface version, return 0x%x\n",
-			   ret);
-		return -EIO;
-	}
-
-	return 0;
-}
-
-/*
  * Load the 8051 firmware.
  */
 static int load_8051_firmware(struct hfi1_devdata *dd,
@@ -1080,22 +996,31 @@ static int load_8051_firmware(struct hfi1_devdata *dd,
 	if (ret)
 		return ret;
 
+	/* clear all reset bits, releasing the 8051 */
+	write_csr(dd, DC_DC8051_CFG_RST, 0ull);
+
 	/*
-	 * Clear all reset bits, releasing the 8051.
 	 * DC reset step 5. Wait for firmware to be ready to accept host
 	 * requests.
-	 * Then, set host version bit.
 	 */
-	mutex_lock(&dd->dc8051_lock);
-	ret = release_and_wait_ready_8051_firmware(dd);
-	mutex_unlock(&dd->dc8051_lock);
-	if (ret)
-		return ret;
+	ret = wait_fm_ready(dd, TIMEOUT_8051_START);
+	if (ret) { /* timed out */
+		dd_dev_err(dd, "8051 start timeout, current state 0x%x\n",
+			   get_firmware_state(dd));
+		return -ETIMEDOUT;
+	}
 
 	read_misc_status(dd, &ver_major, &ver_minor, &ver_patch);
 	dd_dev_info(dd, "8051 firmware version %d.%d.%d\n",
 		    (int)ver_major, (int)ver_minor, (int)ver_patch);
 	dd->dc8051_ver = dc8051_ver(ver_major, ver_minor, ver_patch);
+	ret = write_host_interface_version(dd, HOST_INTERFACE_VERSION);
+	if (ret != HCMD_SUCCESS) {
+		dd_dev_err(dd,
+			   "Failed to set host interface version, return 0x%x\n",
+			   ret);
+		return -EIO;
+	}
 
 	return 0;
 }
@@ -1189,7 +1114,7 @@ static void turn_off_spicos(struct hfi1_devdata *dd, int flags)
  * Reset all of the fabric serdes for this HFI in preparation to take the
  * link to Polling.
  *
- * To do a reset, we need to write to to the serdes registers.  Unfortunately,
+ * To do a reset, we need to write to the serdes registers.  Unfortunately,
  * the fabric serdes download to the other HFI on the ASIC will have turned
  * off the firmware validation on this HFI.  This means we can't write to the
  * registers to reset the serdes.  Work around this by performing a complete
@@ -1818,6 +1743,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 
 	if (!dd->platform_config.data) {
 		dd_dev_err(dd, "%s: Missing config file\n", __func__);
+		ret = -EINVAL;
 		goto bail;
 	}
 	ptr = (u32 *)dd->platform_config.data;
@@ -1826,6 +1752,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 	ptr++;
 	if (magic_num != PLATFORM_CONFIG_MAGIC_NUM) {
 		dd_dev_err(dd, "%s: Bad config file\n", __func__);
+		ret = -EINVAL;
 		goto bail;
 	}
 
@@ -1849,6 +1776,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 	if (file_length > dd->platform_config.size) {
 		dd_dev_info(dd, "%s:File claims to be larger than read size\n",
 			    __func__);
+		ret = -EINVAL;
 		goto bail;
 	} else if (file_length < dd->platform_config.size) {
 		dd_dev_info(dd,
@@ -1869,6 +1797,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			dd_dev_err(dd, "%s: Failed validation at offset %ld\n",
 				   __func__, (ptr - (u32 *)
 					      dd->platform_config.data));
+			ret = -EINVAL;
 			goto bail;
 		}
 
@@ -1900,11 +1829,8 @@ int parse_platform_config(struct hfi1_devdata *dd)
 									2;
 				break;
 			case PLATFORM_CONFIG_RX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_TX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 				pcfgcache->config_tables[table_type].num_table =
 							table_length_dwords;
@@ -1915,6 +1841,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 					   __func__, table_type,
 					   (ptr - (u32 *)
 					    dd->platform_config.data));
+				ret = -EINVAL;
 				goto bail; /* We don't trust this file now */
 			}
 			pcfgcache->config_tables[table_type].table = ptr;
@@ -1922,15 +1849,10 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			/* metadata table */
 			switch (table_type) {
 			case PLATFORM_CONFIG_SYSTEM_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_PORT_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_RX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_TX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 				break;
 			default:
@@ -1939,6 +1861,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 					   __func__, table_type,
 					   (ptr -
 					    (u32 *)dd->platform_config.data));
+				ret = -EINVAL;
 				goto bail; /* We don't trust this file now */
 			}
 			pcfgcache->config_tables[table_type].table_metadata =
@@ -1956,6 +1879,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			dd_dev_err(dd, "%s: Failed CRC check at offset %ld\n",
 				   __func__, (ptr -
 				   (u32 *)dd->platform_config.data));
+			ret = -EINVAL;
 			goto bail;
 		}
 		/* Jump the CRC DWORD */
@@ -2059,15 +1983,10 @@ static int get_platform_fw_field_metadata(struct hfi1_devdata *dd, int table,
 
 	switch (table) {
 	case PLATFORM_CONFIG_SYSTEM_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_PORT_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_RX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_TX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 		if (field && field < platform_config_table_limits[table])
 			src_ptr =
@@ -2170,11 +2089,8 @@ int get_platform_config_field(struct hfi1_devdata *dd,
 			pcfgcache->config_tables[table_type].table;
 		break;
 	case PLATFORM_CONFIG_RX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_TX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 		src_ptr = pcfgcache->config_tables[table_type].table;
 

@@ -1,72 +1,15 @@
-/******************************************************************************
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * Copyright(c) 2005 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2015 - 2017 Intel Deutschland GmbH
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
- * The full GNU General Public License is included in this distribution
- * in the file called COPYING.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
- * BSD LICENSE
- *
- * Copyright(c) 2005 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2015 - 2017 Intel Deutschland GmbH
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  * Neither the name Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *****************************************************************************/
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
+/*
+ * Copyright (C) 2005-2014, 2018-2021, 2023 Intel Corporation
+ * Copyright (C) 2015-2017 Intel Deutschland GmbH
+ */
 #ifndef __iwl_fh_h__
 #define __iwl_fh_h__
 
 #include <linux/types.h>
 #include <linux/bitfield.h>
+
+#include "iwl-trans.h"
 
 /****************************/
 /* Flow Handler Definitions */
@@ -121,14 +64,14 @@
 #define FH_MEM_CBBC_16_19_UPPER_BOUND		(FH_MEM_LOWER_BOUND + 0xC00)
 #define FH_MEM_CBBC_20_31_LOWER_BOUND		(FH_MEM_LOWER_BOUND + 0xB20)
 #define FH_MEM_CBBC_20_31_UPPER_BOUND		(FH_MEM_LOWER_BOUND + 0xB80)
-/* a000 TFD table address, 64 bit */
+/* 22000 TFD table address, 64 bit */
 #define TFH_TFDQ_CBB_TABLE			(0x1C00)
 
 /* Find TFD CB base pointer for given queue */
 static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
 					     unsigned int chnl)
 {
-	if (trans->cfg->use_tfh) {
+	if (trans->trans_cfg->gen2) {
 		WARN_ON_ONCE(chnl >= 64);
 		return TFH_TFDQ_CBB_TABLE + 8 * chnl;
 	}
@@ -140,7 +83,7 @@ static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
 	return FH_MEM_CBBC_20_31_LOWER_BOUND + 4 * (chnl - 20);
 }
 
-/* a000 configuration registers */
+/* 22000 configuration registers */
 
 /*
  * TFH Configuration register.
@@ -149,7 +92,7 @@ static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
  *
  * Bits 3:0:
  * Define the maximum number of pending read requests.
- * Maximum configration value allowed is 0xC
+ * Maximum configuration value allowed is 0xC
  * Bits 9:8:
  * Define the maximum transfer size. (64 / 128 / 256)
  * Bit 10:
@@ -434,13 +377,15 @@ static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
  * RXF to DRAM.
  * Once the RXF-to-DRAM DMA is active, this flag is immediately turned off.
  */
-#define RFH_GEN_STATUS 0xA09808
+#define RFH_GEN_STATUS		0xA09808
+#define RFH_GEN_STATUS_GEN3	0xA07824
 #define RBD_FETCH_IDLE	BIT(29)
 #define SRAM_DMA_IDLE	BIT(30)
 #define RXF_DMA_IDLE	BIT(31)
 
 /* DMA configuration */
-#define RFH_RXF_DMA_CFG 0xA09820
+#define RFH_RXF_DMA_CFG		0xA09820
+#define RFH_RXF_DMA_CFG_GEN3	0xA07880
 /* RB size */
 #define RFH_RXF_DMA_RB_SIZE_MASK (0x000F0000) /* bits 16-19 */
 #define RFH_RXF_DMA_RB_SIZE_POS 16
@@ -610,10 +555,7 @@ static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
  */
 #define FH_TX_CHICKEN_BITS_SCD_AUTO_RETRY_EN	(0x00000002)
 
-#define MQ_RX_TABLE_SIZE	512
-#define MQ_RX_TABLE_MASK	(MQ_RX_TABLE_SIZE - 1)
-#define MQ_RX_NUM_RBDS		(MQ_RX_TABLE_SIZE - 1)
-#define RX_POOL_SIZE		(MQ_RX_NUM_RBDS +	\
+#define RX_POOL_SIZE(rbds)	((rbds) - 1 +	\
 				 IWL_MAX_RX_HW_QUEUES *	\
 				 (RX_CLAIM_REQ_ALLOC - RX_POST_REQ_ALLOC))
 /* cb size is the exponent */
@@ -622,6 +564,8 @@ static inline unsigned int FH_MEM_CBBC_QUEUE(struct iwl_trans *trans,
 #define RX_QUEUE_SIZE                         256
 #define RX_QUEUE_MASK                         255
 #define RX_QUEUE_SIZE_LOG                     8
+
+#define IWL_DEFAULT_RX_QUEUE			0
 
 /**
  * struct iwl_rb_status - reserve buffer status
@@ -638,18 +582,40 @@ struct iwl_rb_status {
 	__le16 closed_fr_num;
 	__le16 finished_rb_num;
 	__le16 finished_fr_nam;
-	__le32 __unused;
+	__le32 __spare;
 } __packed;
 
 
 #define TFD_QUEUE_SIZE_MAX      (256)
+#define TFD_QUEUE_SIZE_MAX_GEN3 (65536)
 /* cb size is the exponent - 3 */
 #define TFD_QUEUE_CB_SIZE(x)	(ilog2(x) - 3)
 #define TFD_QUEUE_SIZE_BC_DUP	(64)
 #define TFD_QUEUE_BC_SIZE	(TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP)
+#define TFD_QUEUE_BC_SIZE_GEN3_AX210	1024
+#define TFD_QUEUE_BC_SIZE_GEN3_BZ	(1024 * 4)
 #define IWL_TX_DMA_MASK        DMA_BIT_MASK(36)
 #define IWL_NUM_OF_TBS		20
 #define IWL_TFH_NUM_TBS		25
+
+/* IMR DMA registers */
+#define IMR_TFH_SRV_DMA_CHNL0_CTRL           0x00a0a51c
+#define IMR_TFH_SRV_DMA_CHNL0_SRAM_ADDR      0x00a0a520
+#define IMR_TFH_SRV_DMA_CHNL0_DRAM_ADDR_LSB  0x00a0a524
+#define IMR_TFH_SRV_DMA_CHNL0_DRAM_ADDR_MSB  0x00a0a528
+#define IMR_TFH_SRV_DMA_CHNL0_BC             0x00a0a52c
+#define TFH_SRV_DMA_CHNL0_LEFT_BC	     0x00a0a530
+
+/* RFH S2D DMA registers */
+#define IMR_RFH_GEN_CFG_SERVICE_DMA_RS_MSK	0x0000000c
+#define IMR_RFH_GEN_CFG_SERVICE_DMA_SNOOP_MSK	0x00000002
+
+/* TFH D2S DMA registers */
+#define IMR_UREG_CHICK_HALT_UMAC_PERMANENTLY_MSK	0x80000000
+#define IMR_UREG_CHICK					0x00d05c00
+#define IMR_TFH_SRV_DMA_CHNL0_CTRL_D2S_IRQ_TARGET_POS	0x00800000
+#define IMR_TFH_SRV_DMA_CHNL0_CTRL_D2S_RS_MSK		0x00000030
+#define IMR_TFH_SRV_DMA_CHNL0_CTRL_D2S_DMA_EN_POS	0x80000000
 
 static inline u8 iwl_get_dma_hi_addr(dma_addr_t addr)
 {
@@ -697,8 +663,8 @@ struct iwl_tfh_tb {
  * Each Tx queue uses a circular buffer of 256 TFDs stored in host DRAM.
  * Both driver and device share these circular buffers, each of which must be
  * contiguous 256 TFDs.
- * For pre a000 HW it is 256 x 128 bytes-per-TFD = 32 KBytes
- * For a000 HW and on it is 256 x 256 bytes-per-TFD = 65 KBytes
+ * For pre 22000 HW it is 256 x 128 bytes-per-TFD = 32 KBytes
+ * For 22000 HW and on it is 256 x 256 bytes-per-TFD = 65 KBytes
  *
  * Driver must indicate the physical address of the base of each
  * circular buffer via the FH_MEM_CBBC_QUEUE registers.
@@ -715,12 +681,13 @@ struct iwl_tfh_tb {
 
 /**
  * struct iwl_tfd - Transmit Frame Descriptor (TFD)
- * @ __reserved1[3] reserved
- * @ num_tbs 0-4 number of active tbs
- *	     5   reserved
- *	     6-7 padding (not used)
- * @ tbs[20]	transmit frame buffer descriptors
- * @ __pad	padding
+ * @__reserved1: reserved
+ * @num_tbs:
+ *  0-4 number of active tbs
+ *  5   reserved
+ *  6-7 padding (not used)
+ * @tbs: transmit frame buffer descriptors
+ * @__pad: padding
  */
 struct iwl_tfd {
 	u8 __reserved1[3];
@@ -750,16 +717,27 @@ struct iwl_tfh_tfd {
 /**
  * struct iwlagn_schedq_bc_tbl scheduler byte count table
  *	base physical address provided by SCD_DRAM_BASE_ADDR
- * For devices up to a000:
+ * For devices up to 22000:
  * @tfd_offset  0-12 - tx command byte count
  *		12-16 - station index
- * For a000 and on:
+ * For 22000:
  * @tfd_offset  0-12 - tx command byte count
  *		12-13 - number of 64 byte chunks
  *		14-16 - reserved
  */
 struct iwlagn_scd_bc_tbl {
 	__le16 tfd_offset[TFD_QUEUE_BC_SIZE];
+} __packed;
+
+/**
+ * struct iwl_gen3_bc_tbl_entry scheduler byte count table entry gen3
+ * For AX210 and on:
+ * @tfd_offset: 0-12 - tx command byte count
+ *		12-13 - number of 64 byte chunks
+ *		14-16 - reserved
+ */
+struct iwl_gen3_bc_tbl_entry {
+	__le16 tfd_offset;
 } __packed;
 
 #endif /* !__iwl_fh_h__ */

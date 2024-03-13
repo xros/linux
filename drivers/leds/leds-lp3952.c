@@ -1,17 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	LED driver for TI lp3952 controller
  *
  *	Copyright (C) 2016, DAQRI, LLC.
  *	Author: Tony Makkiel <tony.makkiel@daqri.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/delay.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -105,7 +101,7 @@ static int lp3952_get_label(struct device *dev, const char *label, char *dest)
 	if (ret)
 		return ret;
 
-	strncpy(dest, str, LP3952_LABEL_MAX_LEN);
+	strscpy(dest, str, LP3952_LABEL_MAX_LEN);
 	return 0;
 }
 
@@ -208,11 +204,10 @@ static const struct regmap_config lp3952_regmap = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = REG_MAX,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
-static int lp3952_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int lp3952_probe(struct i2c_client *client)
 {
 	int status;
 	struct lp3952_led_array *priv;
@@ -259,15 +254,13 @@ static int lp3952_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int lp3952_remove(struct i2c_client *client)
+static void lp3952_remove(struct i2c_client *client)
 {
 	struct lp3952_led_array *priv;
 
 	priv = i2c_get_clientdata(client);
 	lp3952_on_off(priv, LP3952_LED_ALL, false);
 	gpiod_set_value(priv->enable_gpio, 0);
-
-	return 0;
 }
 
 static const struct i2c_device_id lp3952_id[] = {

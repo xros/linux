@@ -1,24 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* SCTP kernel implementation
  * (C) Copyright Red Hat Inc. 2017
  *
  * These are definitions used by the stream schedulers, defined in RFC
  * draft ndata (https://tools.ietf.org/html/draft-ietf-tsvwg-sctp-ndata-11)
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation  is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresses:
@@ -41,8 +26,8 @@ struct sctp_sched_ops {
 	int (*init)(struct sctp_stream *stream);
 	/* Init a stream */
 	int (*init_sid)(struct sctp_stream *stream, __u16 sid, gfp_t gfp);
-	/* Frees the entire thing */
-	void (*free)(struct sctp_stream *stream);
+	/* free a stream */
+	void (*free_sid)(struct sctp_stream *stream, __u16 sid);
 
 	/* Enqueue a chunk */
 	void (*enqueue)(struct sctp_outq *q, struct sctp_datamsg *msg);
@@ -73,5 +58,7 @@ void sctp_sched_ops_register(enum sctp_sched_type sched,
 			     struct sctp_sched_ops *sched_ops);
 void sctp_sched_ops_prio_init(void);
 void sctp_sched_ops_rr_init(void);
+void sctp_sched_ops_fc_init(void);
+void sctp_sched_ops_wfq_init(void);
 
 #endif /* __sctp_stream_sched_h__ */

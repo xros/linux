@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Minimal BPF debugger
  *
@@ -12,7 +13,7 @@
  * for making a verdict when multiple simple BPF programs are combined
  * into one in order to prevent parsing same headers multiple times.
  *
- * More on how to debug BPF opcodes see Documentation/networking/filter.txt
+ * More on how to debug BPF opcodes see Documentation/networking/filter.rst
  * which is the main document on BPF. Mini howto for getting started:
  *
  *  1) `./bpf_dbg` to enter the shell (shell cmds denoted with '>'):
@@ -28,7 +29,6 @@
  *  7) > step [-<n>, +<n>] (performs single stepping through the BPF)
  *
  * Copyright 2013 Daniel Borkmann <borkmann@redhat.com>
- * Licensed under the GNU General Public License, version 2.0 (GPLv2)
  */
 
 #include <stdio.h>
@@ -890,7 +890,7 @@ static int bpf_run_stepping(struct sock_filter *f, uint16_t bpf_len,
 	bool stop = false;
 	int i = 1;
 
-	while (bpf_curr.Rs == false && stop == false) {
+	while (!bpf_curr.Rs && !stop) {
 		bpf_safe_regs();
 
 		if (i++ == next)
@@ -1063,7 +1063,7 @@ static int cmd_load_pcap(char *file)
 
 static int cmd_load(char *arg)
 {
-	char *subcmd, *cont, *tmp = strdup(arg);
+	char *subcmd, *cont = NULL, *tmp = strdup(arg);
 	int ret = CMD_OK;
 
 	subcmd = strtok_r(tmp, " ", &cont);
@@ -1073,7 +1073,10 @@ static int cmd_load(char *arg)
 		bpf_reset();
 		bpf_reset_breakpoints();
 
-		ret = cmd_load_bpf(cont);
+		if (!cont)
+			ret = CMD_ERR;
+		else
+			ret = cmd_load_bpf(cont);
 	} else if (matches(subcmd, "pcap") == 0) {
 		ret = cmd_load_pcap(cont);
 	} else {
@@ -1195,7 +1198,7 @@ static int cmd_run(char *num)
 		else
 			return CMD_OK;
 		bpf_reset();
-	} while (pcap_next_pkt() && (!has_limit || (has_limit && ++i < pkts)));
+	} while (pcap_next_pkt() && (!has_limit || (++i < pkts)));
 
 	rl_printf("bpf passes:%u fails:%u\n", pass, fail);
 

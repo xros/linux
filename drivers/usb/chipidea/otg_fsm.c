@@ -29,7 +29,7 @@
 
 /* Add for otg: interact with user space app */
 static ssize_t
-get_a_bus_req(struct device *dev, struct device_attribute *attr, char *buf)
+a_bus_req_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	char		*next;
 	unsigned	size, t;
@@ -45,7 +45,7 @@ get_a_bus_req(struct device *dev, struct device_attribute *attr, char *buf)
 }
 
 static ssize_t
-set_a_bus_req(struct device *dev, struct device_attribute *attr,
+a_bus_req_store(struct device *dev, struct device_attribute *attr,
 					const char *buf, size_t count)
 {
 	struct ci_hdrc *ci = dev_get_drvdata(dev);
@@ -75,10 +75,10 @@ set_a_bus_req(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR(a_bus_req, S_IRUGO | S_IWUSR, get_a_bus_req, set_a_bus_req);
+static DEVICE_ATTR_RW(a_bus_req);
 
 static ssize_t
-get_a_bus_drop(struct device *dev, struct device_attribute *attr, char *buf)
+a_bus_drop_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	char		*next;
 	unsigned	size, t;
@@ -94,7 +94,7 @@ get_a_bus_drop(struct device *dev, struct device_attribute *attr, char *buf)
 }
 
 static ssize_t
-set_a_bus_drop(struct device *dev, struct device_attribute *attr,
+a_bus_drop_store(struct device *dev, struct device_attribute *attr,
 					const char *buf, size_t count)
 {
 	struct ci_hdrc	*ci = dev_get_drvdata(dev);
@@ -115,11 +115,10 @@ set_a_bus_drop(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR(a_bus_drop, S_IRUGO | S_IWUSR, get_a_bus_drop,
-						set_a_bus_drop);
+static DEVICE_ATTR_RW(a_bus_drop);
 
 static ssize_t
-get_b_bus_req(struct device *dev, struct device_attribute *attr, char *buf)
+b_bus_req_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	char		*next;
 	unsigned	size, t;
@@ -135,7 +134,7 @@ get_b_bus_req(struct device *dev, struct device_attribute *attr, char *buf)
 }
 
 static ssize_t
-set_b_bus_req(struct device *dev, struct device_attribute *attr,
+b_bus_req_store(struct device *dev, struct device_attribute *attr,
 					const char *buf, size_t count)
 {
 	struct ci_hdrc	*ci = dev_get_drvdata(dev);
@@ -160,10 +159,10 @@ set_b_bus_req(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR(b_bus_req, S_IRUGO | S_IWUSR, get_b_bus_req, set_b_bus_req);
+static DEVICE_ATTR_RW(b_bus_req);
 
 static ssize_t
-set_a_clr_err(struct device *dev, struct device_attribute *attr,
+a_clr_err_store(struct device *dev, struct device_attribute *attr,
 					const char *buf, size_t count)
 {
 	struct ci_hdrc	*ci = dev_get_drvdata(dev);
@@ -180,7 +179,7 @@ set_a_clr_err(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR(a_clr_err, S_IWUSR, NULL, set_a_clr_err);
+static DEVICE_ATTR_WO(a_clr_err);
 
 static struct attribute *inputs_attrs[] = {
 	&dev_attr_a_bus_req.attr,
@@ -257,8 +256,10 @@ static void ci_otg_del_timer(struct ci_hdrc *ci, enum otg_fsm_timer t)
 	ci->enabled_otg_timer_bits &= ~(1 << t);
 	if (ci->next_otg_timer == t) {
 		if (ci->enabled_otg_timer_bits == 0) {
+			spin_unlock_irqrestore(&ci->lock, flags);
 			/* No enabled timers after delete it */
 			hrtimer_cancel(&ci->otg_fsm_hrtimer);
+			spin_lock_irqsave(&ci->lock, flags);
 			ci->next_otg_timer = NUM_OTG_FSM_TIMERS;
 		} else {
 			/* Find the next timer */
@@ -460,7 +461,7 @@ static void ci_otg_drv_vbus(struct otg_fsm *fsm, int on)
 	struct ci_hdrc	*ci = container_of(fsm, struct ci_hdrc, fsm);
 
 	if (on) {
-		/* Enable power power */
+		/* Enable power */
 		hw_write(ci, OP_PORTSC, PORTSC_W1C_BITS | PORTSC_PP,
 							PORTSC_PP);
 		if (ci->platdata->reg_vbus) {
@@ -472,6 +473,10 @@ static void ci_otg_drv_vbus(struct otg_fsm *fsm, int on)
 				return;
 			}
 		}
+
+		if (ci->platdata->flags & CI_HDRC_PHY_VBUS_CONTROL)
+			usb_phy_vbus_on(ci->usb_phy);
+
 		/* Disable data pulse irq */
 		hw_write_otgsc(ci, OTGSC_DPIE, 0);
 
@@ -480,6 +485,9 @@ static void ci_otg_drv_vbus(struct otg_fsm *fsm, int on)
 	} else {
 		if (ci->platdata->reg_vbus)
 			regulator_disable(ci->platdata->reg_vbus);
+
+		if (ci->platdata->flags & CI_HDRC_PHY_VBUS_CONTROL)
+			usb_phy_vbus_off(ci->usb_phy);
 
 		fsm->a_bus_drop = 1;
 		fsm->a_bus_req = 0;

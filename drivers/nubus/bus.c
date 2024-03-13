@@ -5,6 +5,7 @@
 // Copyright (C) 2017 Finn Thain
 
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
 #include <linux/list.h>
 #include <linux/nubus.h>
 #include <linux/seq_file.h>
@@ -12,11 +13,6 @@
 
 #define to_nubus_board(d)       container_of(d, struct nubus_board, dev)
 #define to_nubus_driver(d)      container_of(d, struct nubus_driver, driver)
-
-static int nubus_bus_match(struct device *dev, struct device_driver *driver)
-{
-	return 1;
-}
 
 static int nubus_device_probe(struct device *dev)
 {
@@ -28,23 +24,19 @@ static int nubus_device_probe(struct device *dev)
 	return err;
 }
 
-static int nubus_device_remove(struct device *dev)
+static void nubus_device_remove(struct device *dev)
 {
 	struct nubus_driver *ndrv = to_nubus_driver(dev->driver);
-	int err = -ENODEV;
 
-	if (dev->driver && ndrv->remove)
-		err = ndrv->remove(to_nubus_board(dev));
-	return err;
+	if (ndrv->remove)
+		ndrv->remove(to_nubus_board(dev));
 }
 
-struct bus_type nubus_bus_type = {
+static const struct bus_type nubus_bus_type = {
 	.name		= "nubus",
-	.match		= nubus_bus_match,
 	.probe		= nubus_device_probe,
 	.remove		= nubus_device_remove,
 };
-EXPORT_SYMBOL(nubus_bus_type);
 
 int nubus_driver_register(struct nubus_driver *ndrv)
 {
@@ -63,20 +55,15 @@ static struct device nubus_parent = {
 	.init_name	= "nubus",
 };
 
-int __init nubus_bus_register(void)
+static int __init nubus_bus_register(void)
 {
-	int err;
+	return bus_register(&nubus_bus_type);
+}
+postcore_initcall(nubus_bus_register);
 
-	err = device_register(&nubus_parent);
-	if (err)
-		return err;
-
-	err = bus_register(&nubus_bus_type);
-	if (!err)
-		return 0;
-
-	device_unregister(&nubus_parent);
-	return err;
+int __init nubus_parent_device_register(void)
+{
+	return device_register(&nubus_parent);
 }
 
 static void nubus_device_release(struct device *dev)
@@ -98,6 +85,8 @@ int nubus_device_register(struct nubus_board *board)
 	board->dev.release = nubus_device_release;
 	board->dev.bus = &nubus_bus_type;
 	dev_set_name(&board->dev, "slot.%X", board->slot);
+	board->dev.dma_mask = &board->dev.coherent_dma_mask;
+	dma_set_mask(&board->dev, DMA_BIT_MASK(32));
 	return device_register(&board->dev);
 }
 

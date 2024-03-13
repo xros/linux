@@ -1,20 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  * dvb_demux.c - DVB kernel demux API
  *
  * Copyright (C) 2000-2001 Ralph  Metzler <ralph@convergence.de>
  *		       & Marcus Metzler <marcus@convergence.de>
  *			 for convergence integrated media GmbH
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2.1
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #define pr_fmt(fmt) "dvb_demux: " fmt
@@ -30,7 +20,7 @@
 #include <linux/uaccess.h>
 #include <asm/div64.h>
 
-#include "dvb_demux.h"
+#include <media/dvb_demux.h>
 
 static int dvb_demux_tscheck;
 module_param(dvb_demux_tscheck, int, 0644);
@@ -54,6 +44,17 @@ MODULE_PARM_DESC(dvb_demux_feed_err_pkts,
 	if (dvb_demux_tscheck && printk_ratelimit())	\
 		dprintk(x);				\
 } while (0)
+
+#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
+#  define dprintk_sect_loss(x...) dprintk(x)
+#else
+#  define dprintk_sect_loss(x...)
+#endif
+
+#define set_buf_flags(__feed, __flag)			\
+	do {						\
+		(__feed)->buffer_flags |= (__flag);	\
+	} while (0)
 
 /******************************************************************************
  * static inlined helper functions
@@ -104,30 +105,30 @@ static inline int dvb_dmx_swfilter_payload(struct dvb_demux_feed *feed,
 {
 	int count = payload(buf);
 	int p;
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
 	int ccok;
 	u8 cc;
-#endif
 
 	if (count == 0)
 		return -1;
 
 	p = 188 - count;
 
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
 	cc = buf[3] & 0x0f;
 	ccok = ((feed->cc + 1) & 0x0f) == cc;
+	if (!ccok) {
+		set_buf_flags(feed, DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+		dprintk_sect_loss("missed packet: %d instead of %d!\n",
+				  cc, (feed->cc + 1) & 0x0f);
+	}
 	feed->cc = cc;
-	if (!ccok)
-		dprintk("missed packet!\n");
-#endif
 
 	if (buf[1] & 0x40)	// PUSI ?
 		feed->peslen = 0xfffa;
 
 	feed->peslen += count;
 
-	return feed->cb.ts(&buf[p], count, NULL, 0, &feed->feed.ts);
+	return feed->cb.ts(&buf[p], count, NULL, 0, &feed->feed.ts,
+			   &feed->buffer_flags);
 }
 
 static int dvb_dmx_swfilter_sectionfilter(struct dvb_demux_feed *feed,
@@ -149,7 +150,7 @@ static int dvb_dmx_swfilter_sectionfilter(struct dvb_demux_feed *feed,
 		return 0;
 
 	return feed->cb.sec(feed->feed.sec.secbuf, feed->feed.sec.seclen,
-			    NULL, 0, &f->filter);
+			    NULL, 0, &f->filter, &feed->buffer_flags);
 }
 
 static inline int dvb_dmx_swfilter_section_feed(struct dvb_demux_feed *feed)
@@ -168,8 +169,10 @@ static inline int dvb_dmx_swfilter_section_feed(struct dvb_demux_feed *feed)
 	if (sec->check_crc) {
 		section_syntax_indicator = ((sec->secbuf[1] & 0x80) != 0);
 		if (section_syntax_indicator &&
-		    demux->check_crc32(feed, sec->secbuf, sec->seclen))
+		    demux->check_crc32(feed, sec->secbuf, sec->seclen)) {
+			set_buf_flags(feed, DMX_BUFFER_FLAG_HAD_CRC32_DISCARD);
 			return -1;
+		}
 	}
 
 	do {
@@ -186,9 +189,8 @@ static void dvb_dmx_swfilter_section_new(struct dvb_demux_feed *feed)
 {
 	struct dmx_section_feed *sec = &feed->feed.sec;
 
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
 	if (sec->secbufp < sec->tsfeedp) {
-		int i, n = sec->tsfeedp - sec->secbufp;
+		int n = sec->tsfeedp - sec->secbufp;
 
 		/*
 		 * Section padding is done with 0xff bytes entirely.
@@ -196,15 +198,13 @@ static void dvb_dmx_swfilter_section_new(struct dvb_demux_feed *feed)
 		 * but just first and last.
 		 */
 		if (sec->secbuf[0] != 0xff || sec->secbuf[n - 1] != 0xff) {
-			dprintk("dvb_demux.c section ts padding loss: %d/%d\n",
-			       n, sec->tsfeedp);
-			dprintk("dvb_demux.c pad data:");
-			for (i = 0; i < n; i++)
-				pr_cont(" %02x", sec->secbuf[i]);
-			pr_cont("\n");
+			set_buf_flags(feed,
+				      DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+			dprintk_sect_loss("section ts padding loss: %d/%d\n",
+					  n, sec->tsfeedp);
+			dprintk_sect_loss("pad data: %*ph\n", n, sec->secbuf);
 		}
 	}
-#endif
 
 	sec->tsfeedp = sec->secbufp = sec->seclen = 0;
 	sec->secbuf = sec->secbuf_base;
@@ -233,17 +233,16 @@ static int dvb_dmx_swfilter_section_copy_dump(struct dvb_demux_feed *feed,
 {
 	struct dvb_demux *demux = feed->demux;
 	struct dmx_section_feed *sec = &feed->feed.sec;
-	u16 limit, seclen, n;
+	u16 limit, seclen;
 
 	if (sec->tsfeedp >= DMX_MAX_SECFEED_SIZE)
 		return 0;
 
 	if (sec->tsfeedp + len > DMX_MAX_SECFEED_SIZE) {
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
-		dprintk("dvb_demux.c section buffer full loss: %d/%d\n",
-		       sec->tsfeedp + len - DMX_MAX_SECFEED_SIZE,
-		       DMX_MAX_SECFEED_SIZE);
-#endif
+		set_buf_flags(feed, DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+		dprintk_sect_loss("section buffer full loss: %d/%d\n",
+				  sec->tsfeedp + len - DMX_MAX_SECFEED_SIZE,
+				  DMX_MAX_SECFEED_SIZE);
 		len = DMX_MAX_SECFEED_SIZE - sec->tsfeedp;
 	}
 
@@ -263,7 +262,7 @@ static int dvb_dmx_swfilter_section_copy_dump(struct dvb_demux_feed *feed,
 	/* to be sure always set secbuf */
 	sec->secbuf = sec->secbuf_base + sec->secbufp;
 
-	for (n = 0; sec->secbufp + 2 < limit; n++) {
+	while (sec->secbufp + 2 < limit) {
 		seclen = section_length(sec->secbuf);
 		if (seclen <= 0 || seclen > DMX_MAX_SECTION_SIZE
 		    || seclen + sec->secbufp > limit)
@@ -271,12 +270,13 @@ static int dvb_dmx_swfilter_section_copy_dump(struct dvb_demux_feed *feed,
 		sec->seclen = seclen;
 		sec->crc_val = ~0;
 		/* dump [secbuf .. secbuf+seclen) */
-		if (feed->pusi_seen)
+		if (feed->pusi_seen) {
 			dvb_dmx_swfilter_section_feed(feed);
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
-		else
-			dprintk("dvb_demux.c pusi not seen, discarding section data\n");
-#endif
+		} else {
+			set_buf_flags(feed,
+				      DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+			dprintk_sect_loss("pusi not seen, discarding section data\n");
+		}
 		sec->secbufp += seclen;	/* secbufp and secbuf moving together is */
 		sec->secbuf += seclen;	/* redundant but saves pointer arithmetic */
 	}
@@ -300,7 +300,6 @@ static int dvb_dmx_swfilter_section_packet(struct dvb_demux_feed *feed,
 
 	cc = buf[3] & 0x0f;
 	ccok = ((feed->cc + 1) & 0x0f) == cc;
-	feed->cc = cc;
 
 	if (buf[3] & 0x20) {
 		/* adaption field present, check for discontinuity_indicator */
@@ -309,21 +308,34 @@ static int dvb_dmx_swfilter_section_packet(struct dvb_demux_feed *feed,
 	}
 
 	if (!ccok || dc_i) {
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
-		dprintk("dvb_demux.c discontinuity detected %d bytes lost\n",
-			count);
+		if (dc_i) {
+			set_buf_flags(feed,
+				      DMX_BUFFER_FLAG_DISCONTINUITY_INDICATOR);
+			dprintk_sect_loss("%d frame with disconnect indicator\n",
+				cc);
+		} else {
+			set_buf_flags(feed,
+				      DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+			dprintk_sect_loss("discontinuity: %d instead of %d. %d bytes lost\n",
+				cc, (feed->cc + 1) & 0x0f, count + 4);
+		}
 		/*
-		 * those bytes under sume circumstances will again be reported
+		 * those bytes under some circumstances will again be reported
 		 * in the following dvb_dmx_swfilter_section_new
 		 */
-#endif
+
 		/*
 		 * Discontinuity detected. Reset pusi_seen to
 		 * stop feeding of suspicious data until next PUSI=1 arrives
+		 *
+		 * FIXME: does it make sense if the MPEG-TS is the one
+		 *	reporting discontinuity?
 		 */
+
 		feed->pusi_seen = false;
 		dvb_dmx_swfilter_section_new(feed);
 	}
+	feed->cc = cc;
 
 	if (buf[1] & 0x40) {
 		/* PUSI=1 (is set), section boundary is here */
@@ -340,12 +352,11 @@ static int dvb_dmx_swfilter_section_packet(struct dvb_demux_feed *feed,
 			dvb_dmx_swfilter_section_new(feed);
 			dvb_dmx_swfilter_section_copy_dump(feed, after,
 							   after_len);
+		} else if (count > 0) {
+			set_buf_flags(feed,
+				      DMX_BUFFER_FLAG_DISCONTINUITY_DETECTED);
+			dprintk_sect_loss("PUSI=1 but %d bytes lost\n", count);
 		}
-#ifdef CONFIG_DVB_DEMUX_SECTION_LOSS_LOG
-		else if (count > 0)
-			dprintk("dvb_demux.c PUSI=1 but %d bytes lost\n",
-				count);
-#endif
 	} else {
 		/* PUSI=0 (is not set), no section boundary */
 		dvb_dmx_swfilter_section_copy_dump(feed, &buf[p], count);
@@ -365,7 +376,8 @@ static inline void dvb_dmx_swfilter_packet_type(struct dvb_demux_feed *feed,
 			if (feed->ts_type & TS_PAYLOAD_ONLY)
 				dvb_dmx_swfilter_payload(feed, buf);
 			else
-				feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts);
+				feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts,
+					    &feed->buffer_flags);
 		}
 		/* Used only on full-featured devices */
 		if (feed->ts_type & TS_DECODER)
@@ -414,9 +426,10 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 						1024);
 				speed_timedelta = ktime_ms_delta(cur_time,
 							demux->speed_last_time);
-				dprintk("TS speed %llu Kbits/sec \n",
-					div64_u64(speed_bytes,
-						  speed_timedelta));
+				if (speed_timedelta)
+					dprintk("TS speed %llu Kbits/sec \n",
+						div64_u64(speed_bytes,
+							  speed_timedelta));
 			}
 
 			demux->speed_last_time = cur_time;
@@ -425,6 +438,11 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 	}
 
 	if (buf[1] & 0x80) {
+		list_for_each_entry(feed, &demux->feed_list, list_head) {
+			if ((feed->pid != pid) && (feed->pid != 0x2000))
+				continue;
+			set_buf_flags(feed, DMX_BUFFER_FLAG_TEI);
+		}
 		dprintk_tscheck("TEI detected. PID=0x%x data1=0x%x\n",
 				pid, buf[1]);
 		/* data in this packet can't be trusted - drop it unless
@@ -440,9 +458,16 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 						(demux->cnt_storage[pid] + 1) & 0xf;
 
 				if ((buf[3] & 0xf) != demux->cnt_storage[pid]) {
+					list_for_each_entry(feed, &demux->feed_list, list_head) {
+						if ((feed->pid != pid) && (feed->pid != 0x2000))
+							continue;
+						set_buf_flags(feed,
+							      DMX_BUFFER_PKT_COUNTER_MISMATCH);
+					}
+
 					dprintk_tscheck("TS packet counter mismatch. PID=0x%x expected 0x%x got 0x%x\n",
-						pid, demux->cnt_storage[pid],
-						buf[3] & 0xf);
+							pid, demux->cnt_storage[pid],
+							buf[3] & 0xf);
 					demux->cnt_storage[pid] = buf[3] & 0xf;
 				}
 			}
@@ -461,7 +486,8 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 		if (feed->pid == pid)
 			dvb_dmx_swfilter_packet_type(feed, buf);
 		else if (feed->pid == 0x2000)
-			feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts);
+			feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts,
+				    &feed->buffer_flags);
 	}
 }
 
@@ -580,7 +606,8 @@ void dvb_dmx_swfilter_raw(struct dvb_demux *demux, const u8 *buf, size_t count)
 
 	spin_lock_irqsave(&demux->lock, flags);
 
-	demux->feed->cb.ts(buf, count, NULL, 0, &demux->feed->feed.ts);
+	demux->feed->cb.ts(buf, count, NULL, 0, &demux->feed->feed.ts,
+			   &demux->feed->buffer_flags);
 
 	spin_unlock_irqrestore(&demux->lock, flags);
 }
@@ -780,6 +807,7 @@ static int dvbdmx_allocate_ts_feed(struct dmx_demux *dmx,
 	feed->demux = demux;
 	feed->pid = 0xffff;
 	feed->peslen = 0xfffa;
+	feed->buffer_flags = 0;
 
 	(*ts_feed) = &feed->feed.ts;
 	(*ts_feed)->parent = dmx;
@@ -933,6 +961,7 @@ static int dmx_section_feed_start_filtering(struct dmx_section_feed *feed)
 	dvbdmxfeed->feed.sec.secbuf = dvbdmxfeed->feed.sec.secbuf_base;
 	dvbdmxfeed->feed.sec.secbufp = 0;
 	dvbdmxfeed->feed.sec.seclen = 0;
+	dvbdmxfeed->pusi_seen = false;
 
 	if (!dvbdmx->start_feed) {
 		mutex_unlock(&dvbdmx->mutex);
@@ -1037,6 +1066,7 @@ static int dvbdmx_allocate_section_feed(struct dmx_demux *demux,
 	dvbdmxfeed->cb.sec = callback;
 	dvbdmxfeed->demux = dvbdmx;
 	dvbdmxfeed->pid = 0xffff;
+	dvbdmxfeed->buffer_flags = 0;
 	dvbdmxfeed->feed.sec.secbuf = dvbdmxfeed->feed.sec.secbuf_base;
 	dvbdmxfeed->feed.sec.secbufp = dvbdmxfeed->feed.sec.seclen = 0;
 	dvbdmxfeed->feed.sec.tsfeedp = 0;
@@ -1208,12 +1238,14 @@ int dvb_dmx_init(struct dvb_demux *dvbdemux)
 
 	dvbdemux->cnt_storage = NULL;
 	dvbdemux->users = 0;
-	dvbdemux->filter = vmalloc(dvbdemux->filternum * sizeof(struct dvb_demux_filter));
+	dvbdemux->filter = vmalloc(array_size(sizeof(struct dvb_demux_filter),
+					      dvbdemux->filternum));
 
 	if (!dvbdemux->filter)
 		return -ENOMEM;
 
-	dvbdemux->feed = vmalloc(dvbdemux->feednum * sizeof(struct dvb_demux_feed));
+	dvbdemux->feed = vmalloc(array_size(sizeof(struct dvb_demux_feed),
+					    dvbdemux->feednum));
 	if (!dvbdemux->feed) {
 		vfree(dvbdemux->filter);
 		dvbdemux->filter = NULL;

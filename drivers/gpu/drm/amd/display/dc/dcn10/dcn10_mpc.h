@@ -30,9 +30,6 @@
 #define TO_DCN10_MPC(mpc_base) \
 	container_of(mpc_base, struct dcn10_mpc, base)
 
-#define MAX_MPCC 6
-#define MAX_OPP 6
-
 #define MPC_COMMON_REG_LIST_DCN1_0(inst) \
 	SRII(MPCC_TOP_SEL, MPCC, inst),\
 	SRII(MPCC_BOT_SEL, MPCC, inst),\
@@ -42,10 +39,12 @@
 	SRII(MPCC_BG_G_Y, MPCC, inst),\
 	SRII(MPCC_BG_R_CR, MPCC, inst),\
 	SRII(MPCC_BG_B_CB, MPCC, inst),\
-	SRII(MPCC_BG_B_CB, MPCC, inst)
+	SRII(MPCC_SM_CONTROL, MPCC, inst),\
+	SRII(MPCC_UPDATE_LOCK_SEL, MPCC, inst)
 
 #define MPC_OUT_MUX_COMMON_REG_LIST_DCN1_0(inst) \
-	SRII(MUX, MPC_OUT, inst)
+	SRII(MUX, MPC_OUT, inst),\
+	VUPDATE_SRII(CUR, VUPDATE_LOCK_SET, inst)
 
 #define MPC_COMMON_REG_VARIABLE_LIST \
 	uint32_t MPCC_TOP_SEL[MAX_MPCC]; \
@@ -56,7 +55,10 @@
 	uint32_t MPCC_BG_G_Y[MAX_MPCC]; \
 	uint32_t MPCC_BG_R_CR[MAX_MPCC]; \
 	uint32_t MPCC_BG_B_CB[MAX_MPCC]; \
-	uint32_t MUX[MAX_OPP];
+	uint32_t MPCC_SM_CONTROL[MAX_MPCC]; \
+	uint32_t MUX[MAX_OPP]; \
+	uint32_t MPCC_UPDATE_LOCK_SEL[MAX_MPCC]; \
+	uint32_t CUR[MAX_OPP];
 
 #define MPC_COMMON_MASK_SH_LIST_DCN1_0(mask_sh)\
 	SF(MPCC0_MPCC_TOP_SEL, MPCC_TOP_SEL, mask_sh),\
@@ -65,13 +67,22 @@
 	SF(MPCC0_MPCC_CONTROL, MPCC_ALPHA_BLND_MODE, mask_sh),\
 	SF(MPCC0_MPCC_CONTROL, MPCC_ALPHA_MULTIPLIED_MODE, mask_sh),\
 	SF(MPCC0_MPCC_CONTROL, MPCC_BLND_ACTIVE_OVERLAP_ONLY, mask_sh),\
+	SF(MPCC0_MPCC_CONTROL, MPCC_GLOBAL_ALPHA, mask_sh),\
+	SF(MPCC0_MPCC_CONTROL, MPCC_GLOBAL_GAIN, mask_sh),\
 	SF(MPCC0_MPCC_STATUS, MPCC_IDLE, mask_sh),\
 	SF(MPCC0_MPCC_STATUS, MPCC_BUSY, mask_sh),\
 	SF(MPCC0_MPCC_OPP_ID, MPCC_OPP_ID, mask_sh),\
 	SF(MPCC0_MPCC_BG_G_Y, MPCC_BG_G_Y, mask_sh),\
 	SF(MPCC0_MPCC_BG_R_CR, MPCC_BG_R_CR, mask_sh),\
 	SF(MPCC0_MPCC_BG_B_CB, MPCC_BG_B_CB, mask_sh),\
-	SF(MPC_OUT0_MUX, MPC_OUT_MUX, mask_sh)
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_EN, mask_sh),\
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_MODE, mask_sh),\
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_FRAME_ALT, mask_sh),\
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_FIELD_ALT, mask_sh),\
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_FORCE_NEXT_FRAME_POL, mask_sh),\
+	SF(MPCC0_MPCC_SM_CONTROL, MPCC_SM_FORCE_NEXT_TOP_POL, mask_sh),\
+	SF(MPC_OUT0_MUX, MPC_OUT_MUX, mask_sh),\
+	SF(MPCC0_MPCC_UPDATE_LOCK_SEL, MPCC_UPDATE_LOCK_SEL, mask_sh)
 
 #define MPC_REG_FIELD_LIST(type) \
 	type MPCC_TOP_SEL;\
@@ -80,13 +91,23 @@
 	type MPCC_ALPHA_BLND_MODE;\
 	type MPCC_ALPHA_MULTIPLIED_MODE;\
 	type MPCC_BLND_ACTIVE_OVERLAP_ONLY;\
+	type MPCC_GLOBAL_ALPHA;\
+	type MPCC_GLOBAL_GAIN;\
 	type MPCC_IDLE;\
 	type MPCC_BUSY;\
 	type MPCC_OPP_ID;\
 	type MPCC_BG_G_Y;\
 	type MPCC_BG_R_CR;\
 	type MPCC_BG_B_CB;\
-	type MPC_OUT_MUX;
+	type MPCC_SM_EN;\
+	type MPCC_SM_MODE;\
+	type MPCC_SM_FRAME_ALT;\
+	type MPCC_SM_FIELD_ALT;\
+	type MPCC_SM_FORCE_NEXT_FRAME_POL;\
+	type MPCC_SM_FORCE_NEXT_TOP_POL;\
+	type MPC_OUT_MUX;\
+	type MPCC_UPDATE_LOCK_SEL;\
+	type CUR_VUPDATE_LOCK_SET;
 
 struct dcn_mpc_registers {
 	MPC_COMMON_REG_VARIABLE_LIST
@@ -117,22 +138,67 @@ void dcn10_mpc_construct(struct dcn10_mpc *mpcc10,
 	const struct dcn_mpc_mask *mpc_mask,
 	int num_mpcc);
 
-int mpc10_mpcc_add(
-		struct mpc *mpc,
-		struct mpcc_cfg *cfg);
+struct mpcc *mpc1_insert_plane(
+	struct mpc *mpc,
+	struct mpc_tree *tree,
+	struct mpcc_blnd_cfg *blnd_cfg,
+	struct mpcc_sm_cfg *sm_cfg,
+	struct mpcc *insert_above_mpcc,
+	int dpp_id,
+	int mpcc_id);
 
-void mpc10_mpcc_remove(
-		struct mpc *mpc,
-		struct mpc_tree_cfg *tree_cfg,
-		int opp_id,
-		int dpp_id);
+void mpc1_remove_mpcc(
+	struct mpc *mpc,
+	struct mpc_tree *tree,
+	struct mpcc *mpcc);
 
-void mpc10_assert_idle_mpcc(
-		struct mpc *mpc,
-		int id);
+void mpc1_mpc_init(
+	struct mpc *mpc);
 
-void mpc10_update_blend_mode(
-		struct mpc *mpc,
-		struct mpcc_cfg *cfg);
+void mpc1_mpc_init_single_inst(
+	struct mpc *mpc,
+	unsigned int mpcc_id);
 
+void mpc1_assert_idle_mpcc(
+	struct mpc *mpc,
+	int id);
+
+void mpc1_set_bg_color(
+	struct mpc *mpc,
+	struct tg_color *bg_color,
+	int id);
+
+void mpc1_update_stereo_mix(
+	struct mpc *mpc,
+	struct mpcc_sm_cfg *sm_cfg,
+	int mpcc_id);
+
+bool mpc1_is_mpcc_idle(
+	struct mpc *mpc,
+	int mpcc_id);
+
+void mpc1_assert_mpcc_idle_before_connect(
+	struct mpc *mpc,
+	int mpcc_id);
+
+void mpc1_init_mpcc_list_from_hw(
+	struct mpc *mpc,
+	struct mpc_tree *tree);
+
+struct mpcc *mpc1_get_mpcc(
+	struct mpc *mpc,
+	int mpcc_id);
+
+struct mpcc *mpc1_get_mpcc_for_dpp(
+	struct mpc_tree *tree,
+	int dpp_id);
+
+void mpc1_read_mpcc_state(
+		struct mpc *mpc,
+		int mpcc_inst,
+		struct mpcc_state *s);
+
+void mpc1_cursor_lock(struct mpc *mpc, int opp_id, bool lock);
+
+unsigned int mpc1_get_mpc_out_mux(struct mpc *mpc, int opp_id);
 #endif

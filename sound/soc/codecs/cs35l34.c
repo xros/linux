@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * cs35l34.c -- CS35l34 ALSA SoC audio driver
  *
  * Copyright 2016 Cirrus Logic, Inc.
  *
  * Author: Paul Handrigan <Paul.Handrigan@cirrus.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/module.h>
@@ -23,27 +19,26 @@
 #include <linux/regulator/consumer.h>
 #include <linux/regulator/machine.h>
 #include <linux/pm_runtime.h>
-#include <linux/of_device.h>
-#include <linux/of_gpio.h>
+#include <linux/of.h>
 #include <linux/of_irq.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <sound/initval.h>
 #include <sound/tlv.h>
 #include <sound/cs35l34.h>
 
 #include "cs35l34.h"
+#include "cirrus_legacy.h"
 
 #define PDN_DONE_ATTEMPTS 10
 #define CS35L34_START_DELAY 50
 
 struct  cs35l34_private {
-	struct snd_soc_codec *codec;
+	struct snd_soc_component *component;
 	struct cs35l34_platform_data pdata;
 	struct regmap *regmap;
 	struct regulator_bulk_data core_supplies[2];
@@ -237,8 +232,8 @@ static bool cs35l34_precious_register(struct device *dev, unsigned int reg)
 static int cs35l34_sdin_event(struct snd_soc_dapm_widget *w,
 		struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 	int ret;
 
 	switch (event) {
@@ -250,7 +245,7 @@ static int cs35l34_sdin_event(struct snd_soc_dapm_widget *w,
 		ret = regmap_update_bits(priv->regmap, CS35L34_PWRCTL1,
 						CS35L34_PDN_ALL, 0);
 		if (ret < 0) {
-			dev_err(codec->dev, "Cannot set Power bits %d\n", ret);
+			dev_err(component->dev, "Cannot set Power bits %d\n", ret);
 			return ret;
 		}
 		usleep_range(5000, 5100);
@@ -272,8 +267,8 @@ static int cs35l34_sdin_event(struct snd_soc_dapm_widget *w,
 static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 				unsigned int rx_mask, int slots, int slot_width)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 	unsigned int reg, bit_pos;
 	int slot, slot_num;
 
@@ -284,7 +279,7 @@ static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 	/* scan rx_mask for aud slot */
 	slot = ffs(rx_mask) - 1;
 	if (slot >= 0)
-		snd_soc_update_bits(codec, CS35L34_TDM_RX_CTL_1_AUDIN,
+		snd_soc_component_update_bits(component, CS35L34_TDM_RX_CTL_1_AUDIN,
 					CS35L34_X_LOC, slot);
 
 	/* scan tx_mask: vmon(2 slots); imon (2 slots); vpmon (1 slot)
@@ -294,10 +289,10 @@ static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 	slot_num = 0;
 
 	/* disable vpmon/vbstmon: enable later if set in tx_mask */
-	snd_soc_update_bits(codec, CS35L34_TDM_TX_CTL_3_VPMON,
+	snd_soc_component_update_bits(component, CS35L34_TDM_TX_CTL_3_VPMON,
 				CS35L34_X_STATE | CS35L34_X_LOC,
 				CS35L34_X_STATE | CS35L34_X_LOC);
-	snd_soc_update_bits(codec, CS35L34_TDM_TX_CTL_4_VBSTMON,
+	snd_soc_component_update_bits(component, CS35L34_TDM_TX_CTL_4_VBSTMON,
 				CS35L34_X_STATE | CS35L34_X_LOC,
 				CS35L34_X_STATE | CS35L34_X_LOC);
 
@@ -305,22 +300,22 @@ static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 	while (slot >= 0) {
 		/* configure VMON_TX_LOC */
 		if (slot_num == 0)
-			snd_soc_update_bits(codec, CS35L34_TDM_TX_CTL_1_VMON,
+			snd_soc_component_update_bits(component, CS35L34_TDM_TX_CTL_1_VMON,
 					CS35L34_X_STATE | CS35L34_X_LOC, slot);
 
 		/* configure IMON_TX_LOC */
 		if (slot_num == 4) {
-			snd_soc_update_bits(codec, CS35L34_TDM_TX_CTL_2_IMON,
+			snd_soc_component_update_bits(component, CS35L34_TDM_TX_CTL_2_IMON,
 					CS35L34_X_STATE | CS35L34_X_LOC, slot);
 		}
 		/* configure VPMON_TX_LOC */
 		if (slot_num == 3) {
-			snd_soc_update_bits(codec, CS35L34_TDM_TX_CTL_3_VPMON,
+			snd_soc_component_update_bits(component, CS35L34_TDM_TX_CTL_3_VPMON,
 					CS35L34_X_STATE | CS35L34_X_LOC, slot);
 		}
 		/* configure VBSTMON_TX_LOC */
 		if (slot_num == 7) {
-			snd_soc_update_bits(codec,
+			snd_soc_component_update_bits(component,
 				CS35L34_TDM_TX_CTL_4_VBSTMON,
 				CS35L34_X_STATE | CS35L34_X_LOC, slot);
 		}
@@ -328,7 +323,7 @@ static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 		/* Enable the relevant tx slot */
 		reg = CS35L34_TDM_TX_SLOT_EN_4 - (slot/8);
 		bit_pos = slot - ((slot / 8) * (8));
-		snd_soc_update_bits(codec, reg,
+		snd_soc_component_update_bits(component, reg,
 			1 << bit_pos, 1 << bit_pos);
 
 		tx_mask &= ~(1 << slot);
@@ -342,8 +337,8 @@ static int cs35l34_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 static int cs35l34_main_amp_event(struct snd_soc_dapm_widget *w,
 		struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 
 	switch (event) {
 	case SND_SOC_DAPM_POST_PMU:
@@ -382,8 +377,8 @@ static const struct snd_kcontrol_new cs35l34_snd_controls[] = {
 static int cs35l34_mclk_event(struct snd_soc_dapm_widget *w,
 		struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 	int ret, i;
 	unsigned int reg;
 
@@ -524,8 +519,8 @@ static int cs35l34_get_mclk_coeff(int mclk, int srate)
 
 static int cs35l34_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = codec_dai->component;
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
 	case SND_SOC_DAIFMT_CBM_CFM:
@@ -546,15 +541,15 @@ static int cs35l34_pcm_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *params,
 				 struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct cs35l34_private *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct cs35l34_private *priv = snd_soc_component_get_drvdata(component);
 	int srate = params_rate(params);
 	int ret;
 
 	int coeff = cs35l34_get_mclk_coeff(priv->mclk_int, srate);
 
 	if (coeff < 0) {
-		dev_err(codec->dev, "ERROR: Invalid mclk %d and/or srate %d\n",
+		dev_err(component->dev, "ERROR: Invalid mclk %d and/or srate %d\n",
 			priv->mclk_int, srate);
 		return coeff;
 	}
@@ -562,7 +557,7 @@ static int cs35l34_pcm_hw_params(struct snd_pcm_substream *substream,
 	ret = regmap_update_bits(priv->regmap, CS35L34_ADSP_CLK_CTL,
 		CS35L34_ADSP_RATE, cs35l34_mclk_coeffs[coeff].adsp_rate);
 	if (ret != 0)
-		dev_err(codec->dev, "Failed to set clock state %d\n", ret);
+		dev_err(component->dev, "Failed to set clock state %d\n", ret);
 
 	return ret;
 }
@@ -590,13 +585,13 @@ static int cs35l34_pcm_startup(struct snd_pcm_substream *substream,
 static int cs35l34_set_tristate(struct snd_soc_dai *dai, int tristate)
 {
 
-	struct snd_soc_codec *codec = dai->codec;
+	struct snd_soc_component *component = dai->component;
 
 	if (tristate)
-		snd_soc_update_bits(codec, CS35L34_PWRCTL3,
+		snd_soc_component_update_bits(component, CS35L34_PWRCTL3,
 					CS35L34_PDN_SDOUT, CS35L34_PDN_SDOUT);
 	else
-		snd_soc_update_bits(codec, CS35L34_PWRCTL3,
+		snd_soc_component_update_bits(component, CS35L34_PWRCTL3,
 					CS35L34_PDN_SDOUT, 0);
 	return 0;
 }
@@ -604,8 +599,8 @@ static int cs35l34_set_tristate(struct snd_soc_dai *dai, int tristate)
 static int cs35l34_dai_set_sysclk(struct snd_soc_dai *dai,
 				int clk_id, unsigned int freq, int dir)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct cs35l34_private *cs35l34 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct cs35l34_private *cs35l34 = snd_soc_component_get_drvdata(component);
 	unsigned int value;
 
 	switch (freq) {
@@ -634,7 +629,7 @@ static int cs35l34_dai_set_sysclk(struct snd_soc_dai *dai,
 		cs35l34->mclk_int = freq / 2;
 	break;
 	default:
-		dev_err(codec->dev, "ERROR: Invalid Frequency %d\n", freq);
+		dev_err(component->dev, "ERROR: Invalid Frequency %d\n", freq);
 		cs35l34->mclk_int = 0;
 		return -EINVAL;
 	}
@@ -670,13 +665,13 @@ static struct snd_soc_dai_driver cs35l34_dai = {
 			.formats = CS35L34_FORMATS,
 		},
 		.ops = &cs35l34_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 };
 
 static int cs35l34_boost_inductor(struct cs35l34_private *cs35l34,
 	unsigned int inductor)
 {
-	struct snd_soc_codec *codec = cs35l34->codec;
+	struct snd_soc_component *component = cs35l34->component;
 
 	switch (inductor) {
 	case 1000: /* 1 uH */
@@ -708,19 +703,19 @@ static int cs35l34_boost_inductor(struct cs35l34_private *cs35l34,
 		regmap_write(cs35l34->regmap, CS35L34_BST_CONV_SW_FREQ, 3);
 		break;
 	default:
-		dev_err(codec->dev, "%s Invalid Inductor Value %d uH\n",
+		dev_err(component->dev, "%s Invalid Inductor Value %d uH\n",
 			__func__, inductor);
 		return -EINVAL;
 	}
 	return 0;
 }
 
-static int cs35l34_probe(struct snd_soc_codec *codec)
+static int cs35l34_probe(struct snd_soc_component *component)
 {
 	int ret = 0;
-	struct cs35l34_private *cs35l34 = snd_soc_codec_get_drvdata(codec);
+	struct cs35l34_private *cs35l34 = snd_soc_component_get_drvdata(component);
 
-	pm_runtime_get_sync(codec->dev);
+	pm_runtime_get_sync(component->dev);
 
 	/* Set over temperature warning attenuation to 6 dB */
 	regmap_update_bits(cs35l34->regmap, CS35L34_PROTECT_CTL,
@@ -773,23 +768,23 @@ static int cs35l34_probe(struct snd_soc_codec *codec)
 		regmap_update_bits(cs35l34->regmap, CS35L34_ADSP_TDM_CTL,
 			1, 1);
 
-	pm_runtime_put_sync(codec->dev);
+	pm_runtime_put_sync(component->dev);
 
 	return ret;
 }
 
 
-static const struct snd_soc_codec_driver soc_codec_dev_cs35l34 = {
-	.probe = cs35l34_probe,
-
-	.component_driver = {
-		.dapm_widgets = cs35l34_dapm_widgets,
-		.num_dapm_widgets = ARRAY_SIZE(cs35l34_dapm_widgets),
-		.dapm_routes = cs35l34_audio_map,
-		.num_dapm_routes = ARRAY_SIZE(cs35l34_audio_map),
-		.controls = cs35l34_snd_controls,
-		.num_controls = ARRAY_SIZE(cs35l34_snd_controls),
-	},
+static const struct snd_soc_component_driver soc_component_dev_cs35l34 = {
+	.probe			= cs35l34_probe,
+	.dapm_widgets		= cs35l34_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(cs35l34_dapm_widgets),
+	.dapm_routes		= cs35l34_audio_map,
+	.num_dapm_routes	= ARRAY_SIZE(cs35l34_audio_map),
+	.controls		= cs35l34_snd_controls,
+	.num_controls		= ARRAY_SIZE(cs35l34_snd_controls),
+	.idle_bias_on		= 1,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
 };
 
 static struct regmap_config cs35l34_regmap = {
@@ -802,7 +797,10 @@ static struct regmap_config cs35l34_regmap = {
 	.volatile_reg = cs35l34_volatile_register,
 	.readable_reg = cs35l34_readable_register,
 	.precious_reg = cs35l34_precious_register,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
+
+	.use_single_read = true,
+	.use_single_write = true,
 };
 
 static int cs35l34_handle_of_data(struct i2c_client *i2c_client,
@@ -864,7 +862,7 @@ static int cs35l34_handle_of_data(struct i2c_client *i2c_client,
 static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 {
 	struct cs35l34_private *cs35l34 = data;
-	struct snd_soc_codec *codec = cs35l34->codec;
+	struct snd_soc_component *component = cs35l34->component;
 	unsigned int sticky1, sticky2, sticky3, sticky4;
 	unsigned int mask1, mask2, mask3, mask4, current1;
 
@@ -887,11 +885,11 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	regmap_read(cs35l34->regmap, CS35L34_INT_STATUS_1, &current1);
 
 	if (sticky1 & CS35L34_CAL_ERR) {
-		dev_err(codec->dev, "Cal error\n");
+		dev_err(component->dev, "Cal error\n");
 
 		/* error is no longer asserted; safe to reset */
 		if (!(current1 & CS35L34_CAL_ERR)) {
-			dev_dbg(codec->dev, "Cal error release\n");
+			dev_dbg(component->dev, "Cal error release\n");
 			regmap_update_bits(cs35l34->regmap,
 					CS35L34_PROT_RELEASE_CTL,
 					CS35L34_CAL_ERR_RLS, 0);
@@ -907,14 +905,14 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	}
 
 	if (sticky1 & CS35L34_ALIVE_ERR)
-		dev_err(codec->dev, "Alive error\n");
+		dev_err(component->dev, "Alive error\n");
 
 	if (sticky1 & CS35L34_AMP_SHORT) {
-		dev_crit(codec->dev, "Amp short error\n");
+		dev_crit(component->dev, "Amp short error\n");
 
 		/* error is no longer asserted; safe to reset */
 		if (!(current1 & CS35L34_AMP_SHORT)) {
-			dev_dbg(codec->dev,
+			dev_dbg(component->dev,
 				"Amp short error release\n");
 			regmap_update_bits(cs35l34->regmap,
 					CS35L34_PROT_RELEASE_CTL,
@@ -930,11 +928,11 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	}
 
 	if (sticky1 & CS35L34_OTW) {
-		dev_crit(codec->dev, "Over temperature warning\n");
+		dev_crit(component->dev, "Over temperature warning\n");
 
 		/* error is no longer asserted; safe to reset */
 		if (!(current1 & CS35L34_OTW)) {
-			dev_dbg(codec->dev,
+			dev_dbg(component->dev,
 				"Over temperature warning release\n");
 			regmap_update_bits(cs35l34->regmap,
 					CS35L34_PROT_RELEASE_CTL,
@@ -950,11 +948,11 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	}
 
 	if (sticky1 & CS35L34_OTE) {
-		dev_crit(codec->dev, "Over temperature error\n");
+		dev_crit(component->dev, "Over temperature error\n");
 
 		/* error is no longer asserted; safe to reset */
 		if (!(current1 & CS35L34_OTE)) {
-			dev_dbg(codec->dev,
+			dev_dbg(component->dev,
 				"Over temperature error release\n");
 			regmap_update_bits(cs35l34->regmap,
 					CS35L34_PROT_RELEASE_CTL,
@@ -970,7 +968,7 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	}
 
 	if (sticky3 & CS35L34_BST_HIGH) {
-		dev_crit(codec->dev, "VBST too high error; powering off!\n");
+		dev_crit(component->dev, "VBST too high error; powering off!\n");
 		regmap_update_bits(cs35l34->regmap, CS35L34_PWRCTL2,
 				CS35L34_PDN_AMP, CS35L34_PDN_AMP);
 		regmap_update_bits(cs35l34->regmap, CS35L34_PWRCTL1,
@@ -978,7 +976,7 @@ static irqreturn_t cs35l34_irq_thread(int irq, void *data)
 	}
 
 	if (sticky3 & CS35L34_LBST_SHORT) {
-		dev_crit(codec->dev, "LBST short error; powering off!\n");
+		dev_crit(component->dev, "LBST short error; powering off!\n");
 		regmap_update_bits(cs35l34->regmap, CS35L34_PWRCTL2,
 				CS35L34_PDN_AMP, CS35L34_PDN_AMP);
 		regmap_update_bits(cs35l34->regmap, CS35L34_PWRCTL1,
@@ -993,15 +991,13 @@ static const char * const cs35l34_core_supplies[] = {
 	"VP",
 };
 
-static int cs35l34_i2c_probe(struct i2c_client *i2c_client,
-			      const struct i2c_device_id *id)
+static int cs35l34_i2c_probe(struct i2c_client *i2c_client)
 {
 	struct cs35l34_private *cs35l34;
 	struct cs35l34_platform_data *pdata =
 		dev_get_platdata(&i2c_client->dev);
-	int i;
+	int i, devid;
 	int ret;
-	unsigned int devid = 0;
 	unsigned int reg;
 
 	cs35l34 = devm_kzalloc(&i2c_client->dev, sizeof(*cs35l34), GFP_KERNEL);
@@ -1042,13 +1038,15 @@ static int cs35l34_i2c_probe(struct i2c_client *i2c_client,
 	} else {
 		pdata = devm_kzalloc(&i2c_client->dev, sizeof(*pdata),
 				     GFP_KERNEL);
-		if (!pdata)
-			return -ENOMEM;
+		if (!pdata) {
+			ret = -ENOMEM;
+			goto err_regulator;
+		}
 
 		if (i2c_client->dev.of_node) {
 			ret = cs35l34_handle_of_data(i2c_client, pdata);
 			if (ret != 0)
-				return ret;
+				goto err_regulator;
 
 		}
 		cs35l34->pdata = *pdata;
@@ -1061,34 +1059,35 @@ static int cs35l34_i2c_probe(struct i2c_client *i2c_client,
 		dev_err(&i2c_client->dev, "Failed to request IRQ: %d\n", ret);
 
 	cs35l34->reset_gpio = devm_gpiod_get_optional(&i2c_client->dev,
-				"reset-gpios", GPIOD_OUT_LOW);
-	if (IS_ERR(cs35l34->reset_gpio))
-		return PTR_ERR(cs35l34->reset_gpio);
+				"reset", GPIOD_OUT_LOW);
+	if (IS_ERR(cs35l34->reset_gpio)) {
+		ret = PTR_ERR(cs35l34->reset_gpio);
+		goto err_regulator;
+	}
 
 	gpiod_set_value_cansleep(cs35l34->reset_gpio, 1);
 
 	msleep(CS35L34_START_DELAY);
 
-	ret = regmap_read(cs35l34->regmap, CS35L34_DEVID_AB, &reg);
-
-	devid = (reg & 0xFF) << 12;
-	ret = regmap_read(cs35l34->regmap, CS35L34_DEVID_CD, &reg);
-	devid |= (reg & 0xFF) << 4;
-	ret = regmap_read(cs35l34->regmap, CS35L34_DEVID_E, &reg);
-	devid |= (reg & 0xF0) >> 4;
+	devid = cirrus_read_device_id(cs35l34->regmap, CS35L34_DEVID_AB);
+	if (devid < 0) {
+		ret = devid;
+		dev_err(&i2c_client->dev, "Failed to read device ID: %d\n", ret);
+		goto err_reset;
+	}
 
 	if (devid != CS35L34_CHIP_ID) {
 		dev_err(&i2c_client->dev,
 			"CS35l34 Device ID (%X). Expected ID %X\n",
 			devid, CS35L34_CHIP_ID);
 		ret = -ENODEV;
-		goto err_regulator;
+		goto err_reset;
 	}
 
 	ret = regmap_read(cs35l34->regmap, CS35L34_REV_ID, &reg);
 	if (ret < 0) {
 		dev_err(&i2c_client->dev, "Get Revision ID failed\n");
-		goto err_regulator;
+		goto err_reset;
 	}
 
 	dev_info(&i2c_client->dev,
@@ -1108,16 +1107,18 @@ static int cs35l34_i2c_probe(struct i2c_client *i2c_client,
 	pm_runtime_set_active(&i2c_client->dev);
 	pm_runtime_enable(&i2c_client->dev);
 
-	ret =  snd_soc_register_codec(&i2c_client->dev,
-			&soc_codec_dev_cs35l34, &cs35l34_dai, 1);
+	ret = devm_snd_soc_register_component(&i2c_client->dev,
+			&soc_component_dev_cs35l34, &cs35l34_dai, 1);
 	if (ret < 0) {
 		dev_err(&i2c_client->dev,
-			"%s: Register codec failed\n", __func__);
-		goto err_regulator;
+			"%s: Register component failed\n", __func__);
+		goto err_reset;
 	}
 
 	return 0;
 
+err_reset:
+	gpiod_set_value_cansleep(cs35l34->reset_gpio, 0);
 err_regulator:
 	regulator_bulk_disable(cs35l34->num_core_supplies,
 		cs35l34->core_supplies);
@@ -1125,19 +1126,15 @@ err_regulator:
 	return ret;
 }
 
-static int cs35l34_i2c_remove(struct i2c_client *client)
+static void cs35l34_i2c_remove(struct i2c_client *client)
 {
 	struct cs35l34_private *cs35l34 = i2c_get_clientdata(client);
-
-	snd_soc_unregister_codec(&client->dev);
 
 	gpiod_set_value_cansleep(cs35l34->reset_gpio, 0);
 
 	pm_runtime_disable(&client->dev);
 	regulator_bulk_disable(cs35l34->num_core_supplies,
 		cs35l34->core_supplies);
-
-	return 0;
 }
 
 static int __maybe_unused cs35l34_runtime_resume(struct device *dev)

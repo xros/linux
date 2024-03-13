@@ -1,37 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *   This file is provided under a GPLv2 license.  When using or
- *   redistributing this file, you may do so under that license.
- *
- *   GPL LICENSE SUMMARY
- *
  *   Copyright (C) 2016 T-Platforms. All Rights Reserved.
- *
- *   This program is free software; you can redistribute it and/or modify it
- *   under the terms and conditions of the GNU General Public License,
- *   version 2, as published by the Free Software Foundation.
- *
- *   This program is distributed in the hope that it will be useful, but WITHOUT
- *   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *   FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- *   more details.
- *
- *   You should have received a copy of the GNU General Public License along
- *   with this program; if not, it can be found <http://www.gnu.org/licenses/>.
- *
- *   The full GNU General Public License is included in this distribution in
- *   the file called "COPYING".
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  * IDT PCIe-switch NTB Linux driver
  *
@@ -115,7 +84,6 @@ static struct dentry *csr_dbgdir;
  * @client:	i2c client used to perform IO operations
  *
  * @ee_file:	EEPROM read/write sysfs-file
- * @csr_file:	CSR read/write debugfs-node
  */
 struct idt_smb_seq;
 struct idt_89hpesx_dev {
@@ -137,7 +105,6 @@ struct idt_89hpesx_dev {
 
 	struct bin_attribute *ee_file;
 	struct dentry *csr_dir;
-	struct dentry *csr_file;
 };
 
 /*
@@ -599,7 +566,7 @@ static int idt_eeprom_read_byte(struct idt_89hpesx_dev *pdev, u16 memaddr,
 		eeseq.memaddr = cpu_to_le16(memaddr);
 		ret = pdev->smb_write(pdev, &smbseq);
 		if (ret != 0) {
-			dev_err(dev, "Failed to init eeprom addr 0x%02hhx",
+			dev_err(dev, "Failed to init eeprom addr 0x%02x",
 				memaddr);
 			break;
 		}
@@ -608,7 +575,7 @@ static int idt_eeprom_read_byte(struct idt_89hpesx_dev *pdev, u16 memaddr,
 		smbseq.bytecnt = EEPROM_RD_CNT;
 		ret = pdev->smb_read(pdev, &smbseq);
 		if (ret != 0) {
-			dev_err(dev, "Failed to read eeprom data 0x%02hhx",
+			dev_err(dev, "Failed to read eeprom data 0x%02x",
 				memaddr);
 			break;
 		}
@@ -843,7 +810,7 @@ static int idt_csr_read(struct idt_89hpesx_dev *pdev, u16 csraddr, u32 *data)
 	smbseq.bytecnt = CSR_RD_CNT;
 	ret = pdev->smb_read(pdev, &smbseq);
 	if (ret != 0) {
-		dev_err(dev, "Failed to read csr 0x%04hx",
+		dev_err(dev, "Failed to read csr 0x%04x",
 			CSR_REAL_ADDR(csraddr));
 		goto err_mutex_unlock;
 	}
@@ -938,19 +905,17 @@ static ssize_t idt_dbgfs_csr_write(struct file *filep, const char __user *ubuf,
 {
 	struct idt_89hpesx_dev *pdev = filep->private_data;
 	char *colon_ch, *csraddr_str, *csrval_str;
-	int ret, csraddr_len, csrval_len;
+	int ret;
 	u32 csraddr, csrval;
 	char *buf;
 
-	/* Copy data from User-space */
-	buf = kmalloc(count + 1, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
+	if (*offp)
+		return 0;
 
-	ret = simple_write_to_buffer(buf, count, offp, ubuf, count);
-	if (ret < 0)
-		goto free_buf;
-	buf[count] = 0;
+	/* Copy data from User-space */
+	buf = memdup_user_nul(ubuf, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	/* Find position of colon in the buffer */
 	colon_ch = strnchr(buf, count, ':');
@@ -962,24 +927,17 @@ static ssize_t idt_dbgfs_csr_write(struct file *filep, const char __user *ubuf,
 	 * no new CSR value
 	 */
 	if (colon_ch != NULL) {
-		csraddr_len = colon_ch - buf;
-		csraddr_str =
-			kmalloc(sizeof(char)*(csraddr_len + 1), GFP_KERNEL);
+		/* Copy the register address to the substring buffer */
+		csraddr_str = kmemdup_nul(buf, colon_ch - buf, GFP_KERNEL);
 		if (csraddr_str == NULL) {
 			ret = -ENOMEM;
 			goto free_buf;
 		}
-		/* Copy the register address to the substring buffer */
-		strncpy(csraddr_str, buf, csraddr_len);
-		csraddr_str[csraddr_len] = '\0';
 		/* Register value must follow the colon */
 		csrval_str = colon_ch + 1;
-		csrval_len = strnlen(csrval_str, count - csraddr_len);
 	} else /* if (str_colon == NULL) */ {
 		csraddr_str = (char *)buf; /* Just to shut warning up */
-		csraddr_len = strnlen(csraddr_str, count);
 		csrval_str = NULL;
-		csrval_len = 0;
 	}
 
 	/* Convert CSR address to u32 value */
@@ -1106,7 +1064,7 @@ static const struct i2c_device_id *idt_ee_match_id(struct fwnode_handle *fwnode)
 		return NULL;
 
 	p = strchr(compatible, ',');
-	strlcpy(devname, p ? p + 1 : compatible, sizeof(devname));
+	strscpy(devname, p ? p + 1 : compatible, sizeof(devname));
 	/* Search through the device name */
 	while (id->name[0]) {
 		if (strcmp(devname, id->name) == 0)
@@ -1130,11 +1088,10 @@ static void idt_get_fw_data(struct idt_89hpesx_dev *pdev)
 
 	device_for_each_child_node(dev, fwnode) {
 		ee_id = idt_ee_match_id(fwnode);
-		if (IS_ERR_OR_NULL(ee_id)) {
-			dev_warn(dev, "Skip unsupported EEPROM device");
-			continue;
-		} else
+		if (ee_id)
 			break;
+
+		dev_warn(dev, "Skip unsupported EEPROM device %pfw\n", fwnode);
 	}
 
 	/* If there is no fwnode EEPROM device, then set zero size */
@@ -1165,6 +1122,7 @@ static void idt_get_fw_data(struct idt_89hpesx_dev *pdev)
 	else /* if (!fwnode_property_read_bool(node, "read-only")) */
 		pdev->eero = false;
 
+	fwnode_handle_put(fwnode);
 	dev_info(dev, "EEPROM of %d bytes found by 0x%x",
 		pdev->eesize, pdev->eeaddr);
 }
@@ -1325,13 +1283,14 @@ static int idt_create_sysfs_files(struct idt_89hpesx_dev *pdev)
 		return 0;
 	}
 
-	/* Allocate memory for attribute file */
-	pdev->ee_file = devm_kmalloc(dev, sizeof(*pdev->ee_file), GFP_KERNEL);
+	/*
+	 * Allocate memory for attribute file and copy the declared EEPROM attr
+	 * structure to change some of fields
+	 */
+	pdev->ee_file = devm_kmemdup(dev, &bin_attr_eeprom,
+				     sizeof(*pdev->ee_file), GFP_KERNEL);
 	if (!pdev->ee_file)
 		return -ENOMEM;
-
-	/* Copy the declared EEPROM attr structure to change some of fields */
-	memcpy(pdev->ee_file, &bin_attr_eeprom, sizeof(*pdev->ee_file));
 
 	/* In case of read-only EEPROM get rid of write ability */
 	if (pdev->eero) {
@@ -1380,8 +1339,8 @@ static void idt_create_dbgfs_files(struct idt_89hpesx_dev *pdev)
 	pdev->csr_dir = debugfs_create_dir(fname, csr_dbgdir);
 
 	/* Create Debugfs file for CSR read/write operations */
-	pdev->csr_file = debugfs_create_file(cli->name, 0600,
-		pdev->csr_dir, pdev, &csr_dbgfs_ops);
+	debugfs_create_file(cli->name, 0600, pdev->csr_dir, pdev,
+			    &csr_dbgfs_ops);
 }
 
 /*
@@ -1397,7 +1356,7 @@ static void idt_remove_dbgfs_files(struct idt_89hpesx_dev *pdev)
 /*
  * idt_probe() - IDT 89HPESx driver probe() callback method
  */
-static int idt_probe(struct i2c_client *client, const struct i2c_device_id *id)
+static int idt_probe(struct i2c_client *client)
 {
 	struct idt_89hpesx_dev *pdev;
 	int ret;
@@ -1436,7 +1395,7 @@ err_free_pdev:
 /*
  * idt_remove() - IDT 89HPESx driver remove() callback method
  */
-static int idt_remove(struct i2c_client *client)
+static void idt_remove(struct i2c_client *client)
 {
 	struct idt_89hpesx_dev *pdev = i2c_get_clientdata(client);
 
@@ -1448,8 +1407,6 @@ static int idt_remove(struct i2c_client *client)
 
 	/* Discard driver data structure */
 	idt_free_pdev(pdev);
-
-	return 0;
 }
 
 /*
@@ -1599,12 +1556,20 @@ static struct i2c_driver idt_driver = {
  */
 static int __init idt_init(void)
 {
+	int ret;
+
 	/* Create Debugfs directory first */
 	if (debugfs_initialized())
 		csr_dbgdir = debugfs_create_dir("idt_csr", NULL);
 
 	/* Add new i2c-device driver */
-	return i2c_add_driver(&idt_driver);
+	ret = i2c_add_driver(&idt_driver);
+	if (ret) {
+		debugfs_remove_recursive(csr_dbgdir);
+		return ret;
+	}
+
+	return 0;
 }
 module_init(idt_init);
 

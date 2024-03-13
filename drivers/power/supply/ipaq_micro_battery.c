@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * h3xxx atmel micro companion support, battery subdevice
  * based on previous kernel 2.4 version
  * Author : Alessandro Gardich <gremlin@gremlin.it>
  * Author : Linus Walleij <linus.walleij@linaro.org>
- *
  */
 
 #include <linux/module.h>
@@ -152,7 +149,7 @@ static int micro_batt_get_property(struct power_supply *b,
 		default:
 			val->intval = POWER_SUPPLY_TECHNOLOGY_UNKNOWN;
 			break;
-		};
+		}
 		break;
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = get_status(b);
@@ -171,7 +168,7 @@ static int micro_batt_get_property(struct power_supply *b,
 		break;
 	default:
 		return -EINVAL;
-	};
+	}
 
 	return 0;
 }
@@ -188,7 +185,7 @@ static int micro_ac_get_property(struct power_supply *b,
 		break;
 	default:
 		return -EINVAL;
-	};
+	}
 
 	return 0;
 }
@@ -268,7 +265,7 @@ batt_err:
 	return ret;
 }
 
-static int micro_batt_remove(struct platform_device *pdev)
+static void micro_batt_remove(struct platform_device *pdev)
 
 {
 	struct micro_battery *mb = platform_get_drvdata(pdev);
@@ -277,8 +274,6 @@ static int micro_batt_remove(struct platform_device *pdev)
 	power_supply_unregister(micro_batt_power);
 	cancel_delayed_work_sync(&mb->update);
 	destroy_workqueue(mb->wq);
-
-	return 0;
 }
 
 static int __maybe_unused micro_batt_suspend(struct device *dev)
@@ -307,7 +302,7 @@ static struct platform_driver micro_batt_device_driver = {
 		.pm	= &micro_batt_dev_pm_ops,
 	},
 	.probe		= micro_batt_probe,
-	.remove		= micro_batt_remove,
+	.remove_new	= micro_batt_remove,
 };
 module_platform_driver(micro_batt_device_driver);
 

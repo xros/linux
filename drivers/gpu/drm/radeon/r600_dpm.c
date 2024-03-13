@@ -22,7 +22,6 @@
  * Authors: Alex Deucher
  */
 
-#include <drm/drmP.h>
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "r600d.h"
@@ -821,12 +820,12 @@ union fan_info {
 static int r600_parse_clk_voltage_dep_table(struct radeon_clock_voltage_dependency_table *radeon_table,
 					    ATOM_PPLIB_Clock_Voltage_Dependency_Table *atom_table)
 {
-	u32 size = atom_table->ucNumEntries *
-		sizeof(struct radeon_clock_voltage_dependency_entry);
 	int i;
 	ATOM_PPLIB_Clock_Voltage_Dependency_Record *entry;
 
-	radeon_table->entries = kzalloc(size, GFP_KERNEL);
+	radeon_table->entries = kcalloc(atom_table->ucNumEntries,
+					sizeof(struct radeon_clock_voltage_dependency_entry),
+					GFP_KERNEL);
 	if (!radeon_table->entries)
 		return -ENOMEM;
 
@@ -991,7 +990,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ATOM_PPLIB_PhaseSheddingLimits_Record *entry;
 
 			rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries =
-				kzalloc(psl->ucNumEntries *
+				kcalloc(psl->ucNumEntries,
 					sizeof(struct radeon_phase_shedding_limits_entry),
 					GFP_KERNEL);
 			if (!rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries) {
@@ -1327,9 +1326,9 @@ enum radeon_pcie_gen r600_get_pcie_gen_support(struct radeon_device *rdev,
 	case RADEON_PCIE_GEN3:
 		return RADEON_PCIE_GEN3;
 	default:
-		if ((sys_mask & DRM_PCIE_SPEED_80) && (default_gen == RADEON_PCIE_GEN3))
+		if ((sys_mask & RADEON_PCIE_SPEED_80) && (default_gen == RADEON_PCIE_GEN3))
 			return RADEON_PCIE_GEN3;
-		else if ((sys_mask & DRM_PCIE_SPEED_50) && (default_gen == RADEON_PCIE_GEN2))
+		else if ((sys_mask & RADEON_PCIE_SPEED_50) && (default_gen == RADEON_PCIE_GEN2))
 			return RADEON_PCIE_GEN2;
 		else
 			return RADEON_PCIE_GEN1;
@@ -1362,7 +1361,9 @@ u16 r600_get_pcie_lane_support(struct radeon_device *rdev,
 
 u8 r600_encode_pci_lane_width(u32 lanes)
 {
-	u8 encoded_lanes[] = { 0, 1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6 };
+	static const u8 encoded_lanes[] = {
+		0, 1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6
+	};
 
 	if (lanes > 16)
 		return 0;

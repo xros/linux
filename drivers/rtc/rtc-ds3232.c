@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * RTC client/driver for the Maxim/Dallas DS3232/DS3234 Real-Time Clock
  *
  * Copyright (C) 2009-2011 Freescale Semiconductor.
  * Author: Jack Lan <jack.lan@freescale.com>
  * Copyright (C) 2008 MIMOMax Wireless Ltd.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -48,6 +44,10 @@
 #       define DS3232_REG_SR_A1F     0x01
 
 #define DS3232_REG_TEMPERATURE	0x11
+#define DS3232_REG_SRAM_START   0x14
+#define DS3232_REG_SRAM_END     0xFF
+
+#define DS3232_REG_SRAM_SIZE    236
 
 struct ds3232 {
 	struct device *dev;
@@ -145,7 +145,7 @@ static int ds3232_read_time(struct device *dev, struct rtc_time *time)
 
 	time->tm_year = bcd2bin(year) + add_century;
 
-	return rtc_valid_tm(time);
+	return 0;
 }
 
 static int ds3232_set_time(struct device *dev, struct rtc_time *time)
@@ -359,7 +359,7 @@ static const struct hwmon_channel_info ds3232_hwmon_temp = {
 	.config = ds3232_hwmon_temp_config,
 };
 
-static const struct hwmon_channel_info *ds3232_hwmon_info[] = {
+static const struct hwmon_channel_info * const ds3232_hwmon_info[] = {
 	&ds3232_hwmon_chip,
 	&ds3232_hwmon_temp,
 	NULL
@@ -406,11 +406,10 @@ static irqreturn_t ds3232_irq(int irq, void *dev_id)
 {
 	struct device *dev = dev_id;
 	struct ds3232 *ds3232 = dev_get_drvdata(dev);
-	struct mutex *lock = &ds3232->rtc->ops_lock;
 	int ret;
 	int stat, control;
 
-	mutex_lock(lock);
+	rtc_lock(ds3232->rtc);
 
 	ret = regmap_read(ds3232->regmap, DS3232_REG_SR, &stat);
 	if (ret)
@@ -448,7 +447,7 @@ static irqreturn_t ds3232_irq(int irq, void *dev_id)
 	}
 
 unlock:
-	mutex_unlock(lock);
+	rtc_unlock(ds3232->rtc);
 
 	return IRQ_HANDLED;
 }
@@ -461,11 +460,39 @@ static const struct rtc_class_ops ds3232_rtc_ops = {
 	.alarm_irq_enable = ds3232_alarm_irq_enable,
 };
 
+static int ds3232_nvmem_read(void *priv, unsigned int offset, void *val,
+			     size_t bytes)
+{
+	struct regmap *ds3232_regmap = (struct regmap *)priv;
+
+	return regmap_bulk_read(ds3232_regmap, DS3232_REG_SRAM_START + offset,
+				val, bytes);
+}
+
+static int ds3232_nvmem_write(void *priv, unsigned int offset, void *val,
+			      size_t bytes)
+{
+	struct regmap *ds3232_regmap = (struct regmap *)priv;
+
+	return regmap_bulk_write(ds3232_regmap, DS3232_REG_SRAM_START + offset,
+				 val, bytes);
+}
+
 static int ds3232_probe(struct device *dev, struct regmap *regmap, int irq,
 			const char *name)
 {
 	struct ds3232 *ds3232;
 	int ret;
+	struct nvmem_config nvmem_cfg = {
+		.name = "ds3232_sram",
+		.stride = 1,
+		.size = DS3232_REG_SRAM_SIZE,
+		.word_size = 1,
+		.reg_read = ds3232_nvmem_read,
+		.reg_write = ds3232_nvmem_write,
+		.priv = regmap,
+		.type = NVMEM_TYPE_BATTERY_BACKED
+	};
 
 	ds3232 = devm_kzalloc(dev, sizeof(*ds3232), GFP_KERNEL);
 	if (!ds3232)
@@ -490,6 +517,10 @@ static int ds3232_probe(struct device *dev, struct regmap *regmap, int irq,
 	if (IS_ERR(ds3232->rtc))
 		return PTR_ERR(ds3232->rtc);
 
+	ret = devm_rtc_nvmem_register(ds3232->rtc, &nvmem_cfg);
+	if(ret)
+		return ret;
+
 	if (ds3232->irq > 0) {
 		ret = devm_request_threaded_irq(dev, ds3232->irq, NULL,
 						ds3232_irq,
@@ -504,6 +535,8 @@ static int ds3232_probe(struct device *dev, struct regmap *regmap, int irq,
 
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_I2C)
 
 #ifdef CONFIG_PM_SLEEP
 static int ds3232_suspend(struct device *dev)
@@ -533,16 +566,13 @@ static const struct dev_pm_ops ds3232_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(ds3232_suspend, ds3232_resume)
 };
 
-#if IS_ENABLED(CONFIG_I2C)
-
-static int ds3232_i2c_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int ds3232_i2c_probe(struct i2c_client *client)
 {
 	struct regmap *regmap;
 	static const struct regmap_config config = {
 		.reg_bits = 8,
 		.val_bits = 8,
-		.max_register = 0x13,
+		.max_register = DS3232_REG_SRAM_END,
 	};
 
 	regmap = devm_regmap_init_i2c(client, &config);
@@ -561,7 +591,7 @@ static const struct i2c_device_id ds3232_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, ds3232_id);
 
-static const struct of_device_id ds3232_of_match[] = {
+static const  __maybe_unused struct of_device_id ds3232_of_match[] = {
 	{ .compatible = "dallas,ds3232" },
 	{ }
 };
@@ -609,7 +639,7 @@ static int ds3234_probe(struct spi_device *spi)
 	static const struct regmap_config config = {
 		.reg_bits = 8,
 		.val_bits = 8,
-		.max_register = 0x13,
+		.max_register = DS3232_REG_SRAM_END,
 		.write_flag_mask = 0x80,
 	};
 	struct regmap *regmap;

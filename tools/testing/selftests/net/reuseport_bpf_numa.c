@@ -23,6 +23,8 @@
 #include <unistd.h>
 #include <numa.h>
 
+#include "../kselftest.h"
+
 static const int PORT = 8888;
 
 static void build_rcv_group(int *rcv_fd, size_t len, int family, int proto)
@@ -84,7 +86,7 @@ static void attach_bpf(int fd)
 
 	memset(&attr, 0, sizeof(attr));
 	attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
-	attr.insn_cnt = sizeof(prog) / sizeof(prog[0]);
+	attr.insn_cnt = ARRAY_SIZE(prog);
 	attr.insns = (unsigned long) &prog;
 	attr.license = (unsigned long) &bpf_license;
 	attr.log_buf = (unsigned long) &bpf_log_buf;
@@ -209,12 +211,16 @@ static void test(int *rcv_fd, int len, int family, int proto)
 
 	/* Forward iterate */
 	for (node = 0; node < len; ++node) {
+		if (!numa_bitmask_isbitset(numa_nodes_ptr, node))
+			continue;
 		send_from_node(node, family, proto);
 		receive_on_node(rcv_fd, len, epfd, node, proto);
 	}
 
 	/* Reverse iterate */
 	for (node = len - 1; node >= 0; --node) {
+		if (!numa_bitmask_isbitset(numa_nodes_ptr, node))
+			continue;
 		send_from_node(node, family, proto);
 		receive_on_node(rcv_fd, len, epfd, node, proto);
 	}
@@ -229,7 +235,7 @@ int main(void)
 	int *rcv_fd, nodes;
 
 	if (numa_available() < 0)
-		error(1, errno, "no numa api support");
+		ksft_exit_skip("no numa api support\n");
 
 	nodes = numa_max_node() + 1;
 

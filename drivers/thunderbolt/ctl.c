@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Thunderbolt Cactus Ridge driver - control channel and configuration commands
+ * Thunderbolt driver - control channel and configuration commands
  *
  * Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
+ * Copyright (C) 2018, Intel Corporation
  */
 
 #include <linux/crc32.h>
@@ -19,7 +20,18 @@
 #define TB_CTL_RETRIES		4
 
 /**
- * struct tb_cfg - thunderbolt control channel
+ * struct tb_ctl - Thunderbolt control channel
+ * @nhi: Pointer to the NHI structure
+ * @tx: Transmit ring
+ * @rx: Receive ring
+ * @frame_pool: DMA pool for control messages
+ * @rx_packets: Received control messages
+ * @request_queue_lock: Lock protecting @request_queue
+ * @request_queue: List of outstanding requests
+ * @running: Is the control channel running at the moment
+ * @timeout_msec: Default timeout for non-raw control messages
+ * @callback: Callback called when hotplug message is received
+ * @callback_data: Data passed to @callback
  */
 struct tb_ctl {
 	struct tb_nhi *nhi;
@@ -32,6 +44,7 @@ struct tb_ctl {
 	struct list_head request_queue;
 	bool running;
 
+	int timeout_msec;
 	event_cb callback;
 	void *callback_data;
 };
@@ -145,21 +158,20 @@ static bool tb_cfg_request_is_active(struct tb_cfg_request *req)
 static struct tb_cfg_request *
 tb_cfg_request_find(struct tb_ctl *ctl, struct ctl_pkg *pkg)
 {
-	struct tb_cfg_request *req;
-	bool found = false;
+	struct tb_cfg_request *req = NULL, *iter;
 
 	mutex_lock(&pkg->ctl->request_queue_lock);
-	list_for_each_entry(req, &pkg->ctl->request_queue, list) {
-		tb_cfg_request_get(req);
-		if (req->match(req, pkg)) {
-			found = true;
+	list_for_each_entry(iter, &pkg->ctl->request_queue, list) {
+		tb_cfg_request_get(iter);
+		if (iter->match(iter, pkg)) {
+			req = iter;
 			break;
 		}
-		tb_cfg_request_put(req);
+		tb_cfg_request_put(iter);
 	}
 	mutex_unlock(&pkg->ctl->request_queue_lock);
 
-	return found ? req : NULL;
+	return req;
 }
 
 /* utility functions */
@@ -226,9 +238,6 @@ static struct tb_cfg_result decode_error(const struct ctl_pkg *response)
 	if (res.err)
 		return res;
 
-	WARN(pkg->zero1, "pkg->zero1 is %#x\n", pkg->zero1);
-	WARN(pkg->zero2, "pkg->zero1 is %#x\n", pkg->zero1);
-	WARN(pkg->zero3, "pkg->zero1 is %#x\n", pkg->zero1);
 	res.err = 1;
 	res.tb_error = pkg->error;
 	res.response_port = pkg->port;
@@ -265,9 +274,8 @@ static void tb_cfg_print_error(struct tb_ctl *ctl,
 		 * Invalid cfg_space/offset/length combination in
 		 * cfg_read/cfg_write.
 		 */
-		tb_ctl_WARN(ctl,
-			"CFG_ERROR(%llx:%x): Invalid config space or offset\n",
-			res->response_route, res->response_port);
+		tb_ctl_dbg(ctl, "%llx:%x: invalid config space or offset\n",
+			   res->response_route, res->response_port);
 		return;
 	case TB_CFG_ERROR_NO_SUCH_PORT:
 		/*
@@ -281,6 +289,10 @@ static void tb_cfg_print_error(struct tb_ctl *ctl,
 	case TB_CFG_ERROR_LOOP:
 		tb_ctl_WARN(ctl, "CFG_ERROR(%llx:%x): Route contains a loop\n",
 			res->response_route, res->response_port);
+		return;
+	case TB_CFG_ERROR_LOCK:
+		tb_ctl_warn(ctl, "%llx:%x: downstream port is locked\n",
+			    res->response_route, res->response_port);
 		return;
 	default:
 		/* 5,6,7,9 and 11 are also valid error codes */
@@ -329,7 +341,7 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	tb_ctl_pkg_free(pkg);
 }
 
-/**
+/*
  * tb_cfg_tx() - transmit a packet on the control channel
  *
  * len must be a multiple of four.
@@ -366,7 +378,7 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	return res;
 }
 
-/**
+/*
  * tb_ctl_handle_event() - acknowledge a plug event, invoke ctl->callback
  */
 static bool tb_ctl_handle_event(struct tb_ctl *ctl, enum tb_cfg_pkg_type type,
@@ -387,7 +399,7 @@ static void tb_ctl_rx_submit(struct ctl_pkg *pkg)
 
 static int tb_async_error(const struct ctl_pkg *pkg)
 {
-	const struct cfg_error_pkg *error = (const struct cfg_error_pkg *)pkg;
+	const struct cfg_error_pkg *error = pkg->buffer;
 
 	if (pkg->frame.eof != TB_CFG_PKG_ERROR)
 		return false;
@@ -396,6 +408,14 @@ static int tb_async_error(const struct ctl_pkg *pkg)
 	case TB_CFG_ERROR_LINK_ERROR:
 	case TB_CFG_ERROR_HEC_ERROR_DETECTED:
 	case TB_CFG_ERROR_FLOW_CONTROL_ERROR:
+	case TB_CFG_ERROR_DP_BW:
+	case TB_CFG_ERROR_ROP_CMPLT:
+	case TB_CFG_ERROR_POP_CMPLT:
+	case TB_CFG_ERROR_PCIE_WAKE:
+	case TB_CFG_ERROR_DP_CON_CHANGE:
+	case TB_CFG_ERROR_DPTX_DISCOVERY:
+	case TB_CFG_ERROR_LINK_RECOVERY:
+	case TB_CFG_ERROR_ASYM_LINK:
 		return true;
 
 	default:
@@ -452,7 +472,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 				   "RX: checksum mismatch, dropping packet\n");
 			goto rx;
 		}
-		/* Fall through */
+		fallthrough;
 	case TB_CFG_PKG_ICM_EVENT:
 		if (tb_ctl_handle_event(pkg->ctl, frame->eof, pkg, frame->size))
 			goto rx;
@@ -593,18 +613,24 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 
 /**
  * tb_ctl_alloc() - allocate a control channel
+ * @nhi: Pointer to NHI
+ * @timeout_msec: Default timeout used with non-raw control messages
+ * @cb: Callback called for plug events
+ * @cb_data: Data passed to @cb
  *
  * cb will be invoked once for every hot plug event.
  *
  * Return: Returns a pointer on success or NULL on failure.
  */
-struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, event_cb cb, void *cb_data)
+struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int timeout_msec, event_cb cb,
+			    void *cb_data)
 {
 	int i;
 	struct tb_ctl *ctl = kzalloc(sizeof(*ctl), GFP_KERNEL);
 	if (!ctl)
 		return NULL;
 	ctl->nhi = nhi;
+	ctl->timeout_msec = timeout_msec;
 	ctl->callback = cb;
 	ctl->callback_data = cb_data;
 
@@ -619,8 +645,8 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, event_cb cb, void *cb_data)
 	if (!ctl->tx)
 		goto err;
 
-	ctl->rx = tb_ring_alloc_rx(nhi, 0, 10, RING_FLAG_NO_SUSPEND, 0xffff,
-				0xffff, NULL, NULL);
+	ctl->rx = tb_ring_alloc_rx(nhi, 0, 10, RING_FLAG_NO_SUSPEND, 0, 0xffff,
+				   0xffff, NULL, NULL);
 	if (!ctl->rx)
 		goto err;
 
@@ -631,7 +657,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, event_cb cb, void *cb_data)
 		ctl->rx_packets[i]->frame.callback = tb_ctl_rx_callback;
 	}
 
-	tb_ctl_info(ctl, "control channel created\n");
+	tb_ctl_dbg(ctl, "control channel created\n");
 	return ctl;
 err:
 	tb_ctl_free(ctl);
@@ -640,6 +666,7 @@ err:
 
 /**
  * tb_ctl_free() - free a control channel
+ * @ctl: Control channel to free
  *
  * Must be called after tb_ctl_stop.
  *
@@ -662,18 +689,18 @@ void tb_ctl_free(struct tb_ctl *ctl)
 		tb_ctl_pkg_free(ctl->rx_packets[i]);
 
 
-	if (ctl->frame_pool)
-		dma_pool_destroy(ctl->frame_pool);
+	dma_pool_destroy(ctl->frame_pool);
 	kfree(ctl);
 }
 
 /**
- * tb_cfg_start() - start/resume the control channel
+ * tb_ctl_start() - start/resume the control channel
+ * @ctl: Control channel to start
  */
 void tb_ctl_start(struct tb_ctl *ctl)
 {
 	int i;
-	tb_ctl_info(ctl, "control channel starting...\n");
+	tb_ctl_dbg(ctl, "control channel starting...\n");
 	tb_ring_start(ctl->tx); /* is used to ack hotplug packets, start first */
 	tb_ring_start(ctl->rx);
 	for (i = 0; i < TB_CTL_RX_PKG_COUNT; i++)
@@ -683,7 +710,8 @@ void tb_ctl_start(struct tb_ctl *ctl)
 }
 
 /**
- * control() - pause the control channel
+ * tb_ctl_stop() - pause the control channel
+ * @ctl: Control channel to stop
  *
  * All invocations of ctl->callback will have finished after this method
  * returns.
@@ -702,25 +730,94 @@ void tb_ctl_stop(struct tb_ctl *ctl)
 	if (!list_empty(&ctl->request_queue))
 		tb_ctl_WARN(ctl, "dangling request in request_queue\n");
 	INIT_LIST_HEAD(&ctl->request_queue);
-	tb_ctl_info(ctl, "control channel stopped\n");
+	tb_ctl_dbg(ctl, "control channel stopped\n");
 }
 
 /* public interface, commands */
 
 /**
- * tb_cfg_error() - send error packet
+ * tb_cfg_ack_notification() - Ack notification
+ * @ctl: Control channel to use
+ * @route: Router that originated the event
+ * @error: Pointer to the notification package
  *
- * Return: Returns 0 on success or an error code on failure.
+ * Call this as response for non-plug notification to ack it. Returns
+ * %0 on success or an error code on failure.
  */
-int tb_cfg_error(struct tb_ctl *ctl, u64 route, u32 port,
-		 enum tb_cfg_error error)
+int tb_cfg_ack_notification(struct tb_ctl *ctl, u64 route,
+			    const struct cfg_error_pkg *error)
+{
+	struct cfg_ack_pkg pkg = {
+		.header = tb_cfg_make_header(route),
+	};
+	const char *name;
+
+	switch (error->error) {
+	case TB_CFG_ERROR_LINK_ERROR:
+		name = "link error";
+		break;
+	case TB_CFG_ERROR_HEC_ERROR_DETECTED:
+		name = "HEC error";
+		break;
+	case TB_CFG_ERROR_FLOW_CONTROL_ERROR:
+		name = "flow control error";
+		break;
+	case TB_CFG_ERROR_DP_BW:
+		name = "DP_BW";
+		break;
+	case TB_CFG_ERROR_ROP_CMPLT:
+		name = "router operation completion";
+		break;
+	case TB_CFG_ERROR_POP_CMPLT:
+		name = "port operation completion";
+		break;
+	case TB_CFG_ERROR_PCIE_WAKE:
+		name = "PCIe wake";
+		break;
+	case TB_CFG_ERROR_DP_CON_CHANGE:
+		name = "DP connector change";
+		break;
+	case TB_CFG_ERROR_DPTX_DISCOVERY:
+		name = "DPTX discovery";
+		break;
+	case TB_CFG_ERROR_LINK_RECOVERY:
+		name = "link recovery";
+		break;
+	case TB_CFG_ERROR_ASYM_LINK:
+		name = "asymmetric link";
+		break;
+	default:
+		name = "unknown";
+		break;
+	}
+
+	tb_ctl_dbg(ctl, "acking %s (%#x) notification on %llx\n", name,
+		   error->error, route);
+
+	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_NOTIFY_ACK);
+}
+
+/**
+ * tb_cfg_ack_plug() - Ack hot plug/unplug event
+ * @ctl: Control channel to use
+ * @route: Router that originated the event
+ * @port: Port where the hot plug/unplug happened
+ * @unplug: Ack hot plug or unplug
+ *
+ * Call this as response for hot plug/unplug event to ack it.
+ * Returns %0 on success or an error code on failure.
+ */
+int tb_cfg_ack_plug(struct tb_ctl *ctl, u64 route, u32 port, bool unplug)
 {
 	struct cfg_error_pkg pkg = {
 		.header = tb_cfg_make_header(route),
 		.port = port,
-		.error = error,
+		.error = TB_CFG_ERROR_ACK_PLUG_EVENT,
+		.pg = unplug ? TB_CFG_ERROR_PG_HOT_UNPLUG
+			     : TB_CFG_ERROR_PG_HOT_PLUG,
 	};
-	tb_ctl_info(ctl, "resetting error on %llx:%x.\n", route, port);
+	tb_ctl_dbg(ctl, "acking hot %splug event on %llx:%u\n",
+		   unplug ? "un" : "", route, port);
 	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_ERROR);
 }
 
@@ -769,13 +866,14 @@ static bool tb_cfg_copy(struct tb_cfg_request *req, const struct ctl_pkg *pkg)
 
 /**
  * tb_cfg_reset() - send a reset packet and wait for a response
+ * @ctl: Control channel pointer
+ * @route: Router string for the router to send reset
  *
  * If the switch at route is incorrectly configured then we will not receive a
  * reply (even though the switch will reset). The caller should check for
  * -ETIMEDOUT and attempt to reconfigure the switch.
  */
-struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route,
-				  int timeout_msec)
+struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route)
 {
 	struct cfg_reset_pkg request = { .header = tb_cfg_make_header(route) };
 	struct tb_cfg_result res = { 0 };
@@ -797,7 +895,7 @@ struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route,
 	req->response_size = sizeof(reply);
 	req->response_type = TB_CFG_PKG_RESET;
 
-	res = tb_cfg_request_sync(ctl, req, timeout_msec);
+	res = tb_cfg_request_sync(ctl, req, ctl->timeout_msec);
 
 	tb_cfg_request_put(req);
 
@@ -805,9 +903,17 @@ struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route,
 }
 
 /**
- * tb_cfg_read() - read from config space into buffer
+ * tb_cfg_read_raw() - read from config space into buffer
+ * @ctl: Pointer to the control channel
+ * @buffer: Buffer where the data is read
+ * @route: Route string of the router
+ * @port: Port number when reading from %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword word offset of the register to start reading
+ * @length: Number of dwords to read
+ * @timeout_msec: Timeout in ms how long to wait for the response
  *
- * Offset and length are in dwords.
+ * Reads from router config space without translating the possible error.
  */
 struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 		u64 route, u32 port, enum tb_cfg_space space,
@@ -868,9 +974,17 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 }
 
 /**
- * tb_cfg_write() - write from buffer into config space
+ * tb_cfg_write_raw() - write from buffer into config space
+ * @ctl: Pointer to the control channel
+ * @buffer: Data to write
+ * @route: Route string of the router
+ * @port: Port number when writing to %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword word offset of the register to start writing
+ * @length: Number of dwords to write
+ * @timeout_msec: Timeout in ms how long to wait for the response
  *
- * Offset and length are in dwords.
+ * Writes to router config space without translating the possible error.
  */
 struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 		u64 route, u32 port, enum tb_cfg_space space,
@@ -930,11 +1044,34 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 	return res;
 }
 
+static int tb_cfg_get_error(struct tb_ctl *ctl, enum tb_cfg_space space,
+			    const struct tb_cfg_result *res)
+{
+	/*
+	 * For unimplemented ports access to port config space may return
+	 * TB_CFG_ERROR_INVALID_CONFIG_SPACE (alternatively their type is
+	 * set to TB_TYPE_INACTIVE). In the former case return -ENODEV so
+	 * that the caller can mark the port as disabled.
+	 */
+	if (space == TB_CFG_PORT &&
+	    res->tb_error == TB_CFG_ERROR_INVALID_CONFIG_SPACE)
+		return -ENODEV;
+
+	tb_cfg_print_error(ctl, res);
+
+	if (res->tb_error == TB_CFG_ERROR_LOCK)
+		return -EACCES;
+	if (res->tb_error == TB_CFG_ERROR_PORT_NOT_CONNECTED)
+		return -ENOTCONN;
+
+	return -EIO;
+}
+
 int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 		enum tb_cfg_space space, u32 offset, u32 length)
 {
 	struct tb_cfg_result res = tb_cfg_read_raw(ctl, buffer, route, port,
-			space, offset, length, TB_CFG_DEFAULT_TIMEOUT);
+			space, offset, length, ctl->timeout_msec);
 	switch (res.err) {
 	case 0:
 		/* Success */
@@ -942,12 +1079,11 @@ int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		tb_cfg_print_error(ctl, &res);
-		return -EIO;
+		return tb_cfg_get_error(ctl, space, &res);
 
 	case -ETIMEDOUT:
-		tb_ctl_warn(ctl, "timeout reading config space %u from %#x\n",
-			    space, offset);
+		tb_ctl_warn(ctl, "%llx: timeout reading config space %u from %#x\n",
+			    route, space, offset);
 		break;
 
 	default:
@@ -961,7 +1097,7 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 		 enum tb_cfg_space space, u32 offset, u32 length)
 {
 	struct tb_cfg_result res = tb_cfg_write_raw(ctl, buffer, route, port,
-			space, offset, length, TB_CFG_DEFAULT_TIMEOUT);
+			space, offset, length, ctl->timeout_msec);
 	switch (res.err) {
 	case 0:
 		/* Success */
@@ -969,12 +1105,11 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		tb_cfg_print_error(ctl, &res);
-		return -EIO;
+		return tb_cfg_get_error(ctl, space, &res);
 
 	case -ETIMEDOUT:
-		tb_ctl_warn(ctl, "timeout writing config space %u to %#x\n",
-			    space, offset);
+		tb_ctl_warn(ctl, "%llx: timeout writing config space %u to %#x\n",
+			    route, space, offset);
 		break;
 
 	default:
@@ -986,6 +1121,8 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 
 /**
  * tb_cfg_get_upstream_port() - get upstream port number of switch at route
+ * @ctl: Pointer to the control channel
+ * @route: Route string of the router
  *
  * Reads the first dword from the switches TB_CFG_SWITCH config area and
  * returns the port number from which the reply originated.
@@ -998,7 +1135,7 @@ int tb_cfg_get_upstream_port(struct tb_ctl *ctl, u64 route)
 	u32 dummy;
 	struct tb_cfg_result res = tb_cfg_read_raw(ctl, &dummy, route, 0,
 						   TB_CFG_SWITCH, 0, 1,
-						   TB_CFG_DEFAULT_TIMEOUT);
+						   ctl->timeout_msec);
 	if (res.err == 1)
 		return -EIO;
 	if (res.err)

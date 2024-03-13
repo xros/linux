@@ -244,6 +244,8 @@ int mlx4_en_DUMP_ETH_STATS(struct mlx4_en_dev *mdev, u8 port, u8 reset)
 	priv->port_stats.rx_chksum_complete = 0;
 	priv->port_stats.rx_alloc_pages = 0;
 	priv->xdp_stats.rx_xdp_drop    = 0;
+	priv->xdp_stats.rx_xdp_redirect = 0;
+	priv->xdp_stats.rx_xdp_redirect_fail = 0;
 	priv->xdp_stats.rx_xdp_tx      = 0;
 	priv->xdp_stats.rx_xdp_tx_full = 0;
 	for (i = 0; i < priv->rx_ring_num; i++) {
@@ -255,6 +257,8 @@ int mlx4_en_DUMP_ETH_STATS(struct mlx4_en_dev *mdev, u8 port, u8 reset)
 		priv->port_stats.rx_chksum_complete += READ_ONCE(ring->csum_complete);
 		priv->port_stats.rx_alloc_pages += READ_ONCE(ring->rx_alloc_pages);
 		priv->xdp_stats.rx_xdp_drop	+= READ_ONCE(ring->xdp_drop);
+		priv->xdp_stats.rx_xdp_redirect += READ_ONCE(ring->xdp_redirect);
+		priv->xdp_stats.rx_xdp_redirect_fail += READ_ONCE(ring->xdp_redirect_fail);
 		priv->xdp_stats.rx_xdp_tx	+= READ_ONCE(ring->xdp_tx);
 		priv->xdp_stats.rx_xdp_tx_full	+= READ_ONCE(ring->xdp_tx_full);
 	}
@@ -275,19 +279,31 @@ int mlx4_en_DUMP_ETH_STATS(struct mlx4_en_dev *mdev, u8 port, u8 reset)
 		priv->port_stats.xmit_more         += READ_ONCE(ring->xmit_more);
 	}
 
-	if (mlx4_is_master(mdev->dev)) {
-		stats->rx_packets = en_stats_adder(&mlx4_en_stats->RTOT_prio_0,
-						   &mlx4_en_stats->RTOT_prio_1,
-						   NUM_PRIORITIES);
-		stats->tx_packets = en_stats_adder(&mlx4_en_stats->TTOT_prio_0,
-						   &mlx4_en_stats->TTOT_prio_1,
-						   NUM_PRIORITIES);
-		stats->rx_bytes = en_stats_adder(&mlx4_en_stats->ROCT_prio_0,
-						 &mlx4_en_stats->ROCT_prio_1,
-						 NUM_PRIORITIES);
-		stats->tx_bytes = en_stats_adder(&mlx4_en_stats->TOCT_prio_0,
-						 &mlx4_en_stats->TOCT_prio_1,
-						 NUM_PRIORITIES);
+	if (!mlx4_is_slave(mdev->dev)) {
+		struct mlx4_en_phy_stats *p_stats = &priv->phy_stats;
+
+		p_stats->rx_packets_phy =
+			en_stats_adder(&mlx4_en_stats->RTOT_prio_0,
+				       &mlx4_en_stats->RTOT_prio_1,
+				       NUM_PRIORITIES);
+		p_stats->tx_packets_phy =
+			en_stats_adder(&mlx4_en_stats->TTOT_prio_0,
+				       &mlx4_en_stats->TTOT_prio_1,
+				       NUM_PRIORITIES);
+		p_stats->rx_bytes_phy =
+			en_stats_adder(&mlx4_en_stats->ROCT_prio_0,
+				       &mlx4_en_stats->ROCT_prio_1,
+				       NUM_PRIORITIES);
+		p_stats->tx_bytes_phy =
+			en_stats_adder(&mlx4_en_stats->TOCT_prio_0,
+				       &mlx4_en_stats->TOCT_prio_1,
+				       NUM_PRIORITIES);
+		if (mlx4_is_master(mdev->dev)) {
+			stats->rx_packets = p_stats->rx_packets_phy;
+			stats->tx_packets = p_stats->tx_packets_phy;
+			stats->rx_bytes = p_stats->rx_bytes_phy;
+			stats->tx_bytes = p_stats->tx_bytes_phy;
+		}
 	}
 
 	/* net device stats */

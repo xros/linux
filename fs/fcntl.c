@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/sched/task.h>
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/capability.h>
@@ -23,16 +24,18 @@
 #include <linux/rcupdate.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
-#include <linux/shmem_fs.h>
+#include <linux/memfd.h>
 #include <linux/compat.h>
+#include <linux/mount.h>
+#include <linux/rw_hint.h>
 
-#include <asm/poll.h>
+#include <linux/poll.h>
 #include <asm/siginfo.h>
 #include <linux/uaccess.h>
 
 #define SETFL_MASK (O_APPEND | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME)
 
-static int setfl(int fd, struct file * filp, unsigned long arg)
+static int setfl(int fd, struct file * filp, unsigned int arg)
 {
 	struct inode * inode = file_inode(filp);
 	int error = 0;
@@ -46,7 +49,7 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 
 	/* O_NOATIME can only be set by the owner or superuser */
 	if ((arg & O_NOATIME) && !(filp->f_flags & O_NOATIME))
-		if (!inode_owner_or_capable(inode))
+		if (!inode_owner_or_capable(file_mnt_idmap(filp), inode))
 			return -EPERM;
 
 	/* required for strict SunOS emulation */
@@ -55,11 +58,10 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 		   arg |= O_NONBLOCK;
 
 	/* Pipe packetized mode is controlled by O_DIRECT flag */
-	if (!S_ISFIFO(inode->i_mode) && (arg & O_DIRECT)) {
-		if (!filp->f_mapping || !filp->f_mapping->a_ops ||
-			!filp->f_mapping->a_ops->direct_IO)
-				return -EINVAL;
-	}
+	if (!S_ISFIFO(inode->i_mode) &&
+	    (arg & O_DIRECT) &&
+	    !(filp->f_mode & FMODE_CAN_ODIRECT))
+		return -EINVAL;
 
 	if (filp->f_op->check_flags)
 		error = filp->f_op->check_flags(arg);
@@ -78,6 +80,7 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 	}
 	spin_lock(&filp->f_lock);
 	filp->f_flags = (arg & SETFL_MASK) | (filp->f_flags & ~SETFL_MASK);
+	filp->f_iocb_flags = iocb_flags(filp);
 	spin_unlock(&filp->f_lock);
 
  out:
@@ -110,13 +113,13 @@ void __f_setown(struct file *filp, struct pid *pid, enum pid_type type,
 }
 EXPORT_SYMBOL(__f_setown);
 
-int f_setown(struct file *filp, unsigned long arg, int force)
+int f_setown(struct file *filp, int who, int force)
 {
 	enum pid_type type;
 	struct pid *pid = NULL;
-	int who = arg, ret = 0;
+	int ret = 0;
 
-	type = PIDTYPE_PID;
+	type = PIDTYPE_TGID;
 	if (who < 0) {
 		/* avoid overflow below */
 		if (who == INT_MIN)
@@ -143,17 +146,22 @@ EXPORT_SYMBOL(f_setown);
 
 void f_delown(struct file *filp)
 {
-	f_modown(filp, NULL, PIDTYPE_PID, 1);
+	f_modown(filp, NULL, PIDTYPE_TGID, 1);
 }
 
 pid_t f_getown(struct file *filp)
 {
-	pid_t pid;
-	read_lock(&filp->f_owner.lock);
-	pid = pid_vnr(filp->f_owner.pid);
-	if (filp->f_owner.pid_type == PIDTYPE_PGID)
-		pid = -pid;
-	read_unlock(&filp->f_owner.lock);
+	pid_t pid = 0;
+
+	read_lock_irq(&filp->f_owner.lock);
+	rcu_read_lock();
+	if (pid_task(filp->f_owner.pid, filp->f_owner.pid_type)) {
+		pid = pid_vnr(filp->f_owner.pid);
+		if (filp->f_owner.pid_type == PIDTYPE_PGID)
+			pid = -pid;
+	}
+	rcu_read_unlock();
+	read_unlock_irq(&filp->f_owner.lock);
 	return pid;
 }
 
@@ -171,11 +179,11 @@ static int f_setown_ex(struct file *filp, unsigned long arg)
 
 	switch (owner.type) {
 	case F_OWNER_TID:
-		type = PIDTYPE_MAX;
+		type = PIDTYPE_PID;
 		break;
 
 	case F_OWNER_PID:
-		type = PIDTYPE_PID;
+		type = PIDTYPE_TGID;
 		break;
 
 	case F_OWNER_PGRP:
@@ -200,17 +208,20 @@ static int f_setown_ex(struct file *filp, unsigned long arg)
 static int f_getown_ex(struct file *filp, unsigned long arg)
 {
 	struct f_owner_ex __user *owner_p = (void __user *)arg;
-	struct f_owner_ex owner;
+	struct f_owner_ex owner = {};
 	int ret = 0;
 
-	read_lock(&filp->f_owner.lock);
-	owner.pid = pid_vnr(filp->f_owner.pid);
+	read_lock_irq(&filp->f_owner.lock);
+	rcu_read_lock();
+	if (pid_task(filp->f_owner.pid, filp->f_owner.pid_type))
+		owner.pid = pid_vnr(filp->f_owner.pid);
+	rcu_read_unlock();
 	switch (filp->f_owner.pid_type) {
-	case PIDTYPE_MAX:
+	case PIDTYPE_PID:
 		owner.type = F_OWNER_TID;
 		break;
 
-	case PIDTYPE_PID:
+	case PIDTYPE_TGID:
 		owner.type = F_OWNER_PID;
 		break;
 
@@ -223,7 +234,7 @@ static int f_getown_ex(struct file *filp, unsigned long arg)
 		ret = -EINVAL;
 		break;
 	}
-	read_unlock(&filp->f_owner.lock);
+	read_unlock_irq(&filp->f_owner.lock);
 
 	if (!ret) {
 		ret = copy_to_user(owner_p, &owner, sizeof(owner));
@@ -241,10 +252,10 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 	uid_t src[2];
 	int err;
 
-	read_lock(&filp->f_owner.lock);
+	read_lock_irq(&filp->f_owner.lock);
 	src[0] = from_kuid(user_ns, filp->f_owner.uid);
 	src[1] = from_kuid(user_ns, filp->f_owner.euid);
-	read_unlock(&filp->f_owner.lock);
+	read_unlock_irq(&filp->f_owner.lock);
 
 	err  = put_user(src[0], &dst[0]);
 	err |= put_user(src[1], &dst[1]);
@@ -258,10 +269,17 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 }
 #endif
 
-static bool rw_hint_valid(enum rw_hint hint)
+static bool rw_hint_valid(u64 hint)
 {
+	BUILD_BUG_ON(WRITE_LIFE_NOT_SET != RWH_WRITE_LIFE_NOT_SET);
+	BUILD_BUG_ON(WRITE_LIFE_NONE != RWH_WRITE_LIFE_NONE);
+	BUILD_BUG_ON(WRITE_LIFE_SHORT != RWH_WRITE_LIFE_SHORT);
+	BUILD_BUG_ON(WRITE_LIFE_MEDIUM != RWH_WRITE_LIFE_MEDIUM);
+	BUILD_BUG_ON(WRITE_LIFE_LONG != RWH_WRITE_LIFE_LONG);
+	BUILD_BUG_ON(WRITE_LIFE_EXTREME != RWH_WRITE_LIFE_EXTREME);
+
 	switch (hint) {
-	case RWF_WRITE_LIFE_NOT_SET:
+	case RWH_WRITE_LIFE_NOT_SET:
 	case RWH_WRITE_LIFE_NONE:
 	case RWH_WRITE_LIFE_SHORT:
 	case RWH_WRITE_LIFE_MEDIUM:
@@ -273,78 +291,69 @@ static bool rw_hint_valid(enum rw_hint hint)
 	}
 }
 
-static long fcntl_rw_hint(struct file *file, unsigned int cmd,
-			  unsigned long arg)
+static long fcntl_get_rw_hint(struct file *file, unsigned int cmd,
+			      unsigned long arg)
 {
 	struct inode *inode = file_inode(file);
-	u64 *argp = (u64 __user *)arg;
-	enum rw_hint hint;
-	u64 h;
+	u64 __user *argp = (u64 __user *)arg;
+	u64 hint = READ_ONCE(inode->i_write_hint);
 
-	switch (cmd) {
-	case F_GET_FILE_RW_HINT:
-		h = file_write_hint(file);
-		if (copy_to_user(argp, &h, sizeof(*argp)))
-			return -EFAULT;
-		return 0;
-	case F_SET_FILE_RW_HINT:
-		if (copy_from_user(&h, argp, sizeof(h)))
-			return -EFAULT;
-		hint = (enum rw_hint) h;
-		if (!rw_hint_valid(hint))
-			return -EINVAL;
+	if (copy_to_user(argp, &hint, sizeof(*argp)))
+		return -EFAULT;
+	return 0;
+}
 
-		spin_lock(&file->f_lock);
-		file->f_write_hint = hint;
-		spin_unlock(&file->f_lock);
-		return 0;
-	case F_GET_RW_HINT:
-		h = inode->i_write_hint;
-		if (copy_to_user(argp, &h, sizeof(*argp)))
-			return -EFAULT;
-		return 0;
-	case F_SET_RW_HINT:
-		if (copy_from_user(&h, argp, sizeof(h)))
-			return -EFAULT;
-		hint = (enum rw_hint) h;
-		if (!rw_hint_valid(hint))
-			return -EINVAL;
+static long fcntl_set_rw_hint(struct file *file, unsigned int cmd,
+			      unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	u64 __user *argp = (u64 __user *)arg;
+	u64 hint;
 
-		inode_lock(inode);
-		inode->i_write_hint = hint;
-		inode_unlock(inode);
-		return 0;
-	default:
+	if (copy_from_user(&hint, argp, sizeof(hint)))
+		return -EFAULT;
+	if (!rw_hint_valid(hint))
 		return -EINVAL;
-	}
+
+	WRITE_ONCE(inode->i_write_hint, hint);
+
+	/*
+	 * file->f_mapping->host may differ from inode. As an example,
+	 * blkdev_open() modifies file->f_mapping.
+	 */
+	if (file->f_mapping->host != inode)
+		WRITE_ONCE(file->f_mapping->host->i_write_hint, hint);
+
+	return 0;
 }
 
 static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		struct file *filp)
 {
 	void __user *argp = (void __user *)arg;
+	int argi = (int)arg;
 	struct flock flock;
 	long err = -EINVAL;
 
 	switch (cmd) {
 	case F_DUPFD:
-		err = f_dupfd(arg, filp, 0);
+		err = f_dupfd(argi, filp, 0);
 		break;
 	case F_DUPFD_CLOEXEC:
-		err = f_dupfd(arg, filp, O_CLOEXEC);
+		err = f_dupfd(argi, filp, O_CLOEXEC);
 		break;
 	case F_GETFD:
 		err = get_close_on_exec(fd) ? FD_CLOEXEC : 0;
 		break;
 	case F_SETFD:
 		err = 0;
-		set_close_on_exec(fd, arg & FD_CLOEXEC);
+		set_close_on_exec(fd, argi & FD_CLOEXEC);
 		break;
 	case F_GETFL:
 		err = filp->f_flags;
 		break;
 	case F_SETFL:
-		err = setfl(fd, filp, arg);
+		err = setfl(fd, filp, argi);
 		break;
 #if BITS_PER_LONG != 32
 	/* 32-bit arches must use fcntl64() */
@@ -361,8 +370,8 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 	/* 32-bit arches must use fcntl64() */
 	case F_OFD_SETLK:
 	case F_OFD_SETLKW:
+		fallthrough;
 #endif
-		/* Fallthrough */
 	case F_SETLK:
 	case F_SETLKW:
 		if (copy_from_user(&flock, argp, sizeof(flock)))
@@ -381,7 +390,7 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		force_successful_syscall_return();
 		break;
 	case F_SETOWN:
-		err = f_setown(filp, arg, 1);
+		err = f_setown(filp, argi, 1);
 		break;
 	case F_GETOWN_EX:
 		err = f_getown_ex(filp, arg);
@@ -397,34 +406,34 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		break;
 	case F_SETSIG:
 		/* arg == 0 restores default behaviour. */
-		if (!valid_signal(arg)) {
+		if (!valid_signal(argi)) {
 			break;
 		}
 		err = 0;
-		filp->f_owner.signum = arg;
+		filp->f_owner.signum = argi;
 		break;
 	case F_GETLEASE:
 		err = fcntl_getlease(filp);
 		break;
 	case F_SETLEASE:
-		err = fcntl_setlease(fd, filp, arg);
+		err = fcntl_setlease(fd, filp, argi);
 		break;
 	case F_NOTIFY:
-		err = fcntl_dirnotify(fd, filp, arg);
+		err = fcntl_dirnotify(fd, filp, argi);
 		break;
 	case F_SETPIPE_SZ:
 	case F_GETPIPE_SZ:
-		err = pipe_fcntl(filp, cmd, arg);
+		err = pipe_fcntl(filp, cmd, argi);
 		break;
 	case F_ADD_SEALS:
 	case F_GET_SEALS:
-		err = shmem_fcntl(filp, cmd, arg);
+		err = memfd_fcntl(filp, cmd, argi);
 		break;
 	case F_GET_RW_HINT:
+		err = fcntl_get_rw_hint(filp, cmd, arg);
+		break;
 	case F_SET_RW_HINT:
-	case F_GET_FILE_RW_HINT:
-	case F_SET_FILE_RW_HINT:
-		err = fcntl_rw_hint(filp, cmd, arg);
+		err = fcntl_set_rw_hint(filp, cmd, arg);
 		break;
 	default:
 		break;
@@ -607,8 +616,8 @@ static int fixup_compat_flock(struct flock *flock)
 	return 0;
 }
 
-COMPAT_SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
-		       compat_ulong_t, arg)
+static long do_compat_fcntl64(unsigned int fd, unsigned int cmd,
+			     compat_ulong_t arg)
 {
 	struct fd f = fdget_raw(fd);
 	struct flock flock;
@@ -672,6 +681,12 @@ out_put:
 	return err;
 }
 
+COMPAT_SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
+		       compat_ulong_t, arg)
+{
+	return do_compat_fcntl64(fd, cmd, arg);
+}
+
 COMPAT_SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd,
 		       compat_ulong_t, arg)
 {
@@ -684,19 +699,19 @@ COMPAT_SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd,
 	case F_OFD_SETLKW:
 		return -EINVAL;
 	}
-	return compat_sys_fcntl64(fd, cmd, arg);
+	return do_compat_fcntl64(fd, cmd, arg);
 }
 #endif
 
 /* Table to convert sigio signal codes into poll band bitmaps */
 
 static const __poll_t band_table[NSIGPOLL] = {
-	POLLIN | POLLRDNORM,			/* POLL_IN */
-	POLLOUT | POLLWRNORM | POLLWRBAND,	/* POLL_OUT */
-	POLLIN | POLLRDNORM | POLLMSG,		/* POLL_MSG */
-	POLLERR,				/* POLL_ERR */
-	POLLPRI | POLLRDBAND,			/* POLL_PRI */
-	POLLHUP | POLLERR			/* POLL_HUP */
+	EPOLLIN | EPOLLRDNORM,			/* POLL_IN */
+	EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND,	/* POLL_OUT */
+	EPOLLIN | EPOLLRDNORM | EPOLLMSG,		/* POLL_MSG */
+	EPOLLERR,				/* POLL_ERR */
+	EPOLLPRI | EPOLLRDBAND,			/* POLL_PRI */
+	EPOLLHUP | EPOLLERR			/* POLL_HUP */
 };
 
 static inline int sigio_perm(struct task_struct *p,
@@ -717,7 +732,7 @@ static inline int sigio_perm(struct task_struct *p,
 
 static void send_sigio_to_task(struct task_struct *p,
 			       struct fown_struct *fown,
-			       int fd, int reason, int group)
+			       int fd, int reason, enum pid_type type)
 {
 	/*
 	 * F_SETSIG can change ->signum lockless in parallel, make
@@ -729,8 +744,9 @@ static void send_sigio_to_task(struct task_struct *p,
 		return;
 
 	switch (signum) {
-		siginfo_t si;
-		default:
+		default: {
+			kernel_siginfo_t si;
+
 			/* Queue a rt signal with the appropriate fd as its
 			   value.  We use SI_SIGIO as the source, not 
 			   SI_KERNEL, since kernel signals always get 
@@ -761,11 +777,12 @@ static void send_sigio_to_task(struct task_struct *p,
 			else
 				si.si_band = mangle_poll(band_table[reason - POLL_IN]);
 			si.si_fd    = fd;
-			if (!do_send_sig_info(signum, &si, p, group))
+			if (!do_send_sig_info(signum, &si, p, type))
 				break;
-		/* fall-through: fall back on the old plain SIGIO signal */
+		}
+			fallthrough;	/* fall back on the old plain SIGIO signal */
 		case 0:
-			do_send_sig_info(SIGIO, SEND_SIG_PRIV, p, group);
+			do_send_sig_info(SIGIO, SEND_SIG_PRIV, p, type);
 	}
 }
 
@@ -773,35 +790,38 @@ void send_sigio(struct fown_struct *fown, int fd, int band)
 {
 	struct task_struct *p;
 	enum pid_type type;
+	unsigned long flags;
 	struct pid *pid;
-	int group = 1;
 	
-	read_lock(&fown->lock);
+	read_lock_irqsave(&fown->lock, flags);
 
 	type = fown->pid_type;
-	if (type == PIDTYPE_MAX) {
-		group = 0;
-		type = PIDTYPE_PID;
-	}
-
 	pid = fown->pid;
 	if (!pid)
 		goto out_unlock_fown;
-	
-	read_lock(&tasklist_lock);
-	do_each_pid_task(pid, type, p) {
-		send_sigio_to_task(p, fown, fd, band, group);
-	} while_each_pid_task(pid, type, p);
-	read_unlock(&tasklist_lock);
+
+	if (type <= PIDTYPE_TGID) {
+		rcu_read_lock();
+		p = pid_task(pid, PIDTYPE_PID);
+		if (p)
+			send_sigio_to_task(p, fown, fd, band, type);
+		rcu_read_unlock();
+	} else {
+		read_lock(&tasklist_lock);
+		do_each_pid_task(pid, type, p) {
+			send_sigio_to_task(p, fown, fd, band, type);
+		} while_each_pid_task(pid, type, p);
+		read_unlock(&tasklist_lock);
+	}
  out_unlock_fown:
-	read_unlock(&fown->lock);
+	read_unlock_irqrestore(&fown->lock, flags);
 }
 
 static void send_sigurg_to_task(struct task_struct *p,
-				struct fown_struct *fown, int group)
+				struct fown_struct *fown, enum pid_type type)
 {
 	if (sigio_perm(p, fown, SIGURG))
-		do_send_sig_info(SIGURG, SEND_SIG_PRIV, p, group);
+		do_send_sig_info(SIGURG, SEND_SIG_PRIV, p, type);
 }
 
 int send_sigurg(struct fown_struct *fown)
@@ -809,41 +829,38 @@ int send_sigurg(struct fown_struct *fown)
 	struct task_struct *p;
 	enum pid_type type;
 	struct pid *pid;
-	int group = 1;
+	unsigned long flags;
 	int ret = 0;
 	
-	read_lock(&fown->lock);
+	read_lock_irqsave(&fown->lock, flags);
 
 	type = fown->pid_type;
-	if (type == PIDTYPE_MAX) {
-		group = 0;
-		type = PIDTYPE_PID;
-	}
-
 	pid = fown->pid;
 	if (!pid)
 		goto out_unlock_fown;
 
 	ret = 1;
-	
-	read_lock(&tasklist_lock);
-	do_each_pid_task(pid, type, p) {
-		send_sigurg_to_task(p, fown, group);
-	} while_each_pid_task(pid, type, p);
-	read_unlock(&tasklist_lock);
+
+	if (type <= PIDTYPE_TGID) {
+		rcu_read_lock();
+		p = pid_task(pid, PIDTYPE_PID);
+		if (p)
+			send_sigurg_to_task(p, fown, type);
+		rcu_read_unlock();
+	} else {
+		read_lock(&tasklist_lock);
+		do_each_pid_task(pid, type, p) {
+			send_sigurg_to_task(p, fown, type);
+		} while_each_pid_task(pid, type, p);
+		read_unlock(&tasklist_lock);
+	}
  out_unlock_fown:
-	read_unlock(&fown->lock);
+	read_unlock_irqrestore(&fown->lock, flags);
 	return ret;
 }
 
 static DEFINE_SPINLOCK(fasync_lock);
-static struct kmem_cache *fasync_cache __read_mostly;
-
-static void fasync_free_rcu(struct rcu_head *head)
-{
-	kmem_cache_free(fasync_cache,
-			container_of(head, struct fasync_struct, fa_rcu));
-}
+static struct kmem_cache *fasync_cache __ro_after_init;
 
 /*
  * Remove a fasync entry. If successfully removed, return
@@ -865,12 +882,12 @@ int fasync_remove_entry(struct file *filp, struct fasync_struct **fapp)
 		if (fa->fa_file != filp)
 			continue;
 
-		spin_lock_irq(&fa->fa_lock);
+		write_lock_irq(&fa->fa_lock);
 		fa->fa_file = NULL;
-		spin_unlock_irq(&fa->fa_lock);
+		write_unlock_irq(&fa->fa_lock);
 
 		*fp = fa->fa_next;
-		call_rcu(&fa->fa_rcu, fasync_free_rcu);
+		kfree_rcu(fa, fa_rcu);
 		filp->f_flags &= ~FASYNC;
 		result = 1;
 		break;
@@ -912,13 +929,13 @@ struct fasync_struct *fasync_insert_entry(int fd, struct file *filp, struct fasy
 		if (fa->fa_file != filp)
 			continue;
 
-		spin_lock_irq(&fa->fa_lock);
+		write_lock_irq(&fa->fa_lock);
 		fa->fa_fd = fd;
-		spin_unlock_irq(&fa->fa_lock);
+		write_unlock_irq(&fa->fa_lock);
 		goto out;
 	}
 
-	spin_lock_init(&new->fa_lock);
+	rwlock_init(&new->fa_lock);
 	new->magic = FASYNC_MAGIC;
 	new->fa_file = filp;
 	new->fa_fd = fd;
@@ -988,7 +1005,7 @@ static void kill_fasync_rcu(struct fasync_struct *fa, int sig, int band)
 			       "fasync_struct!\n");
 			return;
 		}
-		spin_lock_irqsave(&fa->fa_lock, flags);
+		read_lock_irqsave(&fa->fa_lock, flags);
 		if (fa->fa_file) {
 			fown = &fa->fa_file->f_owner;
 			/* Don't send SIGURG to processes which have not set a
@@ -997,7 +1014,7 @@ static void kill_fasync_rcu(struct fasync_struct *fa, int sig, int band)
 			if (!(sig == SIGURG && fown->signum == 0))
 				send_sigio(fown, fa->fa_fd, band);
 		}
-		spin_unlock_irqrestore(&fa->fa_lock, flags);
+		read_unlock_irqrestore(&fa->fa_lock, flags);
 		fa = rcu_dereference(fa->fa_next);
 	}
 }
@@ -1028,7 +1045,8 @@ static int __init fcntl_init(void)
 			__FMODE_EXEC | __FMODE_NONOTIFY));
 
 	fasync_cache = kmem_cache_create("fasync_cache",
-		sizeof(struct fasync_struct), 0, SLAB_PANIC, NULL);
+					 sizeof(struct fasync_struct), 0,
+					 SLAB_PANIC | SLAB_ACCOUNT, NULL);
 	return 0;
 }
 

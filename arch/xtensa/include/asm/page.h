@@ -11,17 +11,18 @@
 #ifndef _XTENSA_PAGE_H
 #define _XTENSA_PAGE_H
 
+#include <linux/const.h>
+
 #include <asm/processor.h>
 #include <asm/types.h>
 #include <asm/cache.h>
-#include <platform/hardware.h>
 #include <asm/kmem_layout.h>
 
 /*
  * PAGE_SHIFT determines the page size
  */
 
-#define PAGE_SHIFT	12
+#define PAGE_SHIFT	CONFIG_PAGE_SHIFT
 #define PAGE_SIZE	(__XTENSA_UL_CONST(1) << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
@@ -31,8 +32,8 @@
 #define MAX_LOW_PFN	(PHYS_PFN(XCHAL_KSEG_PADDR) + \
 			 PHYS_PFN(XCHAL_KSEG_SIZE))
 #else
-#define PAGE_OFFSET	PLATFORM_DEFAULT_MEM_START
-#define PHYS_OFFSET	PLATFORM_DEFAULT_MEM_START
+#define PAGE_OFFSET	_AC(CONFIG_DEFAULT_MEM_START, UL)
+#define PHYS_OFFSET	_AC(CONFIG_DEFAULT_MEM_START, UL)
 #define MAX_LOW_PFN	PHYS_PFN(0xfffffffful)
 #endif
 
@@ -170,7 +171,18 @@ static inline unsigned long ___pa(unsigned long va)
 	if (off >= XCHAL_KSEG_SIZE)
 		off -= XCHAL_KSEG_SIZE;
 
+#ifndef CONFIG_XIP_KERNEL
 	return off + PHYS_OFFSET;
+#else
+	if (off < XCHAL_KSEG_SIZE)
+		return off + PHYS_OFFSET;
+
+	off -= XCHAL_KSEG_SIZE;
+	if (off >= XCHAL_KIO_SIZE)
+		off -= XCHAL_KIO_SIZE;
+
+	return off + XCHAL_KIO_PADDR;
+#endif
 }
 #define __pa(x)	___pa((unsigned long)(x))
 #else
@@ -179,12 +191,6 @@ static inline unsigned long ___pa(unsigned long va)
 #endif
 #define __va(x)	\
 	((void *)((unsigned long) (x) - PHYS_OFFSET + PAGE_OFFSET))
-#define pfn_valid(pfn) \
-	((pfn) >= ARCH_PFN_OFFSET && ((pfn) - ARCH_PFN_OFFSET) < max_mapnr)
-
-#ifdef CONFIG_DISCONTIGMEM
-# error CONFIG_DISCONTIGMEM not supported
-#endif
 
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 #define page_to_virt(page)	__va(page_to_pfn(page) << PAGE_SHIFT)
@@ -192,9 +198,6 @@ static inline unsigned long ___pa(unsigned long va)
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 
 #endif /* __ASSEMBLY__ */
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #include <asm-generic/memory_model.h>
 #endif /* _XTENSA_PAGE_H */

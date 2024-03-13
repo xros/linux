@@ -295,16 +295,13 @@ static void bluecard_write_wakeup(struct bluecard_info *info)
 				baud_reg = REG_CONTROL_BAUD_RATE_115200;
 				break;
 			case PKT_BAUD_RATE_57600:
-				/* Fall through... */
 			default:
 				baud_reg = REG_CONTROL_BAUD_RATE_57600;
 				break;
 			}
 
 			/* Wait until the command reaches the baseband */
-			prepare_to_wait(&wq, &wait, TASK_INTERRUPTIBLE);
-			schedule_timeout(HZ/10);
-			finish_wait(&wq, &wait);
+			mdelay(100);
 
 			/* Set baud on baseband */
 			info->ctrl_reg &= ~0x03;
@@ -316,9 +313,7 @@ static void bluecard_write_wakeup(struct bluecard_info *info)
 			outb(info->ctrl_reg, iobase + REG_CONTROL);
 
 			/* Wait before the next HCI packet can be send */
-			prepare_to_wait(&wq, &wait, TASK_INTERRUPTIBLE);
-			schedule_timeout(HZ);
-			finish_wait(&wq, &wait);
+			mdelay(1000);
 		}
 
 		if (len == skb->len) {
@@ -569,7 +564,7 @@ static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 	/* Ericsson baud rate command */
 	unsigned char cmd[] = { HCI_COMMAND_PKT, 0x09, 0xfc, 0x01, 0x03 };
 
-	skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_ATOMIC);
+	skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_KERNEL);
 	if (!skb) {
 		BT_ERR("Can't allocate mem for new packet");
 		return -1;
@@ -589,7 +584,6 @@ static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 		hci_skb_pkt_type(skb) = PKT_BAUD_RATE_115200;
 		break;
 	case 57600:
-		/* Fall through... */
 	default:
 		cmd[4] = 0x03;
 		hci_skb_pkt_type(skb) = PKT_BAUD_RATE_57600;

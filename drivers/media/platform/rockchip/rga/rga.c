@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
  * Author: Jacob Chen <jacob-chen@iotwrt.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -39,23 +31,11 @@
 static int debug;
 module_param(debug, int, 0644);
 
-static void job_abort(void *prv)
-{
-	struct rga_ctx *ctx = prv;
-	struct rockchip_rga *rga = ctx->rga;
-
-	if (!rga->curr)	/* No job currently running */
-		return;
-
-	wait_event_timeout(rga->irq_queue,
-			   !rga->curr, msecs_to_jiffies(RGA_TIMEOUT));
-}
-
 static void device_run(void *prv)
 {
 	struct rga_ctx *ctx = prv;
 	struct rockchip_rga *rga = ctx->rga;
-	struct vb2_buffer *src, *dst;
+	struct vb2_v4l2_buffer *src, *dst;
 	unsigned long flags;
 
 	spin_lock_irqsave(&rga->ctrl_lock, flags);
@@ -65,10 +45,7 @@ static void device_run(void *prv)
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 
-	rga_buf_map(src);
-	rga_buf_map(dst);
-
-	rga_hw_start(rga);
+	rga_hw_start(rga, vb_to_rga(src), vb_to_rga(dst));
 
 	spin_unlock_irqrestore(&rga->ctrl_lock, flags);
 }
@@ -96,24 +73,18 @@ static irqreturn_t rga_isr(int irq, void *prv)
 		WARN_ON(!src);
 		WARN_ON(!dst);
 
-		dst->timecode = src->timecode;
-		dst->vb2_buf.timestamp = src->vb2_buf.timestamp;
-		dst->flags &= ~V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
-		dst->flags |= src->flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
+		v4l2_m2m_buf_copy_metadata(src, dst, true);
 
 		v4l2_m2m_buf_done(src, VB2_BUF_STATE_DONE);
 		v4l2_m2m_buf_done(dst, VB2_BUF_STATE_DONE);
 		v4l2_m2m_job_finish(rga->m2m_dev, ctx->fh.m2m_ctx);
-
-		wake_up(&rga->irq_queue);
 	}
 
 	return IRQ_HANDLED;
 }
 
-static struct v4l2_m2m_ops rga_m2m_ops = {
+static const struct v4l2_m2m_ops rga_m2m_ops = {
 	.device_run = device_run,
-	.job_abort = job_abort,
 };
 
 static int
@@ -122,12 +93,13 @@ queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq)
 	struct rga_ctx *ctx = priv;
 	int ret;
 
-	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	src_vq->drv_priv = ctx;
 	src_vq->ops = &rga_qops;
 	src_vq->mem_ops = &vb2_dma_sg_memops;
-	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
+	dst_vq->gfp_flags = __GFP_DMA32;
+	src_vq->buf_struct_size = sizeof(struct rga_vb_buffer);
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	src_vq->lock = &ctx->rga->mutex;
 	src_vq->dev = ctx->rga->v4l2_dev.dev;
@@ -136,12 +108,13 @@ queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq)
 	if (ret)
 		return ret;
 
-	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	dst_vq->drv_priv = ctx;
 	dst_vq->ops = &rga_qops;
 	dst_vq->mem_ops = &vb2_dma_sg_memops;
-	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
+	dst_vq->gfp_flags = __GFP_DMA32;
+	dst_vq->buf_struct_size = sizeof(struct rga_vb_buffer);
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->lock = &ctx->rga->mutex;
 	dst_vq->dev = ctx->rga->v4l2_dev.dev;
@@ -207,10 +180,10 @@ static int rga_setup_ctrls(struct rga_ctx *ctx)
 	return 0;
 }
 
-struct rga_fmt formats[] = {
+static struct rga_fmt formats[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_ARGB32,
-		.color_swap = RGA_COLOR_RB_SWAP,
+		.color_swap = RGA_COLOR_ALPHA_SWAP,
 		.hw_format = RGA_COLOR_FMT_ABGR8888,
 		.depth = 32,
 		.uv_factor = 1,
@@ -218,17 +191,8 @@ struct rga_fmt formats[] = {
 		.x_div = 1,
 	},
 	{
-		.fourcc = V4L2_PIX_FMT_XRGB32,
-		.color_swap = RGA_COLOR_RB_SWAP,
-		.hw_format = RGA_COLOR_FMT_XBGR8888,
-		.depth = 32,
-		.uv_factor = 1,
-		.y_div = 1,
-		.x_div = 1,
-	},
-	{
 		.fourcc = V4L2_PIX_FMT_ABGR32,
-		.color_swap = RGA_COLOR_ALPHA_SWAP,
+		.color_swap = RGA_COLOR_RB_SWAP,
 		.hw_format = RGA_COLOR_FMT_ABGR8888,
 		.depth = 32,
 		.uv_factor = 1,
@@ -237,7 +201,7 @@ struct rga_fmt formats[] = {
 	},
 	{
 		.fourcc = V4L2_PIX_FMT_XBGR32,
-		.color_swap = RGA_COLOR_ALPHA_SWAP,
+		.color_swap = RGA_COLOR_RB_SWAP,
 		.hw_format = RGA_COLOR_FMT_XBGR8888,
 		.depth = 32,
 		.uv_factor = 1,
@@ -317,6 +281,15 @@ struct rga_fmt formats[] = {
 		.x_div = 1,
 	},
 	{
+		.fourcc = V4L2_PIX_FMT_NV12M,
+		.color_swap = RGA_COLOR_NONE_SWAP,
+		.hw_format = RGA_COLOR_FMT_YUV420SP,
+		.depth = 12,
+		.uv_factor = 4,
+		.y_div = 2,
+		.x_div = 1,
+	},
+	{
 		.fourcc = V4L2_PIX_FMT_NV16,
 		.color_swap = RGA_COLOR_NONE_SWAP,
 		.hw_format = RGA_COLOR_FMT_YUV422SP,
@@ -356,12 +329,12 @@ struct rga_fmt formats[] = {
 
 #define NUM_FORMATS ARRAY_SIZE(formats)
 
-static struct rga_fmt *rga_fmt_find(struct v4l2_format *f)
+static struct rga_fmt *rga_fmt_find(u32 pixelformat)
 {
 	unsigned int i;
 
 	for (i = 0; i < NUM_FORMATS; i++) {
-		if (formats[i].fourcc == f->fmt.pix.pixelformat)
+		if (formats[i].fourcc == pixelformat)
 			return &formats[i];
 	}
 	return NULL;
@@ -380,14 +353,11 @@ static struct rga_frame def_frame = {
 
 struct rga_frame *rga_get_frame(struct rga_ctx *ctx, enum v4l2_buf_type type)
 {
-	switch (type) {
-	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
+	if (V4L2_TYPE_IS_OUTPUT(type))
 		return &ctx->in;
-	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
+	if (V4L2_TYPE_IS_CAPTURE(type))
 		return &ctx->out;
-	default:
-		return ERR_PTR(-EINVAL);
-	}
+	return ERR_PTR(-EINVAL);
 }
 
 static int rga_open(struct file *file)
@@ -403,6 +373,11 @@ static int rga_open(struct file *file)
 	/* Set default formats */
 	ctx->in = def_frame;
 	ctx->out = def_frame;
+
+	v4l2_fill_pixfmt_mp(&ctx->in.pix,
+			    ctx->in.fmt->fourcc, ctx->out.width, ctx->out.height);
+	v4l2_fill_pixfmt_mp(&ctx->out.pix,
+			    ctx->out.fmt->fourcc, ctx->out.width, ctx->out.height);
 
 	if (mutex_lock_interruptible(&rga->mutex)) {
 		kfree(ctx);
@@ -462,9 +437,9 @@ static const struct v4l2_file_operations rga_fops = {
 static int
 vidioc_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
 {
-	strlcpy(cap->driver, RGA_NAME, sizeof(cap->driver));
-	strlcpy(cap->card, "rockchip-rga", sizeof(cap->card));
-	strlcpy(cap->bus_info, "platform:rga", sizeof(cap->bus_info));
+	strscpy(cap->driver, RGA_NAME, sizeof(cap->driver));
+	strscpy(cap->card, "rockchip-rga", sizeof(cap->card));
+	strscpy(cap->bus_info, "platform:rga", sizeof(cap->bus_info));
 
 	return 0;
 }
@@ -484,6 +459,7 @@ static int vidioc_enum_fmt(struct file *file, void *prv, struct v4l2_fmtdesc *f)
 
 static int vidioc_g_fmt(struct file *file, void *prv, struct v4l2_format *f)
 {
+	struct v4l2_pix_format_mplane *pix_fmt = &f->fmt.pix_mp;
 	struct rga_ctx *ctx = prv;
 	struct vb2_queue *vq;
 	struct rga_frame *frm;
@@ -495,58 +471,43 @@ static int vidioc_g_fmt(struct file *file, void *prv, struct v4l2_format *f)
 	if (IS_ERR(frm))
 		return PTR_ERR(frm);
 
-	f->fmt.pix.width = frm->width;
-	f->fmt.pix.height = frm->height;
-	f->fmt.pix.field = V4L2_FIELD_NONE;
-	f->fmt.pix.pixelformat = frm->fmt->fourcc;
-	f->fmt.pix.bytesperline = frm->stride;
-	f->fmt.pix.sizeimage = frm->size;
-	f->fmt.pix.colorspace = frm->colorspace;
+	v4l2_fill_pixfmt_mp(pix_fmt, frm->fmt->fourcc, frm->width, frm->height);
+
+	pix_fmt->field = V4L2_FIELD_NONE;
+	pix_fmt->colorspace = frm->colorspace;
 
 	return 0;
 }
 
 static int vidioc_try_fmt(struct file *file, void *prv, struct v4l2_format *f)
 {
+	struct v4l2_pix_format_mplane *pix_fmt = &f->fmt.pix_mp;
 	struct rga_fmt *fmt;
 
-	fmt = rga_fmt_find(f);
-	if (!fmt) {
+	fmt = rga_fmt_find(pix_fmt->pixelformat);
+	if (!fmt)
 		fmt = &formats[0];
-		f->fmt.pix.pixelformat = fmt->fourcc;
-	}
 
-	f->fmt.pix.field = V4L2_FIELD_NONE;
+	pix_fmt->width = clamp(pix_fmt->width,
+			       (u32)MIN_WIDTH, (u32)MAX_WIDTH);
+	pix_fmt->height = clamp(pix_fmt->height,
+				(u32)MIN_HEIGHT, (u32)MAX_HEIGHT);
 
-	if (f->fmt.pix.width > MAX_WIDTH)
-		f->fmt.pix.width = MAX_WIDTH;
-	if (f->fmt.pix.height > MAX_HEIGHT)
-		f->fmt.pix.height = MAX_HEIGHT;
-
-	if (f->fmt.pix.width < MIN_WIDTH)
-		f->fmt.pix.width = MIN_WIDTH;
-	if (f->fmt.pix.height < MIN_HEIGHT)
-		f->fmt.pix.height = MIN_HEIGHT;
-
-	if (fmt->hw_format >= RGA_COLOR_FMT_YUV422SP)
-		f->fmt.pix.bytesperline = f->fmt.pix.width;
-	else
-		f->fmt.pix.bytesperline = (f->fmt.pix.width * fmt->depth) >> 3;
-
-	f->fmt.pix.sizeimage =
-		f->fmt.pix.height * (f->fmt.pix.width * fmt->depth) >> 3;
+	v4l2_fill_pixfmt_mp(pix_fmt, fmt->fourcc, pix_fmt->width, pix_fmt->height);
+	pix_fmt->field = V4L2_FIELD_NONE;
 
 	return 0;
 }
 
 static int vidioc_s_fmt(struct file *file, void *prv, struct v4l2_format *f)
 {
+	struct v4l2_pix_format_mplane *pix_fmt = &f->fmt.pix_mp;
 	struct rga_ctx *ctx = prv;
 	struct rockchip_rga *rga = ctx->rga;
 	struct vb2_queue *vq;
 	struct rga_frame *frm;
-	struct rga_fmt *fmt;
 	int ret = 0;
+	int i;
 
 	/* Adjust all values accordingly to the hardware capabilities
 	 * and chosen format.
@@ -562,21 +523,35 @@ static int vidioc_s_fmt(struct file *file, void *prv, struct v4l2_format *f)
 	frm = rga_get_frame(ctx, f->type);
 	if (IS_ERR(frm))
 		return PTR_ERR(frm);
-	fmt = rga_fmt_find(f);
-	if (!fmt)
-		return -EINVAL;
-	frm->width = f->fmt.pix.width;
-	frm->height = f->fmt.pix.height;
-	frm->size = f->fmt.pix.sizeimage;
-	frm->fmt = fmt;
-	frm->stride = f->fmt.pix.bytesperline;
-	frm->colorspace = f->fmt.pix.colorspace;
+	frm->width = pix_fmt->width;
+	frm->height = pix_fmt->height;
+	frm->size = 0;
+	for (i = 0; i < pix_fmt->num_planes; i++)
+		frm->size += pix_fmt->plane_fmt[i].sizeimage;
+	frm->fmt = rga_fmt_find(pix_fmt->pixelformat);
+	frm->stride = pix_fmt->plane_fmt[0].bytesperline;
+	frm->colorspace = pix_fmt->colorspace;
 
 	/* Reset crop settings */
 	frm->crop.left = 0;
 	frm->crop.top = 0;
 	frm->crop.width = frm->width;
 	frm->crop.height = frm->height;
+
+	frm->pix = *pix_fmt;
+
+	v4l2_dbg(debug, 1, &rga->v4l2_dev,
+		 "[%s] fmt - %p4cc %dx%d (stride %d, sizeimage %d)\n",
+		  V4L2_TYPE_IS_OUTPUT(f->type) ? "OUTPUT" : "CAPTURE",
+		  &frm->fmt->fourcc, frm->width, frm->height,
+		  frm->stride, frm->size);
+
+	for (i = 0; i < pix_fmt->num_planes; i++) {
+		v4l2_dbg(debug, 1, &rga->v4l2_dev,
+			 "plane[%d]: size %d, bytesperline %d\n",
+			 i, pix_fmt->plane_fmt[i].sizeimage,
+			 pix_fmt->plane_fmt[i].bytesperline);
+	}
 
 	return 0;
 }
@@ -595,21 +570,21 @@ static int vidioc_g_selection(struct file *file, void *prv,
 	switch (s->target) {
 	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
 	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
-		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		if (!V4L2_TYPE_IS_CAPTURE(s->type))
 			return -EINVAL;
 		break;
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
-		if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		if (!V4L2_TYPE_IS_OUTPUT(s->type))
 			return -EINVAL;
 		break;
 	case V4L2_SEL_TGT_COMPOSE:
-		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		if (!V4L2_TYPE_IS_CAPTURE(s->type))
 			return -EINVAL;
 		use_frame = true;
 		break;
 	case V4L2_SEL_TGT_CROP:
-		if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		if (!V4L2_TYPE_IS_OUTPUT(s->type))
 			return -EINVAL;
 		use_frame = true;
 		break;
@@ -647,7 +622,7 @@ static int vidioc_s_selection(struct file *file, void *prv,
 		 * COMPOSE target is only valid for capture buffer type, return
 		 * error for output buffer type
 		 */
-		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		if (!V4L2_TYPE_IS_CAPTURE(s->type))
 			return -EINVAL;
 		break;
 	case V4L2_SEL_TGT_CROP:
@@ -655,7 +630,7 @@ static int vidioc_s_selection(struct file *file, void *prv,
 		 * CROP target is only valid for output buffer type, return
 		 * error for capture buffer type
 		 */
-		if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		if (!V4L2_TYPE_IS_OUTPUT(s->type))
 			return -EINVAL;
 		break;
 	/*
@@ -688,14 +663,14 @@ static const struct v4l2_ioctl_ops rga_ioctl_ops = {
 	.vidioc_querycap = vidioc_querycap,
 
 	.vidioc_enum_fmt_vid_cap = vidioc_enum_fmt,
-	.vidioc_g_fmt_vid_cap = vidioc_g_fmt,
-	.vidioc_try_fmt_vid_cap = vidioc_try_fmt,
-	.vidioc_s_fmt_vid_cap = vidioc_s_fmt,
+	.vidioc_g_fmt_vid_cap_mplane = vidioc_g_fmt,
+	.vidioc_try_fmt_vid_cap_mplane = vidioc_try_fmt,
+	.vidioc_s_fmt_vid_cap_mplane = vidioc_s_fmt,
 
 	.vidioc_enum_fmt_vid_out = vidioc_enum_fmt,
-	.vidioc_g_fmt_vid_out = vidioc_g_fmt,
-	.vidioc_try_fmt_vid_out = vidioc_try_fmt,
-	.vidioc_s_fmt_vid_out = vidioc_s_fmt,
+	.vidioc_g_fmt_vid_out_mplane = vidioc_g_fmt,
+	.vidioc_try_fmt_vid_out_mplane = vidioc_try_fmt,
+	.vidioc_s_fmt_vid_out_mplane = vidioc_s_fmt,
 
 	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
 	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
@@ -715,14 +690,14 @@ static const struct v4l2_ioctl_ops rga_ioctl_ops = {
 	.vidioc_s_selection = vidioc_s_selection,
 };
 
-static struct video_device rga_videodev = {
+static const struct video_device rga_videodev = {
 	.name = "rockchip-rga",
 	.fops = &rga_fops,
 	.ioctl_ops = &rga_ioctl_ops,
 	.minor = -1,
 	.release = video_device_release,
 	.vfl_dir = VFL_DIR_M2M,
-	.device_caps = V4L2_CAP_VIDEO_M2M | V4L2_CAP_STREAMING,
+	.device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING,
 };
 
 static int rga_enable_clocks(struct rockchip_rga *rga)
@@ -749,10 +724,10 @@ static int rga_enable_clocks(struct rockchip_rga *rga)
 
 	return 0;
 
-err_disable_sclk:
-	clk_disable_unprepare(rga->sclk);
 err_disable_aclk:
 	clk_disable_unprepare(rga->aclk);
+err_disable_sclk:
+	clk_disable_unprepare(rga->sclk);
 
 	return ret;
 }
@@ -823,7 +798,6 @@ static int rga_probe(struct platform_device *pdev)
 {
 	struct rockchip_rga *rga;
 	struct video_device *vfd;
-	struct resource *res;
 	int ret = 0;
 	int irq;
 
@@ -838,17 +812,13 @@ static int rga_probe(struct platform_device *pdev)
 	spin_lock_init(&rga->ctrl_lock);
 	mutex_init(&rga->mutex);
 
-	init_waitqueue_head(&rga->irq_queue);
-
 	ret = rga_parse_dt(rga);
 	if (ret)
-		dev_err(&pdev->dev, "Unable to parse OF data\n");
+		return dev_err_probe(&pdev->dev, ret, "Unable to parse OF data\n");
 
 	pm_runtime_enable(rga->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-
-	rga->regs = devm_ioremap_resource(rga->dev, res);
+	rga->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(rga->regs)) {
 		ret = PTR_ERR(rga->regs);
 		goto err_put_clk;
@@ -856,7 +826,6 @@ static int rga_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
-		dev_err(rga->dev, "failed to get irq\n");
 		ret = irq;
 		goto err_put_clk;
 	}
@@ -865,6 +834,12 @@ static int rga_probe(struct platform_device *pdev)
 			       dev_name(rga->dev), rga);
 	if (ret < 0) {
 		dev_err(rga->dev, "failed to request irq\n");
+		goto err_put_clk;
+	}
+
+	ret = dma_set_mask_and_coherent(rga->dev, DMA_BIT_MASK(32));
+	if (ret) {
+		dev_err(rga->dev, "32-bit DMA not supported");
 		goto err_put_clk;
 	}
 
@@ -882,7 +857,6 @@ static int rga_probe(struct platform_device *pdev)
 	vfd->v4l2_dev = &rga->v4l2_dev;
 
 	video_set_drvdata(vfd, rga);
-	snprintf(vfd->name, sizeof(vfd->name), "%s", rga_videodev.name);
 	rga->vfd = vfd;
 
 	platform_set_drvdata(pdev, rga);
@@ -890,10 +864,12 @@ static int rga_probe(struct platform_device *pdev)
 	if (IS_ERR(rga->m2m_dev)) {
 		v4l2_err(&rga->v4l2_dev, "Failed to init mem2mem device\n");
 		ret = PTR_ERR(rga->m2m_dev);
-		goto unreg_video_dev;
+		goto rel_vdev;
 	}
 
-	pm_runtime_get_sync(rga->dev);
+	ret = pm_runtime_resume_and_get(rga->dev);
+	if (ret < 0)
+		goto rel_m2m;
 
 	rga->version.major = (rga_read(rga, RGA_VERSION_INFO) >> 24) & 0xFF;
 	rga->version.minor = (rga_read(rga, RGA_VERSION_INFO) >> 20) & 0x0F;
@@ -907,19 +883,18 @@ static int rga_probe(struct platform_device *pdev)
 	rga->cmdbuf_virt = dma_alloc_attrs(rga->dev, RGA_CMDBUF_SIZE,
 					   &rga->cmdbuf_phy, GFP_KERNEL,
 					   DMA_ATTR_WRITE_COMBINE);
-
-	rga->src_mmu_pages =
-		(unsigned int *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 3);
-	rga->dst_mmu_pages =
-		(unsigned int *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 3);
+	if (!rga->cmdbuf_virt) {
+		ret = -ENOMEM;
+		goto rel_m2m;
+	}
 
 	def_frame.stride = (def_frame.width * def_frame.fmt->depth) >> 3;
 	def_frame.size = def_frame.stride * def_frame.height;
 
-	ret = video_register_device(vfd, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		v4l2_err(&rga->v4l2_dev, "Failed to register video device\n");
-		goto rel_vdev;
+		goto free_dma;
 	}
 
 	v4l2_info(&rga->v4l2_dev, "Registered %s as /dev/%s\n",
@@ -927,10 +902,13 @@ static int rga_probe(struct platform_device *pdev)
 
 	return 0;
 
+free_dma:
+	dma_free_attrs(rga->dev, RGA_CMDBUF_SIZE, rga->cmdbuf_virt,
+		       rga->cmdbuf_phy, DMA_ATTR_WRITE_COMBINE);
+rel_m2m:
+	v4l2_m2m_release(rga->m2m_dev);
 rel_vdev:
 	video_device_release(vfd);
-unreg_video_dev:
-	video_unregister_device(rga->vfd);
 unreg_v4l2_dev:
 	v4l2_device_unregister(&rga->v4l2_dev);
 err_put_clk:
@@ -939,15 +917,12 @@ err_put_clk:
 	return ret;
 }
 
-static int rga_remove(struct platform_device *pdev)
+static void rga_remove(struct platform_device *pdev)
 {
 	struct rockchip_rga *rga = platform_get_drvdata(pdev);
 
-	dma_free_attrs(rga->dev, RGA_CMDBUF_SIZE, &rga->cmdbuf_virt,
+	dma_free_attrs(rga->dev, RGA_CMDBUF_SIZE, rga->cmdbuf_virt,
 		       rga->cmdbuf_phy, DMA_ATTR_WRITE_COMBINE);
-
-	free_pages((unsigned long)rga->src_mmu_pages, 3);
-	free_pages((unsigned long)rga->dst_mmu_pages, 3);
 
 	v4l2_info(&rga->v4l2_dev, "Removing\n");
 
@@ -956,8 +931,6 @@ static int rga_remove(struct platform_device *pdev)
 	v4l2_device_unregister(&rga->v4l2_dev);
 
 	pm_runtime_disable(rga->dev);
-
-	return 0;
 }
 
 static int __maybe_unused rga_runtime_suspend(struct device *dev)
@@ -995,7 +968,7 @@ MODULE_DEVICE_TABLE(of, rockchip_rga_match);
 
 static struct platform_driver rga_pdrv = {
 	.probe = rga_probe,
-	.remove = rga_remove,
+	.remove_new = rga_remove,
 	.driver = {
 		.name = RGA_NAME,
 		.pm = &rga_pm,

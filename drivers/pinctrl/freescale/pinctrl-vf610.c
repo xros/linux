@@ -1,19 +1,14 @@
-/*
- * VF610 pinctrl driver based on imx pinmux and pinconf core
- *
- * Copyright 2013 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// VF610 pinctrl driver based on imx pinmux and pinconf core
+//
+// Copyright 2013 Freescale Semiconductor, Inc.
 
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/mod_devicetable.h>
+#include <linux/platform_device.h>
 #include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-imx.h"
@@ -300,11 +295,10 @@ static int vf610_pmx_gpio_set_direction(struct pinctrl_dev *pctldev,
 					unsigned offset, bool input)
 {
 	struct imx_pinctrl *ipctl = pinctrl_dev_get_drvdata(pctldev);
-	struct imx_pinctrl_soc_info *info = ipctl->info;
 	const struct imx_pin_reg *pin_reg;
 	u32 reg;
 
-	pin_reg = &info->pin_regs[offset];
+	pin_reg = &ipctl->pin_regs[offset];
 	if (pin_reg->mux_reg == -1)
 		return -EINVAL;
 
@@ -319,7 +313,7 @@ static int vf610_pmx_gpio_set_direction(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-static struct imx_pinctrl_soc_info vf610_pinctrl_info = {
+static const struct imx_pinctrl_soc_info vf610_pinctrl_info = {
 	.pins = vf610_pinctrl_pads,
 	.npins = ARRAY_SIZE(vf610_pinctrl_pads),
 	.flags = SHARE_MUX_CONF_REG | ZERO_OFFSET_VALID,
@@ -342,6 +336,7 @@ static struct platform_driver vf610_pinctrl_driver = {
 	.driver = {
 		.name = "vf610-pinctrl",
 		.of_match_table = vf610_pinctrl_of_match,
+		.suppress_bind_attrs = true,
 	},
 	.probe = vf610_pinctrl_probe,
 };

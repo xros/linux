@@ -39,24 +39,37 @@
 
 #ifndef __BNXT_RE_H__
 #define __BNXT_RE_H__
+#include <rdma/uverbs_ioctl.h>
+#include "hw_counters.h"
+#include <linux/hashtable.h>
 #define ROCE_DRV_MODULE_NAME		"bnxt_re"
-#define ROCE_DRV_MODULE_VERSION		"1.0.0"
 
 #define BNXT_RE_DESC	"Broadcom NetXtreme-C/E RoCE Driver"
 
-#define BNXT_RE_PAGE_SIZE_4K		BIT(12)
-#define BNXT_RE_PAGE_SIZE_8K		BIT(13)
-#define BNXT_RE_PAGE_SIZE_64K		BIT(16)
-#define BNXT_RE_PAGE_SIZE_2M		BIT(21)
-#define BNXT_RE_PAGE_SIZE_8M		BIT(23)
-#define BNXT_RE_PAGE_SIZE_1G		BIT(30)
+#define BNXT_RE_PAGE_SHIFT_1G		(30)
+#define BNXT_RE_PAGE_SIZE_SUPPORTED	0x7FFFF000 /* 4kb - 1G */
 
-#define BNXT_RE_MAX_MR_SIZE		BIT(30)
+#define BNXT_RE_MAX_MR_SIZE_LOW		BIT_ULL(BNXT_RE_PAGE_SHIFT_1G)
+#define BNXT_RE_MAX_MR_SIZE_HIGH	BIT_ULL(39)
+#define BNXT_RE_MAX_MR_SIZE		BNXT_RE_MAX_MR_SIZE_HIGH
 
 #define BNXT_RE_MAX_QPC_COUNT		(64 * 1024)
 #define BNXT_RE_MAX_MRW_COUNT		(64 * 1024)
 #define BNXT_RE_MAX_SRQC_COUNT		(64 * 1024)
 #define BNXT_RE_MAX_CQ_COUNT		(64 * 1024)
+#define BNXT_RE_MAX_MRW_COUNT_64K	(64 * 1024)
+#define BNXT_RE_MAX_MRW_COUNT_256K	(256 * 1024)
+
+/* Number of MRs to reserve for PF, leaving remainder for VFs */
+#define BNXT_RE_RESVD_MR_FOR_PF         (32 * 1024)
+#define BNXT_RE_MAX_GID_PER_VF          128
+
+/*
+ * Percentage of resources of each type reserved for PF.
+ * Remaining resources are divided equally among VFs.
+ * [0, 100]
+ */
+#define BNXT_RE_PCT_RSVD_FOR_PF         50
 
 #define BNXT_RE_UD_QP_HW_STALL		0x400000
 
@@ -69,11 +82,13 @@
 
 #define BNXT_RE_DEFAULT_ACK_DELAY	16
 
-struct bnxt_re_work {
-	struct work_struct	work;
-	unsigned long		event;
-	struct bnxt_re_dev      *rdev;
-	struct net_device	*vlan_dev;
+struct bnxt_re_ring_attr {
+	dma_addr_t	*dma_arr;
+	int		pages;
+	int		type;
+	u32		depth;
+	u32		lrid; /* Logical ring id */
+	u8		mode;
 };
 
 struct bnxt_re_sqp_entries {
@@ -84,34 +99,67 @@ struct bnxt_re_sqp_entries {
 	struct bnxt_re_qp *qp1_qp;
 };
 
+#define BNXT_RE_MAX_GSI_SQP_ENTRIES	1024
+struct bnxt_re_gsi_context {
+	struct	bnxt_re_qp *gsi_qp;
+	struct	bnxt_re_qp *gsi_sqp;
+	struct	bnxt_re_ah *gsi_sah;
+	struct	bnxt_re_sqp_entries *sqp_tbl;
+};
+
 #define BNXT_RE_MIN_MSIX		2
 #define BNXT_RE_MAX_MSIX		9
 #define BNXT_RE_AEQ_IDX			0
 #define BNXT_RE_NQ_IDX			1
+#define BNXT_RE_GEN_P5_MAX_VF		64
 
+struct bnxt_re_pacing {
+	u64 dbr_db_fifo_reg_off;
+	void *dbr_page;
+	u64 dbr_bar_addr;
+	u32 pacing_algo_th;
+	u32 do_pacing_save;
+	u32 dbq_pacing_time; /* ms */
+	u32 dbr_def_do_pacing;
+	bool dbr_pacing;
+	struct mutex dbq_lock; /* synchronize db pacing algo */
+};
+
+#define BNXT_RE_MAX_DBR_DO_PACING 0xFFFF
+#define BNXT_RE_DBR_PACING_TIME 5 /* ms */
+#define BNXT_RE_PACING_ALGO_THRESHOLD 250 /* Entries in DB FIFO */
+#define BNXT_RE_PACING_ALARM_TH_MULTIPLE 2 /* Multiple of pacing algo threshold */
+/* Default do_pacing value when there is no congestion */
+#define BNXT_RE_DBR_DO_PACING_NO_CONGESTION 0x7F /* 1 in 512 probability */
+#define BNXT_RE_DB_FIFO_ROOM_MASK 0x1FFF8000
+#define BNXT_RE_MAX_FIFO_DEPTH 0x2c00
+#define BNXT_RE_DB_FIFO_ROOM_SHIFT 15
+#define BNXT_RE_GRC_FIFO_REG_BASE 0x2000
+
+#define MAX_CQ_HASH_BITS		(16)
 struct bnxt_re_dev {
 	struct ib_device		ibdev;
 	struct list_head		list;
 	unsigned long			flags;
 #define BNXT_RE_FLAG_NETDEV_REGISTERED		0
-#define BNXT_RE_FLAG_IBDEV_REGISTERED		1
-#define BNXT_RE_FLAG_GOT_MSIX			2
 #define BNXT_RE_FLAG_HAVE_L2_REF		3
 #define BNXT_RE_FLAG_RCFW_CHANNEL_EN		4
 #define BNXT_RE_FLAG_QOS_WORK_REG		5
-#define BNXT_RE_FLAG_TASK_IN_PROG		6
+#define BNXT_RE_FLAG_RESOURCES_ALLOCATED	7
+#define BNXT_RE_FLAG_RESOURCES_INITIALIZED	8
+#define BNXT_RE_FLAG_ERR_DEVICE_DETACHED       17
+#define BNXT_RE_FLAG_ISSUE_ROCE_STATS          29
 	struct net_device		*netdev;
+	struct notifier_block		nb;
 	unsigned int			version, major, minor;
+	struct bnxt_qplib_chip_ctx	*chip_ctx;
 	struct bnxt_en_dev		*en_dev;
-	struct bnxt_msix_entry		msix_entries[BNXT_RE_MAX_MSIX];
 	int				num_msix;
 
 	int				id;
 
 	struct delayed_work		worker;
 	u8				cur_prio_map;
-	u8				active_speed;
-	u8				active_width;
 
 	/* FP Notification Queue (CQ & SRQ) */
 	struct tasklet_struct		nq_task;
@@ -128,23 +176,22 @@ struct bnxt_re_dev {
 	struct bnxt_qplib_res		qplib_res;
 	struct bnxt_qplib_dpi		dpi_privileged;
 
-	atomic_t			qp_count;
 	struct mutex			qp_lock;	/* protect qp list */
 	struct list_head		qp_list;
 
-	atomic_t			cq_count;
-	atomic_t			srq_count;
-	atomic_t			mr_count;
-	atomic_t			mw_count;
 	/* Max of 2 lossless traffic class supported per port */
 	u16				cosq[2];
 
-	/* QP for for handling QP1 packets */
-	u32				sqp_id;
-	struct bnxt_re_qp		*qp1_sqp;
-	struct bnxt_re_ah		*sqp_ah;
-	struct bnxt_re_sqp_entries sqp_tbl[1024];
+	/* QP for handling QP1 packets */
+	struct bnxt_re_gsi_context	gsi_ctx;
+	struct bnxt_re_stats		stats;
 	atomic_t nq_alloc_cnt;
+	u32 is_virtfn;
+	u32 num_vfs;
+	struct bnxt_re_pacing pacing;
+	struct work_struct dbq_fifo_check_work;
+	struct delayed_work dbq_pacing_work;
+	DECLARE_HASHTABLE(cq_hash, MAX_CQ_HASH_BITS);
 };
 
 #define to_bnxt_re_dev(ptr, member)	\
@@ -154,6 +201,9 @@ struct bnxt_re_dev {
 #define BNXT_RE_ROCEV2_IPV4_PACKET	2
 #define BNXT_RE_ROCEV2_IPV6_PACKET	3
 
+#define BNXT_RE_CHECK_RC(x) ((x) && ((x) != -ETIMEDOUT))
+void bnxt_re_pacing_alert(struct bnxt_re_dev *rdev);
+
 static inline struct device *rdev_to_dev(struct bnxt_re_dev *rdev)
 {
 	if (rdev)
@@ -161,4 +211,5 @@ static inline struct device *rdev_to_dev(struct bnxt_re_dev *rdev)
 	return NULL;
 }
 
+extern const struct uapi_definition bnxt_re_uapi_defs[];
 #endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2013 Google Inc.
  * Author: Willem de Bruijn (willemb@google.com)
@@ -24,21 +25,6 @@
  *
  * Todo:
  * - functionality: PACKET_FANOUT_FLAG_DEFRAG
- *
- * License (GPLv2):
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. * See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #define _GNU_SOURCE		/* for sched_setaffinity */
@@ -50,6 +36,7 @@
 #include <linux/filter.h>
 #include <linux/bpf.h>
 #include <linux/if_packet.h>
+#include <net/if.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -66,23 +53,52 @@
 #include <unistd.h>
 
 #include "psock_lib.h"
+#include "../kselftest.h"
 
 #define RING_NUM_FRAMES			20
+
+static uint32_t cfg_max_num_members;
 
 /* Open a socket in a given fanout mode.
  * @return -1 if mode is bad, a valid socket otherwise */
 static int sock_fanout_open(uint16_t typeflags, uint16_t group_id)
 {
-	int fd, val;
+	struct sockaddr_ll addr = {0};
+	struct fanout_args args;
+	int fd, val, err;
 
-	fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IP));
+	fd = socket(PF_PACKET, SOCK_RAW, 0);
 	if (fd < 0) {
 		perror("socket packet");
 		exit(1);
 	}
 
-	val = (((int) typeflags) << 16) | group_id;
-	if (setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &val, sizeof(val))) {
+	pair_udp_setfilter(fd);
+
+	addr.sll_family = AF_PACKET;
+	addr.sll_protocol = htons(ETH_P_IP);
+	addr.sll_ifindex = if_nametoindex("lo");
+	if (addr.sll_ifindex == 0) {
+		perror("if_nametoindex");
+		exit(1);
+	}
+	if (bind(fd, (void *) &addr, sizeof(addr))) {
+		perror("bind packet");
+		exit(1);
+	}
+
+	if (cfg_max_num_members) {
+		args.id = group_id;
+		args.type_flags = typeflags;
+		args.max_num_members = cfg_max_num_members;
+		err = setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &args,
+				 sizeof(args));
+	} else {
+		val = (((int) typeflags) << 16) | group_id;
+		err = setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &val,
+				 sizeof(val));
+	}
+	if (err) {
 		if (close(fd)) {
 			perror("close packet");
 			exit(1);
@@ -90,20 +106,19 @@ static int sock_fanout_open(uint16_t typeflags, uint16_t group_id)
 		return -1;
 	}
 
-	pair_udp_setfilter(fd);
 	return fd;
 }
 
 static void sock_fanout_set_cbpf(int fd)
 {
 	struct sock_filter bpf_filter[] = {
-		BPF_STMT(BPF_LD+BPF_B+BPF_ABS, 80),	      /* ldb [80] */
-		BPF_STMT(BPF_RET+BPF_A, 0),		      /* ret A */
+		BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 80),	      /* ldb [80] */
+		BPF_STMT(BPF_RET | BPF_A, 0),		      /* ret A */
 	};
 	struct sock_fprog bpf_prog;
 
 	bpf_prog.filter = bpf_filter;
-	bpf_prog.len = sizeof(bpf_filter) / sizeof(struct sock_filter);
+	bpf_prog.len = ARRAY_SIZE(bpf_filter);
 
 	if (setsockopt(fd, SOL_PACKET, PACKET_FANOUT_DATA, &bpf_prog,
 		       sizeof(bpf_prog))) {
@@ -128,6 +143,8 @@ static void sock_fanout_getopts(int fd, uint16_t *typeflags, uint16_t *group_id)
 
 static void sock_fanout_set_ebpf(int fd)
 {
+	static char log_buf[65536];
+
 	const int len_off = __builtin_offsetof(struct __sk_buff, len);
 	struct bpf_insn prog[] = {
 		{ BPF_ALU64 | BPF_MOV | BPF_X,   6, 1, 0, 0 },
@@ -140,14 +157,13 @@ static void sock_fanout_set_ebpf(int fd)
 		{ BPF_ALU   | BPF_MOV | BPF_K,   0, 0, 0, 0 },
 		{ BPF_JMP   | BPF_EXIT,          0, 0, 0, 0 }
 	};
-	char log_buf[512];
 	union bpf_attr attr;
 	int pfd;
 
 	memset(&attr, 0, sizeof(attr));
 	attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
 	attr.insns = (unsigned long) prog;
-	attr.insn_cnt = sizeof(prog) / sizeof(prog[0]);
+	attr.insn_cnt = ARRAY_SIZE(prog);
 	attr.license = (unsigned long) "GPL";
 	attr.log_buf = (unsigned long) log_buf,
 	attr.log_size = sizeof(log_buf),
@@ -228,7 +244,7 @@ static int sock_fanout_read(int fds[], char *rings[], const int expect[])
 
 	if ((!(ret[0] == expect[0] && ret[1] == expect[1])) &&
 	    (!(ret[0] == expect[1] && ret[1] == expect[0]))) {
-		fprintf(stderr, "ERROR: incorrect queue lengths\n");
+		fprintf(stderr, "warning: incorrect queue lengths\n");
 		return 1;
 	}
 
@@ -279,6 +295,56 @@ static void test_control_group(void)
 		exit(1);
 	}
 	if (close(fds[1]) || close(fds[0])) {
+		fprintf(stderr, "ERROR: closing sockets\n");
+		exit(1);
+	}
+}
+
+/* Test illegal max_num_members values */
+static void test_control_group_max_num_members(void)
+{
+	int fds[3];
+
+	fprintf(stderr, "test: control multiple sockets, max_num_members\n");
+
+	/* expected failure on greater than PACKET_FANOUT_MAX */
+	cfg_max_num_members = (1 << 16) + 1;
+	if (sock_fanout_open(PACKET_FANOUT_HASH, 0) != -1) {
+		fprintf(stderr, "ERROR: max_num_members > PACKET_FANOUT_MAX\n");
+		exit(1);
+	}
+
+	cfg_max_num_members = 256;
+	fds[0] = sock_fanout_open(PACKET_FANOUT_HASH, 0);
+	if (fds[0] == -1) {
+		fprintf(stderr, "ERROR: failed open\n");
+		exit(1);
+	}
+
+	/* expected failure on joining group with different max_num_members */
+	cfg_max_num_members = 257;
+	if (sock_fanout_open(PACKET_FANOUT_HASH, 0) != -1) {
+		fprintf(stderr, "ERROR: set different max_num_members\n");
+		exit(1);
+	}
+
+	/* success on joining group with same max_num_members */
+	cfg_max_num_members = 256;
+	fds[1] = sock_fanout_open(PACKET_FANOUT_HASH, 0);
+	if (fds[1] == -1) {
+		fprintf(stderr, "ERROR: failed to join group\n");
+		exit(1);
+	}
+
+	/* success on joining group with max_num_members unspecified */
+	cfg_max_num_members = 0;
+	fds[2] = sock_fanout_open(PACKET_FANOUT_HASH, 0);
+	if (fds[2] == -1) {
+		fprintf(stderr, "ERROR: failed to join group\n");
+		exit(1);
+	}
+
+	if (close(fds[2]) || close(fds[1]) || close(fds[0])) {
 		fprintf(stderr, "ERROR: closing sockets\n");
 		exit(1);
 	}
@@ -347,7 +413,9 @@ static int test_datapath(uint16_t typeflags, int port_off,
 	uint8_t type = typeflags & 0xFF;
 	int fds[2], fds_udp[2][2], ret;
 
-	fprintf(stderr, "test: datapath 0x%hx\n", typeflags);
+	fprintf(stderr, "\ntest: datapath 0x%hx ports %hu,%hu\n",
+		typeflags, (uint16_t)PORT_BASE,
+		(uint16_t)(PORT_BASE + port_off));
 
 	fds[0] = sock_fanout_open(typeflags, 0);
 	fds[1] = sock_fanout_open(typeflags, 0);
@@ -418,19 +486,26 @@ int main(int argc, char **argv)
 	const int expect_cpu1[2][2]	= { { 0, 20 },  { 0, 20 } };
 	const int expect_bpf[2][2]	= { { 15, 5 },  { 15, 20 } };
 	const int expect_uniqueid[2][2] = { { 20, 20},  { 20, 20 } };
-	int port_off = 2, tries = 5, ret;
+	int port_off = 2, tries = 20, ret;
 
 	test_control_single();
 	test_control_group();
+	test_control_group_max_num_members();
 	test_unique_fanout_group_ids();
 
+	/* PACKET_FANOUT_MAX */
+	cfg_max_num_members = 1 << 16;
 	/* find a set of ports that do not collide onto the same socket */
 	ret = test_datapath(PACKET_FANOUT_HASH, port_off,
 			    expect_hash[0], expect_hash[1]);
-	while (ret && tries--) {
+	while (ret) {
 		fprintf(stderr, "info: trying alternate ports (%d)\n", tries);
 		ret = test_datapath(PACKET_FANOUT_HASH, ++port_off,
 				    expect_hash[0], expect_hash[1]);
+		if (!--tries) {
+			fprintf(stderr, "too many collisions\n");
+			return 1;
+		}
 	}
 
 	ret |= test_datapath(PACKET_FANOUT_HASH | PACKET_FANOUT_FLAG_ROLLOVER,

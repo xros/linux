@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/media/i2c/tvp514x.c
  *
@@ -13,35 +14,26 @@
  *     Manjunath Hadli <mrh@ti.com>
  *     Karicheri Muralidharan <m-karicheri2@ti.com>
  *     Prabhakar Lad <prabhakar.lad@ti.com>
- *
- * This package is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
-#include <linux/i2c.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
-#include <linux/videodev2.h>
+#include <linux/i2c.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/v4l2-mediabus.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
+#include <linux/slab.h>
+#include <linux/v4l2-mediabus.h>
+#include <linux/videodev2.h>
 
-#include <media/v4l2-async.h>
-#include <media/v4l2-device.h>
-#include <media/v4l2-common.h>
-#include <media/v4l2-mediabus.h>
-#include <media/v4l2-fwnode.h>
-#include <media/v4l2-ctrls.h>
 #include <media/i2c/tvp514x.h>
 #include <media/media-entity.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-common.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-fwnode.h>
+#include <media/v4l2-mediabus.h>
 
 #include "tvp514x_regs.h"
 
@@ -67,7 +59,7 @@ enum tvp514x_std {
 };
 
 /**
- * struct tvp514x_std_info - Structure to store standard informations
+ * struct tvp514x_std_info - Structure to store standard information
  * @width: Line width in pixels
  * @height:Number of active lines
  * @video_std: Value to write in REG_VIDEO_STD register
@@ -127,7 +119,7 @@ struct tvp514x_decoder {
 	struct media_pad pad;
 	struct v4l2_mbus_framefmt format;
 
-	struct tvp514x_reg *int_seq;
+	const struct tvp514x_reg *int_seq;
 };
 
 /* TVP514x default register values */
@@ -746,61 +738,47 @@ static int tvp514x_s_ctrl(struct v4l2_ctrl *ctrl)
 	return err;
 }
 
-/**
- * tvp514x_g_parm() - V4L2 decoder interface handler for g_parm
- * @sd: pointer to standard V4L2 sub-device structure
- * @a: pointer to standard V4L2 VIDIOC_G_PARM ioctl structure
- *
- * Returns the decoder's video CAPTURE parameters.
- */
 static int
-tvp514x_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
+tvp514x_get_frame_interval(struct v4l2_subdev *sd,
+			   struct v4l2_subdev_state *sd_state,
+			   struct v4l2_subdev_frame_interval *ival)
 {
 	struct tvp514x_decoder *decoder = to_decoder(sd);
-	struct v4l2_captureparm *cparm;
 	enum tvp514x_std current_std;
 
-	if (a == NULL)
-		return -EINVAL;
-
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		/* only capture is supported */
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (ival->which != V4L2_SUBDEV_FORMAT_ACTIVE)
 		return -EINVAL;
 
 	/* get the current standard */
 	current_std = decoder->current_std;
 
-	cparm = &a->parm.capture;
-	cparm->capability = V4L2_CAP_TIMEPERFRAME;
-	cparm->timeperframe =
+	ival->interval =
 		decoder->std_list[current_std].standard.frameperiod;
 
 	return 0;
 }
 
-/**
- * tvp514x_s_parm() - V4L2 decoder interface handler for s_parm
- * @sd: pointer to standard V4L2 sub-device structure
- * @a: pointer to standard V4L2 VIDIOC_S_PARM ioctl structure
- *
- * Configures the decoder to use the input parameters, if possible. If
- * not possible, returns the appropriate error code.
- */
 static int
-tvp514x_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *a)
+tvp514x_set_frame_interval(struct v4l2_subdev *sd,
+			   struct v4l2_subdev_state *sd_state,
+			   struct v4l2_subdev_frame_interval *ival)
 {
 	struct tvp514x_decoder *decoder = to_decoder(sd);
 	struct v4l2_fract *timeperframe;
 	enum tvp514x_std current_std;
 
-	if (a == NULL)
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (ival->which != V4L2_SUBDEV_FORMAT_ACTIVE)
 		return -EINVAL;
 
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		/* only capture is supported */
-		return -EINVAL;
-
-	timeperframe = &a->parm.capture.timeperframe;
+	timeperframe = &ival->interval;
 
 	/* get the current standard */
 	current_std = decoder->current_std;
@@ -875,13 +853,13 @@ static const struct v4l2_ctrl_ops tvp514x_ctrl_ops = {
 /**
  * tvp514x_enum_mbus_code() - V4L2 decoder interface handler for enum_mbus_code
  * @sd: pointer to standard V4L2 sub-device structure
- * @cfg: pad configuration
+ * @sd_state: subdev state
  * @code: pointer to v4l2_subdev_mbus_code_enum structure
  *
  * Enumertaes mbus codes supported
  */
 static int tvp514x_enum_mbus_code(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_mbus_code_enum *code)
 {
 	u32 pad = code->pad;
@@ -902,13 +880,13 @@ static int tvp514x_enum_mbus_code(struct v4l2_subdev *sd,
 /**
  * tvp514x_get_pad_format() - V4L2 decoder interface handler for get pad format
  * @sd: pointer to standard V4L2 sub-device structure
- * @cfg: pad configuration
+ * @sd_state: subdev state
  * @format: pointer to v4l2_subdev_format structure
  *
  * Retrieves pad format which is active or tried based on requirement
  */
 static int tvp514x_get_pad_format(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_format *format)
 {
 	struct tvp514x_decoder *decoder = to_decoder(sd);
@@ -934,13 +912,13 @@ static int tvp514x_get_pad_format(struct v4l2_subdev *sd,
 /**
  * tvp514x_set_pad_format() - V4L2 decoder interface handler for set pad format
  * @sd: pointer to standard V4L2 sub-device structure
- * @cfg: pad configuration
+ * @sd_state: subdev state
  * @fmt: pointer to v4l2_subdev_format structure
  *
  * Set pad format for the output pad
  */
 static int tvp514x_set_pad_format(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_format *fmt)
 {
 	struct tvp514x_decoder *decoder = to_decoder(sd);
@@ -961,8 +939,6 @@ static const struct v4l2_subdev_video_ops tvp514x_video_ops = {
 	.s_std = tvp514x_s_std,
 	.s_routing = tvp514x_s_routing,
 	.querystd = tvp514x_querystd,
-	.g_parm = tvp514x_g_parm,
-	.s_parm = tvp514x_s_parm,
 	.s_stream = tvp514x_s_stream,
 };
 
@@ -970,6 +946,8 @@ static const struct v4l2_subdev_pad_ops tvp514x_pad_ops = {
 	.enum_mbus_code = tvp514x_enum_mbus_code,
 	.get_fmt = tvp514x_get_pad_format,
 	.set_fmt = tvp514x_set_pad_format,
+	.get_frame_interval = tvp514x_get_frame_interval,
+	.set_frame_interval = tvp514x_set_frame_interval,
 };
 
 static const struct v4l2_subdev_ops tvp514x_ops = {
@@ -1002,7 +980,7 @@ static struct tvp514x_platform_data *
 tvp514x_get_pdata(struct i2c_client *client)
 {
 	struct tvp514x_platform_data *pdata = NULL;
-	struct v4l2_fwnode_endpoint bus_cfg;
+	struct v4l2_fwnode_endpoint bus_cfg = { .bus_type = 0 };
 	struct device_node *endpoint;
 	unsigned int flags;
 
@@ -1039,13 +1017,12 @@ done:
 /**
  * tvp514x_probe() - decoder driver i2c probe handler
  * @client: i2c driver client device structure
- * @id: i2c driver id table
  *
  * Register decoder as an i2c client device and V4L2
  * device.
  */
 static int
-tvp514x_probe(struct i2c_client *client, const struct i2c_device_id *id)
+tvp514x_probe(struct i2c_client *client)
 {
 	struct tvp514x_platform_data *pdata = tvp514x_get_pdata(client);
 	struct tvp514x_decoder *decoder;
@@ -1071,7 +1048,7 @@ tvp514x_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	memcpy(decoder->tvp514x_regs, tvp514x_reg_list_default,
 			sizeof(tvp514x_reg_list_default));
 
-	decoder->int_seq = (struct tvp514x_reg *)id->driver_data;
+	decoder->int_seq = i2c_get_match_data(client);
 
 	/* Copy board specific information here */
 	decoder->pdata = pdata;
@@ -1097,7 +1074,7 @@ tvp514x_probe(struct i2c_client *client, const struct i2c_device_id *id)
 #if defined(CONFIG_MEDIA_CONTROLLER)
 	decoder->pad.flags = MEDIA_PAD_FL_SOURCE;
 	decoder->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
-	decoder->sd.entity.flags |= MEDIA_ENT_F_ATV_DECODER;
+	decoder->sd.entity.function = MEDIA_ENT_F_ATV_DECODER;
 
 	ret = media_entity_pads_init(&decoder->sd.entity, 1, &decoder->pad);
 	if (ret < 0) {
@@ -1131,9 +1108,7 @@ tvp514x_probe(struct i2c_client *client, const struct i2c_device_id *id)
 done:
 	if (ret < 0) {
 		v4l2_ctrl_handler_free(&decoder->hdl);
-#if defined(CONFIG_MEDIA_CONTROLLER)
 		media_entity_cleanup(&decoder->sd.entity);
-#endif
 	}
 	return ret;
 }
@@ -1145,17 +1120,14 @@ done:
  * Unregister decoder as an i2c client device and V4L2
  * device. Complement of tvp514x_probe().
  */
-static int tvp514x_remove(struct i2c_client *client)
+static void tvp514x_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct tvp514x_decoder *decoder = to_decoder(sd);
 
 	v4l2_async_unregister_subdev(&decoder->sd);
-#if defined(CONFIG_MEDIA_CONTROLLER)
 	media_entity_cleanup(&decoder->sd.entity);
-#endif
 	v4l2_ctrl_handler_free(&decoder->hdl);
-	return 0;
 }
 /* TVP5146 Init/Power on Sequence */
 static const struct tvp514x_reg tvp5146_init_reg_seq[] = {
@@ -1210,29 +1182,26 @@ static const struct tvp514x_reg tvp514xm_init_reg_seq[] = {
  * driver_data - Driver data
  */
 static const struct i2c_device_id tvp514x_id[] = {
-	{"tvp5146", (unsigned long)tvp5146_init_reg_seq},
-	{"tvp5146m2", (unsigned long)tvp514xm_init_reg_seq},
-	{"tvp5147", (unsigned long)tvp5147_init_reg_seq},
-	{"tvp5147m1", (unsigned long)tvp514xm_init_reg_seq},
-	{},
+	{"tvp5146", (kernel_ulong_t)tvp5146_init_reg_seq },
+	{"tvp5146m2", (kernel_ulong_t)tvp514xm_init_reg_seq },
+	{"tvp5147", (kernel_ulong_t)tvp5147_init_reg_seq },
+	{"tvp5147m1", (kernel_ulong_t)tvp514xm_init_reg_seq },
+	{ /* sentinel */ }
 };
-
 MODULE_DEVICE_TABLE(i2c, tvp514x_id);
 
-#if IS_ENABLED(CONFIG_OF)
 static const struct of_device_id tvp514x_of_match[] = {
-	{ .compatible = "ti,tvp5146", },
-	{ .compatible = "ti,tvp5146m2", },
-	{ .compatible = "ti,tvp5147", },
-	{ .compatible = "ti,tvp5147m1", },
-	{ /* sentinel */ },
+	{ .compatible = "ti,tvp5146", .data = tvp5146_init_reg_seq },
+	{ .compatible = "ti,tvp5146m2", .data = tvp514xm_init_reg_seq },
+	{ .compatible = "ti,tvp5147", .data = tvp5147_init_reg_seq },
+	{ .compatible = "ti,tvp5147m1", .data = tvp514xm_init_reg_seq },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, tvp514x_of_match);
-#endif
 
 static struct i2c_driver tvp514x_driver = {
 	.driver = {
-		.of_match_table = of_match_ptr(tvp514x_of_match),
+		.of_match_table = tvp514x_of_match,
 		.name = TVP514X_MODULE_NAME,
 	},
 	.probe = tvp514x_probe,

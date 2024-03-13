@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * itmt.c: Support Intel Turbo Boost Max Technology 3.0
  *
  * (C) Copyright 2016 Intel Corporation
  * Author: Tim Chen <tim.c.chen@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; version 2
- * of the License.
  *
  * On platforms supporting Intel Turbo Boost Max Technology 3.0, (ITMT),
  * the maximum turbo frequencies of some cores in a CPU package may be
@@ -43,8 +39,7 @@ static bool __read_mostly sched_itmt_capable;
 unsigned int __read_mostly sysctl_sched_itmt_enabled;
 
 static int sched_itmt_update_handler(struct ctl_table *table, int write,
-				     void __user *buffer, size_t *lenp,
-				     loff_t *ppos)
+				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	unsigned int old_sysctl;
 	int ret;
@@ -69,8 +64,6 @@ static int sched_itmt_update_handler(struct ctl_table *table, int write,
 	return ret;
 }
 
-static unsigned int zero;
-static unsigned int one = 1;
 static struct ctl_table itmt_kern_table[] = {
 	{
 		.procname	= "sched_itmt_enabled",
@@ -78,19 +71,9 @@ static struct ctl_table itmt_kern_table[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= sched_itmt_update_handler,
-		.extra1		= &zero,
-		.extra2		= &one,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
 	},
-	{}
-};
-
-static struct ctl_table itmt_root_table[] = {
-	{
-		.procname	= "kernel",
-		.mode		= 0555,
-		.child		= itmt_kern_table,
-	},
-	{}
 };
 
 static struct ctl_table_header *itmt_sysctl_header;
@@ -121,7 +104,7 @@ int sched_set_itmt_support(void)
 		return 0;
 	}
 
-	itmt_sysctl_header = register_sysctl_table(itmt_root_table);
+	itmt_sysctl_header = register_sysctl("kernel", itmt_kern_table);
 	if (!itmt_sysctl_header) {
 		mutex_unlock(&itmt_update_mutex);
 		return -ENOMEM;
@@ -181,32 +164,19 @@ int arch_asym_cpu_priority(int cpu)
 
 /**
  * sched_set_itmt_core_prio() - Set CPU priority based on ITMT
- * @prio:	Priority of cpu core
- * @core_cpu:	The cpu number associated with the core
+ * @prio:	Priority of @cpu
+ * @cpu:	The CPU number
  *
  * The pstate driver will find out the max boost frequency
  * and call this function to set a priority proportional
- * to the max boost frequency. CPU with higher boost
+ * to the max boost frequency. CPUs with higher boost
  * frequency will receive higher priority.
  *
  * No need to rebuild sched domain after updating
  * the CPU priorities. The sched domains have no
  * dependency on CPU priorities.
  */
-void sched_set_itmt_core_prio(int prio, int core_cpu)
+void sched_set_itmt_core_prio(int prio, int cpu)
 {
-	int cpu, i = 1;
-
-	for_each_cpu(cpu, topology_sibling_cpumask(core_cpu)) {
-		int smt_prio;
-
-		/*
-		 * Ensure that the siblings are moved to the end
-		 * of the priority chain and only used when
-		 * all other high priority cpus are out of capacity.
-		 */
-		smt_prio = prio * smp_num_siblings / i;
-		per_cpu(sched_core_priority, cpu) = smt_prio;
-		i++;
-	}
+	per_cpu(sched_core_priority, cpu) = prio;
 }

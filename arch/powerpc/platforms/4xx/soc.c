@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IBM/AMCC PPC4xx SoC setup code
  *
@@ -6,11 +7,6 @@
  * L2 cache routines cloned from arch/ppc/syslib/ibm440gx_common.c which is:
  *   Eugene Surovegin <eugene.surovegin@zultys.com> or <ebs@ebshome.net>
  *   Copyright (c) 2003 - 2006 Zultys Technologies
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/stddef.h>
@@ -19,12 +15,13 @@
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/of.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
 
 #include <asm/dcr.h>
 #include <asm/dcr-regs.h>
 #include <asm/reg.h>
+#include <asm/ppc4xx.h>
 
 static u32 dcrbase_l2c;
 
@@ -115,7 +112,7 @@ static int __init ppc4xx_l2c_probe(void)
 	}
 
 	/* Install error handler */
-	if (request_irq(irq, l2c_error_handler, 0, "L2C", 0) < 0) {
+	if (request_irq(irq, l2c_error_handler, 0, "L2C", NULL) < 0) {
 		printk(KERN_ERR "Cannot install L2C error handler"
 		       ", cache is not enabled\n");
 		of_node_put(np);
@@ -200,7 +197,7 @@ void ppc4xx_reset_system(char *cmd)
 	u32 reset_type = DBCR0_RST_SYSTEM;
 	const u32 *prop;
 
-	np = of_find_node_by_type(NULL, "cpu");
+	np = of_get_cpu_node(0, NULL);
 	if (np) {
 		prop = of_get_property(np, "reset-type", NULL);
 

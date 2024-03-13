@@ -13,10 +13,10 @@
 #include <linux/idr.h>
 #include <linux/ioctl.h>
 #include <linux/uaccess.h>
+#include <linux/greybus.h>
 
 #include "firmware.h"
 #include "greybus_firmware.h"
-#include "greybus.h"
 
 #define FW_MGMT_TIMEOUT_MS		1000
 
@@ -55,7 +55,10 @@ struct fw_mgmt {
  */
 #define NUM_MINORS		U8_MAX
 
-static struct class *fw_mgmt_class;
+static const struct class fw_mgmt_class = {
+	.name = "gb_fw_mgmt",
+};
+
 static dev_t fw_mgmt_dev_num;
 static DEFINE_IDA(fw_mgmt_minors_map);
 static LIST_HEAD(fw_mgmt_list);
@@ -102,7 +105,7 @@ unlock:
 }
 
 static int fw_mgmt_interface_fw_version_operation(struct fw_mgmt *fw_mgmt,
-		struct fw_mgmt_ioc_get_intf_version *fw_info)
+						  struct fw_mgmt_ioc_get_intf_version *fw_info)
 {
 	struct gb_connection *connection = fw_mgmt->connection;
 	struct gb_fw_mgmt_interface_fw_version_response response;
@@ -240,7 +243,7 @@ static int fw_mgmt_interface_fw_loaded_operation(struct gb_operation *op)
 }
 
 static int fw_mgmt_backend_fw_version_operation(struct fw_mgmt *fw_mgmt,
-		struct fw_mgmt_ioc_get_backend_version *fw_info)
+						struct fw_mgmt_ioc_get_backend_version *fw_info)
 {
 	struct gb_connection *connection = fw_mgmt->connection;
 	struct gb_fw_mgmt_backend_fw_version_request request;
@@ -473,7 +476,7 @@ static int fw_mgmt_ioctl(struct fw_mgmt *fw_mgmt, unsigned int cmd,
 			return -EFAULT;
 
 		ret = fw_mgmt_backend_fw_update_operation(fw_mgmt,
-				backend_update.firmware_tag);
+							  backend_update.firmware_tag);
 		if (ret)
 			return ret;
 
@@ -629,7 +632,7 @@ int gb_fw_mgmt_connection_init(struct gb_connection *connection)
 		goto err_remove_ida;
 
 	/* Add a soft link to the previously added char-dev within the bundle */
-	fw_mgmt->class_device = device_create(fw_mgmt_class, fw_mgmt->parent,
+	fw_mgmt->class_device = device_create(&fw_mgmt_class, fw_mgmt->parent,
 					      fw_mgmt->dev_num, NULL,
 					      "gb-fw-mgmt-%d", minor);
 	if (IS_ERR(fw_mgmt->class_device)) {
@@ -664,7 +667,7 @@ void gb_fw_mgmt_connection_exit(struct gb_connection *connection)
 
 	fw_mgmt = gb_connection_get_data(connection);
 
-	device_destroy(fw_mgmt_class, fw_mgmt->dev_num);
+	device_destroy(&fw_mgmt_class, fw_mgmt->dev_num);
 	cdev_del(&fw_mgmt->cdev);
 	ida_simple_remove(&fw_mgmt_minors_map, MINOR(fw_mgmt->dev_num));
 
@@ -696,9 +699,9 @@ int fw_mgmt_init(void)
 {
 	int ret;
 
-	fw_mgmt_class = class_create(THIS_MODULE, "gb_fw_mgmt");
-	if (IS_ERR(fw_mgmt_class))
-		return PTR_ERR(fw_mgmt_class);
+	ret = class_register(&fw_mgmt_class);
+	if (ret)
+		return ret;
 
 	ret = alloc_chrdev_region(&fw_mgmt_dev_num, 0, NUM_MINORS,
 				  "gb_fw_mgmt");
@@ -708,13 +711,13 @@ int fw_mgmt_init(void)
 	return 0;
 
 err_remove_class:
-	class_destroy(fw_mgmt_class);
+	class_unregister(&fw_mgmt_class);
 	return ret;
 }
 
 void fw_mgmt_exit(void)
 {
 	unregister_chrdev_region(fw_mgmt_dev_num, NUM_MINORS);
-	class_destroy(fw_mgmt_class);
+	class_unregister(&fw_mgmt_class);
 	ida_destroy(&fw_mgmt_minors_map);
 }

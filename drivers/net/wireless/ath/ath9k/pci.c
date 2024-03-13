@@ -18,9 +18,10 @@
 
 #include <linux/nl80211.h>
 #include <linux/pci.h>
-#include <linux/pci-aspm.h>
 #include <linux/module.h>
 #include "ath9k.h"
+
+extern int ath9k_use_msi;
 
 static const struct pci_device_id ath_pci_id_table[] = {
 	{ PCI_VDEVICE(ATHEROS, 0x0023) }, /* PCI   */
@@ -780,7 +781,7 @@ static const struct pci_device_id ath_pci_id_table[] = {
 /* return bus cachesize in 4B word units */
 static void ath_pci_read_cachesize(struct ath_common *common, int *csz)
 {
-	struct ath_softc *sc = (struct ath_softc *) common->priv;
+	struct ath_softc *sc = common->priv;
 	u8 u8tmp;
 
 	pci_read_config_byte(to_pci_dev(sc->dev), PCI_CACHE_LINE_SIZE, &u8tmp);
@@ -798,19 +799,19 @@ static void ath_pci_read_cachesize(struct ath_common *common, int *csz)
 
 static bool ath_pci_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 {
-	struct ath_hw *ah = (struct ath_hw *) common->ah;
+	struct ath_hw *ah = common->ah;
 
 	common->ops->read(ah, AR5416_EEPROM_OFFSET + (off << AR5416_EEPROM_S));
 
 	if (!ath9k_hw_wait(ah,
-				AR_EEPROM_STATUS_DATA,
+				AR_EEPROM_STATUS_DATA(ah),
 				AR_EEPROM_STATUS_DATA_BUSY |
 				AR_EEPROM_STATUS_DATA_PROT_ACCESS, 0,
 				AH_WAIT_TIMEOUT)) {
 		return false;
 	}
 
-	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA),
+	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA(ah)),
 			AR_EEPROM_STATUS_DATA_VAL);
 
 	return true;
@@ -819,11 +820,12 @@ static bool ath_pci_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 /* Need to be called after we discover btcoex capabilities */
 static void ath_pci_aspm_init(struct ath_common *common)
 {
-	struct ath_softc *sc = (struct ath_softc *) common->priv;
+	struct ath_softc *sc = common->priv;
 	struct ath_hw *ah = sc->sc_ah;
 	struct pci_dev *pdev = to_pci_dev(sc->dev);
 	struct pci_dev *parent;
 	u16 aspm;
+	int ret;
 
 	if (!ah->is_pciexpress)
 		return;
@@ -865,8 +867,8 @@ static void ath_pci_aspm_init(struct ath_common *common)
 	if (AR_SREV_9462(ah))
 		pci_read_config_dword(pdev, 0x70c, &ah->config.aspm_l1_fix);
 
-	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &aspm);
-	if (aspm & (PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1)) {
+	ret = pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &aspm);
+	if (!ret && (aspm & (PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1))) {
 		ah->aspm_enabled = true;
 		/* Initialize PCIe PM and SERDES registers. */
 		ath9k_hw_configpcipowersave(ah, false);
@@ -889,19 +891,14 @@ static int ath_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	u32 val;
 	int ret = 0;
 	char hw_name[64];
+	int msi_enabled = 0;
 
 	if (pcim_enable_device(pdev))
 		return -EIO;
 
-	ret =  pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		pr_err("32-bit DMA not available\n");
-		return ret;
-	}
-
-	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-	if (ret) {
-		pr_err("32-bit DMA consistent DMA enable failed\n");
 		return ret;
 	}
 
@@ -960,7 +957,20 @@ static int ath_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sc->mem = pcim_iomap_table(pdev)[0];
 	sc->driver_data = id->driver_data;
 
-	ret = request_irq(pdev->irq, ath_isr, IRQF_SHARED, "ath9k", sc);
+	if (ath9k_use_msi) {
+		if (pci_enable_msi(pdev) == 0) {
+			msi_enabled = 1;
+			dev_err(&pdev->dev, "Using MSI\n");
+		} else {
+			dev_err(&pdev->dev, "Using INTx\n");
+		}
+	}
+
+	if (!msi_enabled)
+		ret = request_irq(pdev->irq, ath_isr, IRQF_SHARED, "ath9k", sc);
+	else
+		ret = request_irq(pdev->irq, ath_isr, 0, "ath9k", sc);
+
 	if (ret) {
 		dev_err(&pdev->dev, "request_irq failed\n");
 		goto err_irq;
@@ -974,9 +984,12 @@ static int ath_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_init;
 	}
 
+	sc->sc_ah->msi_enabled = msi_enabled;
+	sc->sc_ah->msi_reg = 0;
+
 	ath9k_hw_name(sc->sc_ah, hw_name, sizeof(hw_name));
-	wiphy_info(hw->wiphy, "%s mem=0x%lx, irq=%d\n",
-		   hw_name, (unsigned long)sc->mem, pdev->irq);
+	wiphy_info(hw->wiphy, "%s mem=0x%p, irq=%d\n",
+		   hw_name, sc->mem, pdev->irq);
 
 	return 0;
 
@@ -1003,13 +1016,12 @@ static void ath_pci_remove(struct pci_dev *pdev)
 
 static int ath_pci_suspend(struct device *device)
 {
-	struct pci_dev *pdev = to_pci_dev(device);
-	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
+	struct ieee80211_hw *hw = dev_get_drvdata(device);
 	struct ath_softc *sc = hw->priv;
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 
 	if (test_bit(ATH_OP_WOW_ENABLED, &common->op_flags)) {
-		dev_info(&pdev->dev, "WOW is enabled, bypassing PCI suspend\n");
+		dev_info(device, "WOW is enabled, bypassing PCI suspend\n");
 		return 0;
 	}
 

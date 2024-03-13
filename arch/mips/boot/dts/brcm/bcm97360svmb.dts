@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /dts-v1/;
 
-/include/ "bcm7360.dtsi"
+#include "bcm7360.dtsi"
 
 / {
 	compatible = "brcm,bcm97360svmb", "brcm,bcm7360";
@@ -50,6 +50,10 @@
 	status = "okay";
 };
 
+&watchdog {
+	status = "okay";
+};
+
 &enet0 {
 	status = "okay";
 };
@@ -77,7 +81,7 @@
 &qspi {
 	status = "okay";
 
-	m25p80@0 {
+	flash@0 {
 		compatible = "m25p80";
 		reg = <0>;
 		spi-max-frequency = <40000000>;
@@ -107,5 +111,9 @@
 };
 
 &mspi {
+	status = "okay";
+};
+
+&waketimer {
 	status = "okay";
 };

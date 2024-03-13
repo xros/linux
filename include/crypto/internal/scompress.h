@@ -1,21 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Synchronous Compression operations
  *
  * Copyright 2015 LG Electronics Inc.
  * Copyright (c) 2016, Intel Corporation
  * Author: Giovanni Cabiddu <giovanni.cabiddu@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
 #ifndef _CRYPTO_SCOMP_INT_H
 #define _CRYPTO_SCOMP_INT_H
-#include <linux/crypto.h>
+
+#include <crypto/acompress.h>
+#include <crypto/algapi.h>
 
 #define SCOMP_SCRATCH_SIZE	131072
+
+struct acomp_req;
 
 struct crypto_scomp {
 	struct crypto_tfm base;
@@ -28,18 +27,9 @@ struct crypto_scomp {
  * @free_ctx:	Function frees context allocated with alloc_ctx
  * @compress:	Function performs a compress operation
  * @decompress:	Function performs a de-compress operation
- * @init:	Initialize the cryptographic transformation object.
- *		This function is used to initialize the cryptographic
- *		transformation object. This function is called only once at
- *		the instantiation time, right after the transformation context
- *		was allocated. In case the cryptographic hardware has some
- *		special requirements which need to be handled by software, this
- *		function shall check for the precise requirement of the
- *		transformation and put any software fallbacks in place.
- * @exit:	Deinitialize the cryptographic transformation object. This is a
- *		counterpart to @init, used to remove various changes set in
- *		@init.
+ * @stat:	Statistics for compress algorithm
  * @base:	Common crypto API algorithm data structure
+ * @calg:	Cmonn algorithm data structure shared with acomp
  */
 struct scomp_alg {
 	void *(*alloc_ctx)(struct crypto_scomp *tfm);
@@ -50,7 +40,11 @@ struct scomp_alg {
 	int (*decompress)(struct crypto_scomp *tfm, const u8 *src,
 			  unsigned int slen, u8 *dst, unsigned int *dlen,
 			  void *ctx);
-	struct crypto_alg base;
+
+	union {
+		struct COMP_ALG_COMMON;
+		struct comp_alg_common calg;
+	};
 };
 
 static inline struct scomp_alg *__crypto_scomp_alg(struct crypto_alg *alg)
@@ -105,10 +99,6 @@ static inline int crypto_scomp_decompress(struct crypto_scomp *tfm,
 						 ctx);
 }
 
-int crypto_init_scomp_ops_async(struct crypto_tfm *tfm);
-struct acomp_req *crypto_acomp_scomp_alloc_ctx(struct acomp_req *req);
-void crypto_acomp_scomp_free_ctx(struct acomp_req *req);
-
 /**
  * crypto_register_scomp() -- Register synchronous compression algorithm
  *
@@ -128,10 +118,8 @@ int crypto_register_scomp(struct scomp_alg *alg);
  * compression algorithm
  *
  * @alg:	algorithm definition
- *
- * Return: zero on success; error code in case of error
  */
-int crypto_unregister_scomp(struct scomp_alg *alg);
+void crypto_unregister_scomp(struct scomp_alg *alg);
 
 int crypto_register_scomps(struct scomp_alg *algs, int count);
 void crypto_unregister_scomps(struct scomp_alg *algs, int count);

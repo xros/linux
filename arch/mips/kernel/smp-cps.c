@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2013 Imagination Technologies
  * Author: Paul Burton <paul.burton@mips.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/cpu.h>
@@ -16,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/types.h>
+#include <linux/irq.h>
 
 #include <asm/bcache.h>
 #include <asm/mips-cps.h>
@@ -23,28 +20,18 @@
 #include <asm/mipsregs.h>
 #include <asm/pm-cps.h>
 #include <asm/r4kcache.h>
+#include <asm/smp.h>
 #include <asm/smp-cps.h>
 #include <asm/time.h>
 #include <asm/uasm.h>
 
-static bool threads_disabled;
 static DECLARE_BITMAP(core_power, NR_CPUS);
 
 struct core_boot_config *mips_cps_core_bootcfg;
 
-static int __init setup_nothreads(char *s)
+static unsigned __init core_vpe_count(unsigned int cluster, unsigned core)
 {
-	threads_disabled = true;
-	return 0;
-}
-early_param("nothreads", setup_nothreads);
-
-static unsigned core_vpe_count(unsigned int cluster, unsigned core)
-{
-	if (threads_disabled)
-		return 1;
-
-	return mips_cps_numvps(cluster, core);
+	return min(smp_max_threads, mips_cps_numvps(cluster, core));
 }
 
 static void __init cps_smp_setup(void)
@@ -165,6 +152,8 @@ static void __init cps_prepare_cpus(unsigned int max_cpus)
 	 */
 	entry_code = (u32 *)&mips_cps_core_entry;
 	uasm_i_addiu(&entry_code, 16, 0, cca);
+	UASM_i_LA(&entry_code, 17, (long)mips_gcr_base);
+	BUG_ON((void *)entry_code > (void *)&mips_cps_core_entry_patch_end);
 	blast_dcache_range((unsigned long)&mips_cps_core_entry,
 			   (unsigned long)entry_code);
 	bc_wback_inv((unsigned long)&mips_cps_core_entry,
@@ -362,6 +351,8 @@ out:
 
 static void cps_init_secondary(void)
 {
+	int core = cpu_core(&current_cpu_data);
+
 	/* Disable MT - we only want to run 1 TC per VPE */
 	if (cpu_has_mipsmt)
 		dmt();
@@ -376,6 +367,9 @@ static void cps_init_secondary(void)
 		 */
 		BUG_ON(ident != mips_cm_vp_id(smp_processor_id()));
 	}
+
+	if (core > 0 && !read_gcr_cl_coherence())
+		pr_warn("Core %u is not in coherent domain\n", core);
 
 	if (cpu_has_veic)
 		clear_c0_status(ST0_IM);
@@ -398,67 +392,21 @@ static void cps_smp_finish(void)
 	local_irq_enable();
 }
 
-#ifdef CONFIG_HOTPLUG_CPU
+#if defined(CONFIG_HOTPLUG_CPU) || defined(CONFIG_KEXEC_CORE)
 
-static int cps_cpu_disable(void)
-{
-	unsigned cpu = smp_processor_id();
-	struct core_boot_config *core_cfg;
-
-	if (!cpu)
-		return -EBUSY;
-
-	if (!cps_pm_support_state(CPS_PM_POWER_GATED))
-		return -EINVAL;
-
-	core_cfg = &mips_cps_core_bootcfg[cpu_core(&current_cpu_data)];
-	atomic_sub(1 << cpu_vpe_id(&current_cpu_data), &core_cfg->vpe_mask);
-	smp_mb__after_atomic();
-	set_cpu_online(cpu, false);
-	calculate_cpu_foreign_map();
-
-	return 0;
-}
-
-static unsigned cpu_death_sibling;
-static enum {
+enum cpu_death {
 	CPU_DEATH_HALT,
 	CPU_DEATH_POWER,
-} cpu_death;
+};
 
-void play_dead(void)
+static void cps_shutdown_this_cpu(enum cpu_death death)
 {
 	unsigned int cpu, core, vpe_id;
 
-	local_irq_disable();
-	idle_task_exit();
 	cpu = smp_processor_id();
 	core = cpu_core(&cpu_data[cpu]);
-	cpu_death = CPU_DEATH_POWER;
 
-	pr_debug("CPU%d going offline\n", cpu);
-
-	if (cpu_has_mipsmt || cpu_has_vp) {
-		core = cpu_core(&cpu_data[cpu]);
-
-		/* Look for another online VPE within the core */
-		for_each_online_cpu(cpu_death_sibling) {
-			if (!cpus_are_siblings(cpu, cpu_death_sibling))
-				continue;
-
-			/*
-			 * There is an online VPE within the core. Just halt
-			 * this TC and leave the core alone.
-			 */
-			cpu_death = CPU_DEATH_HALT;
-			break;
-		}
-	}
-
-	/* This CPU has chosen its way out */
-	(void)cpu_report_death();
-
-	if (cpu_death == CPU_DEATH_HALT) {
+	if (death == CPU_DEATH_HALT) {
 		vpe_id = cpu_vpe_id(&cpu_data[cpu]);
 
 		pr_debug("Halting core %d VP%d\n", core, vpe_id);
@@ -473,10 +421,80 @@ void play_dead(void)
 			wmb();
 		}
 	} else {
-		pr_debug("Gating power to core %d\n", core);
-		/* Power down the core */
-		cps_pm_enter_state(CPS_PM_POWER_GATED);
+		if (IS_ENABLED(CONFIG_HOTPLUG_CPU)) {
+			pr_debug("Gating power to core %d\n", core);
+			/* Power down the core */
+			cps_pm_enter_state(CPS_PM_POWER_GATED);
+		}
 	}
+}
+
+#ifdef CONFIG_KEXEC_CORE
+
+static void cps_kexec_nonboot_cpu(void)
+{
+	if (cpu_has_mipsmt || cpu_has_vp)
+		cps_shutdown_this_cpu(CPU_DEATH_HALT);
+	else
+		cps_shutdown_this_cpu(CPU_DEATH_POWER);
+}
+
+#endif /* CONFIG_KEXEC_CORE */
+
+#endif /* CONFIG_HOTPLUG_CPU || CONFIG_KEXEC_CORE */
+
+#ifdef CONFIG_HOTPLUG_CPU
+
+static int cps_cpu_disable(void)
+{
+	unsigned cpu = smp_processor_id();
+	struct core_boot_config *core_cfg;
+
+	if (!cps_pm_support_state(CPS_PM_POWER_GATED))
+		return -EINVAL;
+
+	core_cfg = &mips_cps_core_bootcfg[cpu_core(&current_cpu_data)];
+	atomic_sub(1 << cpu_vpe_id(&current_cpu_data), &core_cfg->vpe_mask);
+	smp_mb__after_atomic();
+	set_cpu_online(cpu, false);
+	calculate_cpu_foreign_map();
+	irq_migrate_all_off_this_cpu();
+
+	return 0;
+}
+
+static unsigned cpu_death_sibling;
+static enum cpu_death cpu_death;
+
+void play_dead(void)
+{
+	unsigned int cpu;
+
+	local_irq_disable();
+	idle_task_exit();
+	cpu = smp_processor_id();
+	cpu_death = CPU_DEATH_POWER;
+
+	pr_debug("CPU%d going offline\n", cpu);
+
+	if (cpu_has_mipsmt || cpu_has_vp) {
+		/* Look for another online VPE within the core */
+		for_each_online_cpu(cpu_death_sibling) {
+			if (!cpus_are_siblings(cpu, cpu_death_sibling))
+				continue;
+
+			/*
+			 * There is an online VPE within the core. Just halt
+			 * this TC and leave the core alone.
+			 */
+			cpu_death = CPU_DEATH_HALT;
+			break;
+		}
+	}
+
+	cpuhp_ap_report_dead();
+
+	cps_shutdown_this_cpu(cpu_death);
 
 	/* This should never be reached */
 	panic("Failed to offline CPU %u", cpu);
@@ -497,19 +515,15 @@ static void wait_for_sibling_halt(void *ptr_cpu)
 	} while (!(halted & TCHALT_H));
 }
 
-static void cps_cpu_die(unsigned int cpu)
+static void cps_cpu_die(unsigned int cpu) { }
+
+static void cps_cleanup_dead_cpu(unsigned cpu)
 {
 	unsigned core = cpu_core(&cpu_data[cpu]);
 	unsigned int vpe_id = cpu_vpe_id(&cpu_data[cpu]);
 	ktime_t fail_time;
 	unsigned stat;
 	int err;
-
-	/* Wait for the cpu to choose its way out */
-	if (!cpu_wait_death(cpu, 5)) {
-		pr_err("CPU%u: didn't offline\n", cpu);
-		return;
-	}
 
 	/*
 	 * Now wait for the CPU to actually offline. Without doing this that
@@ -594,6 +608,10 @@ static const struct plat_smp_ops cps_smp_ops = {
 #ifdef CONFIG_HOTPLUG_CPU
 	.cpu_disable		= cps_cpu_disable,
 	.cpu_die		= cps_cpu_die,
+	.cleanup_dead_cpu	= cps_cleanup_dead_cpu,
+#endif
+#ifdef CONFIG_KEXEC_CORE
+	.kexec_nonboot_cpu	= cps_kexec_nonboot_cpu,
 #endif
 };
 

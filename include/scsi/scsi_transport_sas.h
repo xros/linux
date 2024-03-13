@@ -41,6 +41,7 @@ enum sas_linkrate {
 	SAS_LINK_RATE_G2 = SAS_LINK_RATE_3_0_GBPS,
 	SAS_LINK_RATE_6_0_GBPS = 10,
 	SAS_LINK_RATE_12_0_GBPS = 11,
+	SAS_LINK_RATE_22_5_GBPS = 12,
 	/* These are virtual to the transport class and may never
 	 * be signalled normally since the standard defined field
 	 * is only 4 bits */
@@ -156,6 +157,7 @@ struct sas_port {
 
 	struct mutex		phy_list_mutex;
 	struct list_head	phy_list;
+	struct list_head	del_list; /* libsas only */
 };
 
 #define dev_to_sas_port(d) \

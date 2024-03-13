@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * MUSB OTG driver host defines
  *
@@ -61,13 +61,9 @@ extern void musb_host_tx(struct musb *, u8);
 extern void musb_host_rx(struct musb *, u8);
 extern void musb_root_disconnect(struct musb *musb);
 extern void musb_host_free(struct musb *);
-extern void musb_host_cleanup(struct musb *);
-extern void musb_host_tx(struct musb *, u8);
-extern void musb_host_rx(struct musb *, u8);
-extern void musb_root_disconnect(struct musb *musb);
 extern void musb_host_resume_root_hub(struct musb *musb);
 extern void musb_host_poke_root_hub(struct musb *musb);
-extern void musb_port_suspend(struct musb *musb, bool do_suspend);
+extern int musb_port_suspend(struct musb *musb, bool do_suspend);
 extern void musb_port_reset(struct musb *musb, bool do_reset);
 extern void musb_host_finish_resume(struct work_struct *work);
 #else
@@ -97,9 +93,11 @@ static inline void musb_host_tx(struct musb *musb, u8 epnum)	{}
 static inline void musb_host_rx(struct musb *musb, u8 epnum)	{}
 static inline void musb_root_disconnect(struct musb *musb)	{}
 static inline void musb_host_resume_root_hub(struct musb *musb)	{}
-static inline void musb_host_poll_rh_status(struct musb *musb)	{}
 static inline void musb_host_poke_root_hub(struct musb *musb)	{}
-static inline void musb_port_suspend(struct musb *musb, bool do_suspend) {}
+static inline int musb_port_suspend(struct musb *musb, bool do_suspend)
+{
+	return 0;
+}
 static inline void musb_port_reset(struct musb *musb, bool do_reset) {}
 static inline void musb_host_finish_resume(struct work_struct *work) {}
 #endif

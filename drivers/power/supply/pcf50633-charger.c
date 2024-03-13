@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* NXP PCF50633 Main Battery Charger Driver
  *
  * (C) 2006-2008 by Openmoko, Inc.
@@ -6,12 +7,6 @@
  *
  * Broken down from monstrous PCF50633 driver mainly by
  * Harald Welte, Andy Green and Werner Almesberger
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/kernel.h>
@@ -158,7 +153,7 @@ show_chgmode(struct device *dev, struct device_attribute *attr, char *buf)
 	u8 mbcs2 = pcf50633_reg_read(mbc->pcf, PCF50633_REG_MBCS2);
 	u8 chgmod = (mbcs2 & PCF50633_MBCS2_MBC_MASK);
 
-	return sprintf(buf, "%d\n", chgmod);
+	return sysfs_emit(buf, "%d\n", chgmod);
 }
 static DEVICE_ATTR(chgmode, S_IRUGO, show_chgmode, NULL);
 
@@ -179,7 +174,7 @@ show_usblim(struct device *dev, struct device_attribute *attr, char *buf)
 	else
 		ma = 0;
 
-	return sprintf(buf, "%u\n", ma);
+	return sysfs_emit(buf, "%u\n", ma);
 }
 
 static ssize_t set_usblim(struct device *dev,
@@ -212,7 +207,7 @@ show_chglim(struct device *dev, struct device_attribute *attr, char *buf)
 
 	ma = (mbc->pcf->pdata->charger_reference_current_ma *  mbcc5) >> 8;
 
-	return sprintf(buf, "%u\n", ma);
+	return sysfs_emit(buf, "%u\n", ma);
 }
 
 static ssize_t set_chglim(struct device *dev,
@@ -245,17 +240,14 @@ static ssize_t set_chglim(struct device *dev,
  */
 static DEVICE_ATTR(chg_curlim, S_IRUGO | S_IWUSR, show_chglim, set_chglim);
 
-static struct attribute *pcf50633_mbc_sysfs_entries[] = {
+static struct attribute *pcf50633_mbc_sysfs_attrs[] = {
 	&dev_attr_chgmode.attr,
 	&dev_attr_usb_curlim.attr,
 	&dev_attr_chg_curlim.attr,
 	NULL,
 };
 
-static const struct attribute_group mbc_attr_group = {
-	.name	= NULL,			/* put in device directory */
-	.attrs	= pcf50633_mbc_sysfs_entries,
-};
+ATTRIBUTE_GROUPS(pcf50633_mbc_sysfs);
 
 static void
 pcf50633_mbc_irq_handler(int irq, void *data)
@@ -390,6 +382,7 @@ static const struct power_supply_desc pcf50633_mbc_ac_desc = {
 static int pcf50633_mbc_probe(struct platform_device *pdev)
 {
 	struct power_supply_config psy_cfg = {};
+	struct power_supply_config usb_psy_cfg;
 	struct pcf50633_mbc *mbc;
 	int i;
 	u8 mbcs1;
@@ -419,8 +412,11 @@ static int pcf50633_mbc_probe(struct platform_device *pdev)
 		return PTR_ERR(mbc->adapter);
 	}
 
+	usb_psy_cfg = psy_cfg;
+	usb_psy_cfg.attr_grp = pcf50633_mbc_sysfs_groups;
+
 	mbc->usb = power_supply_register(&pdev->dev, &pcf50633_mbc_usb_desc,
-					 &psy_cfg);
+					 &usb_psy_cfg);
 	if (IS_ERR(mbc->usb)) {
 		dev_err(mbc->pcf->dev, "failed to register usb\n");
 		power_supply_unregister(mbc->adapter);
@@ -436,9 +432,6 @@ static int pcf50633_mbc_probe(struct platform_device *pdev)
 		return PTR_ERR(mbc->ac);
 	}
 
-	if (sysfs_create_group(&pdev->dev.kobj, &mbc_attr_group))
-		dev_err(mbc->pcf->dev, "failed to create sysfs entries\n");
-
 	mbcs1 = pcf50633_reg_read(mbc->pcf, PCF50633_REG_MBCS1);
 	if (mbcs1 & PCF50633_MBCS1_USBPRES)
 		pcf50633_mbc_irq_handler(PCF50633_IRQ_USBINS, mbc);
@@ -448,7 +441,7 @@ static int pcf50633_mbc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int pcf50633_mbc_remove(struct platform_device *pdev)
+static void pcf50633_mbc_remove(struct platform_device *pdev)
 {
 	struct pcf50633_mbc *mbc = platform_get_drvdata(pdev);
 	int i;
@@ -457,12 +450,9 @@ static int pcf50633_mbc_remove(struct platform_device *pdev)
 	for (i = 0; i < ARRAY_SIZE(mbc_irq_handlers); i++)
 		pcf50633_free_irq(mbc->pcf, mbc_irq_handlers[i]);
 
-	sysfs_remove_group(&pdev->dev.kobj, &mbc_attr_group);
 	power_supply_unregister(mbc->usb);
 	power_supply_unregister(mbc->adapter);
 	power_supply_unregister(mbc->ac);
-
-	return 0;
 }
 
 static struct platform_driver pcf50633_mbc_driver = {
@@ -470,7 +460,7 @@ static struct platform_driver pcf50633_mbc_driver = {
 		.name = "pcf50633-mbc",
 	},
 	.probe = pcf50633_mbc_probe,
-	.remove = pcf50633_mbc_remove,
+	.remove_new = pcf50633_mbc_remove,
 };
 
 module_platform_driver(pcf50633_mbc_driver);

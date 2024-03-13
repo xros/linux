@@ -4,9 +4,17 @@
 #include <linux/string.h>
 #include <stdlib.h>
 
-#include "sane_ctype.h"
+#include <linux/ctype.h>
 
-#define K 1024LL
+const char *graph_dotted_line =
+	"---------------------------------------------------------------------"
+	"---------------------------------------------------------------------"
+	"---------------------------------------------------------------------";
+const char *dots =
+	"....................................................................."
+	"....................................................................."
+	".....................................................................";
+
 /*
  * perf_atoll()
  * Parse (\d+)(b|B|kb|KB|mb|MB|gb|GB|tb|TB) (e.g. "256MB")
@@ -27,7 +35,7 @@ s64 perf_atoll(const char *str)
 			if (*p)
 				goto out_err;
 
-			__fallthrough;
+			fallthrough;
 		case '\0':
 			return length;
 		default:
@@ -58,109 +66,6 @@ s64 perf_atoll(const char *str)
 
 out_err:
 	return -1;
-}
-
-/*
- * Helper function for splitting a string into an argv-like array.
- * originally copied from lib/argv_split.c
- */
-static const char *skip_sep(const char *cp)
-{
-	while (*cp && isspace(*cp))
-		cp++;
-
-	return cp;
-}
-
-static const char *skip_arg(const char *cp)
-{
-	while (*cp && !isspace(*cp))
-		cp++;
-
-	return cp;
-}
-
-static int count_argc(const char *str)
-{
-	int count = 0;
-
-	while (*str) {
-		str = skip_sep(str);
-		if (*str) {
-			count++;
-			str = skip_arg(str);
-		}
-	}
-
-	return count;
-}
-
-/**
- * argv_free - free an argv
- * @argv - the argument vector to be freed
- *
- * Frees an argv and the strings it points to.
- */
-void argv_free(char **argv)
-{
-	char **p;
-	for (p = argv; *p; p++) {
-		free(*p);
-		*p = NULL;
-	}
-
-	free(argv);
-}
-
-/**
- * argv_split - split a string at whitespace, returning an argv
- * @str: the string to be split
- * @argcp: returned argument count
- *
- * Returns an array of pointers to strings which are split out from
- * @str.  This is performed by strictly splitting on white-space; no
- * quote processing is performed.  Multiple whitespace characters are
- * considered to be a single argument separator.  The returned array
- * is always NULL-terminated.  Returns NULL on memory allocation
- * failure.
- */
-char **argv_split(const char *str, int *argcp)
-{
-	int argc = count_argc(str);
-	char **argv = calloc(argc + 1, sizeof(*argv));
-	char **argvp;
-
-	if (argv == NULL)
-		goto out;
-
-	if (argcp)
-		*argcp = argc;
-
-	argvp = argv;
-
-	while (*str) {
-		str = skip_sep(str);
-
-		if (*str) {
-			const char *p = str;
-			char *t;
-
-			str = skip_arg(str);
-
-			t = strndup(p, str-p);
-			if (t == NULL)
-				goto fail;
-			*argvp++ = t;
-		}
-	}
-	*argvp = NULL;
-
-out:
-	return argv;
-
-fail:
-	argv_free(argv);
-	return NULL;
 }
 
 /* Character class matching */
@@ -303,61 +208,6 @@ int strtailcmp(const char *s1, const char *s2)
 	return 0;
 }
 
-/**
- * strxfrchar - Locate and replace character in @s
- * @s:    The string to be searched/changed.
- * @from: Source character to be replaced.
- * @to:   Destination character.
- *
- * Return pointer to the changed string.
- */
-char *strxfrchar(char *s, char from, char to)
-{
-	char *p = s;
-
-	while ((p = strchr(p, from)) != NULL)
-		*p++ = to;
-
-	return s;
-}
-
-/**
- * ltrim - Removes leading whitespace from @s.
- * @s: The string to be stripped.
- *
- * Return pointer to the first non-whitespace character in @s.
- */
-char *ltrim(char *s)
-{
-	while (isspace(*s))
-		s++;
-
-	return s;
-}
-
-/**
- * rtrim - Removes trailing whitespace from @s.
- * @s: The string to be stripped.
- *
- * Note that the first trailing whitespace is replaced with a %NUL-terminator
- * in the given string @s. Returns @s.
- */
-char *rtrim(char *s)
-{
-	size_t size = strlen(s);
-	char *end;
-
-	if (!size)
-		return s;
-
-	end = s + size - 1;
-	while (end >= s && isspace(*end))
-		end--;
-	*(end + 1) = '\0';
-
-	return s;
-}
-
 char *asprintf_expr_inout_ints(const char *var, bool in, size_t nints, int *ints)
 {
 	/*
@@ -441,4 +291,61 @@ char *strdup_esc(const char *str)
 	} while (p);
 
 	return ret;
+}
+
+unsigned int hex(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return c - 'A' + 10;
+}
+
+/*
+ * Replace all occurrences of character 'needle' in string 'haystack' with
+ * string 'replace'
+ *
+ * The new string could be longer so a new string is returned which must be
+ * freed.
+ */
+char *strreplace_chars(char needle, const char *haystack, const char *replace)
+{
+	int replace_len = strlen(replace);
+	char *new_s, *to;
+	const char *loc = strchr(haystack, needle);
+	const char *from = haystack;
+	int num = 0;
+
+	/* Count occurrences */
+	while (loc) {
+		loc = strchr(loc + 1, needle);
+		num++;
+	}
+
+	/* Allocate enough space for replacements and reset first location */
+	new_s = malloc(strlen(haystack) + (num * (replace_len - 1) + 1));
+	if (!new_s)
+		return NULL;
+	loc = strchr(haystack, needle);
+	to = new_s;
+
+	while (loc) {
+		/* Copy original string up to found char and update positions */
+		memcpy(to, from, 1 + loc - from);
+		to += loc - from;
+		from = loc + 1;
+
+		/* Copy replacement string and update positions */
+		memcpy(to, replace, replace_len);
+		to += replace_len;
+
+		/* needle next occurrence or end of string */
+		loc = strchr(from, needle);
+	}
+
+	/* Copy any remaining chars + null */
+	strcpy(to, from);
+
+	return new_s;
 }

@@ -1,14 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016 Anders K. Pedersen <akp@cohaesio.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/module.h>
 #include <linux/netlink.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
@@ -20,14 +15,14 @@
 
 struct nft_rt {
 	enum nft_rt_keys	key:8;
-	enum nft_registers	dreg:8;
+	u8			dreg;
 };
 
 static u16 get_tcpmss(const struct nft_pktinfo *pkt, const struct dst_entry *skbdst)
 {
 	u32 minlen = sizeof(struct ipv6hdr), mtu = dst_mtu(skbdst);
 	const struct sk_buff *skb = pkt->skb;
-	const struct nf_afinfo *ai;
+	struct dst_entry *dst = NULL;
 	struct flowi fl;
 
 	memset(&fl, 0, sizeof(fl));
@@ -43,15 +38,10 @@ static u16 get_tcpmss(const struct nft_pktinfo *pkt, const struct dst_entry *skb
 		break;
 	}
 
-	ai = nf_get_afinfo(nft_pf(pkt));
-	if (ai) {
-		struct dst_entry *dst = NULL;
-
-		ai->route(nft_net(pkt), &dst, &fl, false);
-		if (dst) {
-			mtu = min(mtu, dst_mtu(dst));
-			dst_release(dst);
-		}
+	nf_route(nft_net(pkt), &dst, &fl, false, nft_pf(pkt));
+	if (dst) {
+		mtu = min(mtu, dst_mtu(dst));
+		dst_release(dst);
 	}
 
 	if (mtu <= minlen || mtu > 0xffff)
@@ -60,9 +50,9 @@ static u16 get_tcpmss(const struct nft_pktinfo *pkt, const struct dst_entry *skb
 	return mtu - minlen;
 }
 
-static void nft_rt_get_eval(const struct nft_expr *expr,
-			    struct nft_regs *regs,
-			    const struct nft_pktinfo *pkt)
+void nft_rt_get_eval(const struct nft_expr *expr,
+		     struct nft_regs *regs,
+		     const struct nft_pktinfo *pkt)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 	const struct sk_buff *skb = pkt->skb;
@@ -97,6 +87,11 @@ static void nft_rt_get_eval(const struct nft_expr *expr,
 	case NFT_RT_TCPMSS:
 		nft_reg_store16(dest, get_tcpmss(pkt, dst));
 		break;
+#ifdef CONFIG_XFRM
+	case NFT_RT_XFRM:
+		nft_reg_store8(dest, !!dst->xfrm);
+		break;
+#endif
 	default:
 		WARN_ON(1);
 		goto err;
@@ -109,7 +104,7 @@ err:
 
 static const struct nla_policy nft_rt_policy[NFTA_RT_MAX + 1] = {
 	[NFTA_RT_DREG]		= { .type = NLA_U32 },
-	[NFTA_RT_KEY]		= { .type = NLA_U32 },
+	[NFTA_RT_KEY]		= NLA_POLICY_MAX(NLA_BE32, 255),
 };
 
 static int nft_rt_get_init(const struct nft_ctx *ctx,
@@ -137,17 +132,21 @@ static int nft_rt_get_init(const struct nft_ctx *ctx,
 	case NFT_RT_TCPMSS:
 		len = sizeof(u16);
 		break;
+#ifdef CONFIG_XFRM
+	case NFT_RT_XFRM:
+		len = sizeof(u8);
+		break;
+#endif
 	default:
 		return -EOPNOTSUPP;
 	}
 
-	priv->dreg = nft_parse_register(tb[NFTA_RT_DREG]);
-	return nft_validate_register_store(ctx, priv->dreg, NULL,
-					   NFT_DATA_VALUE, len);
+	return nft_parse_register_store(ctx, tb[NFTA_RT_DREG], &priv->dreg,
+					NULL, NFT_DATA_VALUE, len);
 }
 
 static int nft_rt_get_dump(struct sk_buff *skb,
-			   const struct nft_expr *expr)
+			   const struct nft_expr *expr, bool reset)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 
@@ -167,10 +166,16 @@ static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *exp
 	const struct nft_rt *priv = nft_expr_priv(expr);
 	unsigned int hooks;
 
+	if (ctx->family != NFPROTO_IPV4 &&
+	    ctx->family != NFPROTO_IPV6 &&
+	    ctx->family != NFPROTO_INET)
+		return -EOPNOTSUPP;
+
 	switch (priv->key) {
 	case NFT_RT_NEXTHOP4:
 	case NFT_RT_NEXTHOP6:
 	case NFT_RT_CLASSID:
+	case NFT_RT_XFRM:
 		return 0;
 	case NFT_RT_TCPMSS:
 		hooks = (1 << NF_INET_FORWARD) |
@@ -184,7 +189,6 @@ static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *exp
 	return nft_chain_validate_hooks(ctx->chain, hooks);
 }
 
-static struct nft_expr_type nft_rt_type;
 static const struct nft_expr_ops nft_rt_get_ops = {
 	.type		= &nft_rt_type,
 	.size		= NFT_EXPR_SIZE(sizeof(struct nft_rt)),
@@ -192,29 +196,13 @@ static const struct nft_expr_ops nft_rt_get_ops = {
 	.init		= nft_rt_get_init,
 	.dump		= nft_rt_get_dump,
 	.validate	= nft_rt_validate,
+	.reduce		= NFT_REDUCE_READONLY,
 };
 
-static struct nft_expr_type nft_rt_type __read_mostly = {
+struct nft_expr_type nft_rt_type __read_mostly = {
 	.name		= "rt",
 	.ops		= &nft_rt_get_ops,
 	.policy		= nft_rt_policy,
 	.maxattr	= NFTA_RT_MAX,
 	.owner		= THIS_MODULE,
 };
-
-static int __init nft_rt_module_init(void)
-{
-	return nft_register_expr(&nft_rt_type);
-}
-
-static void __exit nft_rt_module_exit(void)
-{
-	nft_unregister_expr(&nft_rt_type);
-}
-
-module_init(nft_rt_module_init);
-module_exit(nft_rt_module_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Anders K. Pedersen <akp@cohaesio.com>");
-MODULE_ALIAS_NFT_EXPR("rt");

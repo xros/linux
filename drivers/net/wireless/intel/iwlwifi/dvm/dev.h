@@ -1,27 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  *
- * Copyright(c) 2003 - 2014 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
+ * Copyright(c) 2003 - 2014, 2020, 2023 Intel Corporation. All rights reserved.
  *****************************************************************************/
 /*
  * Please use this file (dev.h) for driver implementation definitions.
@@ -146,11 +126,11 @@ enum iwl_agg_state {
 
 /**
  * struct iwl_ht_agg - aggregation state machine
-
+ *
  * This structs holds the states for the BA agreement establishment and tear
  * down. It also holds the state during the BA session itself. This struct is
  * duplicated for each RA / TID.
-
+ *
  * @rate_n_flags: Rate at which Tx was attempted. Holds the data between the
  *	Tx response (REPLY_TX), and the block ack notification
  *	(REPLY_COMPRESSED_BA).
@@ -172,9 +152,9 @@ struct iwl_ht_agg {
 
 /**
  * struct iwl_tid_data - one for each RA / TID
-
+ *
  * This structs holds the states for each RA / TID.
-
+ *
  * @seq_number: the next WiFi sequence number to use
  * @next_reclaimed: the WiFi sequence number of the next packet to be acked.
  *	This is basically (last acked packet++).
@@ -215,7 +195,7 @@ struct iwl_station_priv {
 	u8 sta_id;
 };
 
-/**
+/*
  * struct iwl_vif_priv - driver's private per-interface information
  *
  * When mac80211 allocates a virtual interface, it can allocate
@@ -251,11 +231,6 @@ struct iwl_sensitivity_ranges {
 	u16 barker_corr_th_min_mrc;
 	u16 nrg_th_cca;
 };
-
-
-#define KELVIN_TO_CELSIUS(x) ((x)-273)
-#define CELSIUS_TO_KELVIN(x) ((x)+273)
-
 
 /******************************************************************************
  *
@@ -554,6 +529,7 @@ enum iwl_scan_type {
  *	relevant for 1000, 6000 and up
  * @struct iwl_sensitivity_ranges: range of sensitivity values
  * @use_rts_for_aggregation: use rts/cts protection for HT traffic
+ * @sens: sensitivity ranges pointer
  */
 struct iwl_hw_params {
 	u8  tx_chains_num;
@@ -572,6 +548,7 @@ struct iwl_hw_params {
  * @bt_prio_boost: default bt priority boost value
  * @agg_time_limit: maximum number of uSec in aggregation
  * @bt_sco_disable: uCode should not response to BT in SCO/ESCO mode
+ * @bt_session_2: indicates version 2 of the BT command is used
  */
 struct iwl_dvm_bt_params {
 	bool advanced_bt_coexist;
@@ -721,6 +698,7 @@ struct iwl_priv {
 	/* Scan related variables */
 	unsigned long scan_start;
 	unsigned long scan_start_tsf;
+	size_t scan_cmd_size;
 	void *scan_cmd;
 	enum nl80211_band scan_band;
 	struct cfg80211_scan_request *scan_request;
@@ -830,7 +808,6 @@ struct iwl_priv {
 	u8 bt_traffic_load, last_bt_traffic_load;
 	bool bt_ch_announce;
 	bool bt_full_concurrent;
-	bool bt_ant_couple_ok;
 	__le32 kill_ack_mask;
 	__le32 kill_cts_mask;
 	__le16 bt_valid;

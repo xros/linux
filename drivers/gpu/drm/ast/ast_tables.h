@@ -97,7 +97,7 @@ static const struct ast_vbios_dclk_info dclk_table[] = {
 	{0x67, 0x22, 0x00},			/* 0E: VCLK157_5	*/
 	{0x6A, 0x22, 0x00},			/* 0F: VCLK162		*/
 	{0x4d, 0x4c, 0x80},			/* 10: VCLK154		*/
-	{0xa7, 0x78, 0x80},			/* 11: VCLK83.5		*/
+	{0x68, 0x6f, 0x80},			/* 11: VCLK83.5		*/
 	{0x28, 0x49, 0x80},			/* 12: VCLK106.5	*/
 	{0x37, 0x49, 0x80},			/* 13: VCLK146.25	*/
 	{0x1f, 0x45, 0x80},			/* 14: VCLK148.5	*/
@@ -127,7 +127,7 @@ static const struct ast_vbios_dclk_info dclk_table_ast2500[] = {
 	{0x67, 0x22, 0x00},			/* 0E: VCLK157_5	*/
 	{0x6A, 0x22, 0x00},			/* 0F: VCLK162		*/
 	{0x4d, 0x4c, 0x80},			/* 10: VCLK154		*/
-	{0xa7, 0x78, 0x80},			/* 11: VCLK83.5		*/
+	{0x68, 0x6f, 0x80},			/* 11: VCLK83.5		*/
 	{0x28, 0x49, 0x80},			/* 12: VCLK106.5	*/
 	{0x37, 0x49, 0x80},			/* 13: VCLK146.25	*/
 	{0x1f, 0x45, 0x80},			/* 14: VCLK148.5	*/
@@ -272,6 +272,13 @@ static const struct ast_vbios_enhtable res_1600x1200[] = {
 	 (SyncPP | Charx8Dot), 0xFF, 1, 0x33 },
 };
 
+static const struct ast_vbios_enhtable res_1152x864[] = {
+	{1600, 1152, 64, 128,  900,  864, 1, 3, VCLK108,	/* 75Hz */
+	 (SyncPP | Charx8Dot | NewModeInfo), 75, 1, 0x3B },
+	{1600, 1152, 64, 128,  900,  864, 1, 3, VCLK108,	/* end */
+	 (SyncPP | Charx8Dot | NewModeInfo), 0xFF, 1, 0x3B },
+};
+
 /* 16:9 */
 static const struct ast_vbios_enhtable res_1360x768[] = {
 	{1792, 1360, 64, 112, 795, 768, 3, 6, VCLK85_5,		/* 60Hz */
@@ -293,10 +300,10 @@ static const struct ast_vbios_enhtable res_1600x900[] = {
 
 static const struct ast_vbios_enhtable res_1920x1080[] = {
 	{2200, 1920, 88, 44, 1125, 1080, 4, 5, VCLK148_5,	/* 60Hz */
-	 (SyncNP | Charx8Dot | LineCompareOff | WideScreenMode | NewModeInfo |
+	 (SyncPP | Charx8Dot | LineCompareOff | WideScreenMode | NewModeInfo |
 	  AST2500PreCatchCRT), 60, 1, 0x38 },
 	{2200, 1920, 88, 44, 1125, 1080, 4, 5, VCLK148_5,	/* 60Hz */
-	 (SyncNP | Charx8Dot | LineCompareOff | WideScreenMode | NewModeInfo |
+	 (SyncPP | Charx8Dot | LineCompareOff | WideScreenMode | NewModeInfo |
 	  AST2500PreCatchCRT), 0xFF, 1, 0x38 },
 };
 

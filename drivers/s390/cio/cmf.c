@@ -13,7 +13,7 @@
 #define KMSG_COMPONENT "cio"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -163,13 +163,15 @@ static inline u64 time_to_avg_nsec(u32 value, u32 count)
  */
 static inline void cmf_activate(void *area, unsigned int onoff)
 {
-	register void * __gpr2 asm("2");
-	register long __gpr1 asm("1");
-
-	__gpr2 = area;
-	__gpr1 = onoff;
 	/* activate channel measurement */
-	asm("schm" : : "d" (__gpr2), "d" (__gpr1) );
+	asm volatile(
+		"	lgr	1,%[r1]\n"
+		"	lgr	2,%[mbo]\n"
+		"	schm\n"
+		:
+		: [r1] "d" ((unsigned long)onoff),
+		  [mbo] "d" (virt_to_phys(area))
+		: "1", "2");
 }
 
 static int set_schib(struct ccw_device *cdev, u32 mme, int mbfc,
@@ -500,8 +502,7 @@ static int alloc_cmb(struct ccw_device *cdev)
 		WARN_ON(!list_empty(&cmb_area.list));
 
 		spin_unlock(&cmb_area.lock);
-		mem = (void*)__get_free_pages(GFP_KERNEL | GFP_DMA,
-				 get_order(size));
+		mem = (void *)__get_free_pages(GFP_KERNEL, get_order(size));
 		spin_lock(&cmb_area.lock);
 
 		if (cmb_area.mem) {
@@ -1109,18 +1110,14 @@ static ssize_t cmb_enable_store(struct device *dev,
 }
 DEVICE_ATTR_RW(cmb_enable);
 
-int ccw_set_cmf(struct ccw_device *cdev, int enable)
-{
-	return cmbops->set(cdev, enable ? 2 : 0);
-}
-
 /**
  * enable_cmf() - switch on the channel measurement for a specific device
  *  @cdev:	The ccw device to be enabled
  *
- *  Returns %0 for success or a negative error value.
- *  Note: If this is called on a device for which channel measurement is already
- *	  enabled a reset of the measurement data is triggered.
+ *  Enable channel measurements for @cdev. If this is called on a device
+ *  for which channel measurement is already enabled a reset of the
+ *  measurement data is triggered.
+ *  Returns: %0 for success or a negative error value.
  *  Context:
  *    non-atomic
  */
@@ -1160,7 +1157,7 @@ out_unlock:
  * __disable_cmf() - switch off the channel measurement for a specific device
  *  @cdev:	The ccw device to be disabled
  *
- *  Returns %0 for success or a negative error value.
+ *  Returns: %0 for success or a negative error value.
  *
  *  Context:
  *    non-atomic, device_lock() held.
@@ -1184,7 +1181,7 @@ int __disable_cmf(struct ccw_device *cdev)
  * disable_cmf() - switch off the channel measurement for a specific device
  *  @cdev:	The ccw device to be disabled
  *
- *  Returns %0 for success or a negative error value.
+ *  Returns: %0 for success or a negative error value.
  *
  *  Context:
  *    non-atomic
@@ -1205,7 +1202,7 @@ int disable_cmf(struct ccw_device *cdev)
  * @cdev:	the channel to be read
  * @index:	the index of the value to be read
  *
- * Returns the value read or %0 if the value cannot be read.
+ * Returns: The value read or %0 if the value cannot be read.
  *
  *  Context:
  *    any
@@ -1220,7 +1217,7 @@ u64 cmf_read(struct ccw_device *cdev, int index)
  * @cdev:	the channel to be read
  * @data:	a pointer to a data block that will be filled
  *
- * Returns %0 on success, a negative error value otherwise.
+ * Returns: %0 on success, a negative error value otherwise.
  *
  *  Context:
  *    any

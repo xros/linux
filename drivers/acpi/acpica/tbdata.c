@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: tbdata - Table manager data structure functions
  *
+ * Copyright (C) 2000 - 2023, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -123,14 +89,27 @@ acpi_tb_init_table_descriptor(struct acpi_table_desc *table_desc,
 {
 
 	/*
-	 * Initialize the table descriptor. Set the pointer to NULL, since the
-	 * table is not fully mapped at this time.
+	 * Initialize the table descriptor. Set the pointer to NULL for external
+	 * tables, since the table is not fully mapped at this time.
 	 */
 	memset(table_desc, 0, sizeof(struct acpi_table_desc));
 	table_desc->address = address;
 	table_desc->length = table->length;
 	table_desc->flags = flags;
 	ACPI_MOVE_32_TO_32(table_desc->signature.ascii, table->signature);
+
+	switch (table_desc->flags & ACPI_TABLE_ORIGIN_MASK) {
+	case ACPI_TABLE_ORIGIN_INTERNAL_VIRTUAL:
+	case ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL:
+
+		table_desc->pointer = table;
+		break;
+
+	case ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL:
+	default:
+
+		break;
+	}
 }
 
 /*******************************************************************************
@@ -166,9 +145,7 @@ acpi_tb_acquire_table(struct acpi_table_desc *table_desc,
 	case ACPI_TABLE_ORIGIN_INTERNAL_VIRTUAL:
 	case ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL:
 
-		table = ACPI_CAST_PTR(struct acpi_table_header,
-				      ACPI_PHYSADDR_TO_PTR(table_desc->
-							   address));
+		table = table_desc->pointer;
 		break;
 
 	default:
@@ -230,6 +207,8 @@ acpi_tb_release_table(struct acpi_table_header *table,
  * PARAMETERS:  table_desc          - Table descriptor to be acquired
  *              address             - Address of the table
  *              flags               - Allocation flags of the table
+ *              table               - Pointer to the table (required for virtual
+ *                                    origins, optional for physical)
  *
  * RETURN:      Status
  *
@@ -242,49 +221,52 @@ acpi_tb_release_table(struct acpi_table_header *table,
 
 acpi_status
 acpi_tb_acquire_temp_table(struct acpi_table_desc *table_desc,
-			   acpi_physical_address address, u8 flags)
+			   acpi_physical_address address,
+			   u8 flags, struct acpi_table_header *table)
 {
-	struct acpi_table_header *table_header;
+	u8 mapped_table = FALSE;
 
 	switch (flags & ACPI_TABLE_ORIGIN_MASK) {
 	case ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL:
 
 		/* Get the length of the full table from the header */
 
-		table_header =
-		    acpi_os_map_memory(address,
-				       sizeof(struct acpi_table_header));
-		if (!table_header) {
-			return (AE_NO_MEMORY);
+		if (!table) {
+			table =
+			    acpi_os_map_memory(address,
+					       sizeof(struct
+						      acpi_table_header));
+			if (!table) {
+				return (AE_NO_MEMORY);
+			}
+
+			mapped_table = TRUE;
 		}
 
-		acpi_tb_init_table_descriptor(table_desc, address, flags,
-					      table_header);
-		acpi_os_unmap_memory(table_header,
-				     sizeof(struct acpi_table_header));
-		return (AE_OK);
+		break;
 
 	case ACPI_TABLE_ORIGIN_INTERNAL_VIRTUAL:
 	case ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL:
 
-		table_header = ACPI_CAST_PTR(struct acpi_table_header,
-					     ACPI_PHYSADDR_TO_PTR(address));
-		if (!table_header) {
-			return (AE_NO_MEMORY);
+		if (!table) {
+			return (AE_BAD_PARAMETER);
 		}
 
-		acpi_tb_init_table_descriptor(table_desc, address, flags,
-					      table_header);
-		return (AE_OK);
+		break;
 
 	default:
 
-		break;
+		/* Table is not valid yet */
+
+		return (AE_NO_MEMORY);
 	}
 
-	/* Table is not valid yet */
+	acpi_tb_init_table_descriptor(table_desc, address, flags, table);
+	if (mapped_table) {
+		acpi_os_unmap_memory(table, sizeof(struct acpi_table_header));
+	}
 
-	return (AE_NO_MEMORY);
+	return (AE_OK);
 }
 
 /*******************************************************************************
@@ -369,7 +351,19 @@ void acpi_tb_invalidate_table(struct acpi_table_desc *table_desc)
 
 	acpi_tb_release_table(table_desc->pointer, table_desc->length,
 			      table_desc->flags);
-	table_desc->pointer = NULL;
+
+	switch (table_desc->flags & ACPI_TABLE_ORIGIN_MASK) {
+	case ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL:
+
+		table_desc->pointer = NULL;
+		break;
+
+	case ACPI_TABLE_ORIGIN_INTERNAL_VIRTUAL:
+	case ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL:
+	default:
+
+		break;
+	}
 
 	return_VOID;
 }
@@ -514,7 +508,8 @@ acpi_tb_verify_temp_table(struct acpi_table_desc *table_desc,
 
 	/* If a particular signature is expected (DSDT/FACS), it must match */
 
-	if (signature && !ACPI_COMPARE_NAME(&table_desc->signature, signature)) {
+	if (signature &&
+	    !ACPI_COMPARE_NAMESEG(&table_desc->signature, signature)) {
 		ACPI_BIOS_ERROR((AE_INFO,
 				 "Invalid signature 0x%X for ACPI table, expected [%s]",
 				 table_desc->signature.integer, signature));
@@ -527,7 +522,7 @@ acpi_tb_verify_temp_table(struct acpi_table_desc *table_desc,
 		/* Verify the checksum */
 
 		status =
-		    acpi_tb_verify_checksum(table_desc->pointer,
+		    acpi_ut_verify_checksum(table_desc->pointer,
 					    table_desc->length);
 		if (ACPI_FAILURE(status)) {
 			ACPI_EXCEPTION((AE_INFO, AE_NO_MEMORY,
@@ -550,9 +545,9 @@ acpi_tb_verify_temp_table(struct acpi_table_desc *table_desc,
 			    acpi_tb_check_duplication(table_desc, table_index);
 			if (ACPI_FAILURE(status)) {
 				if (status != AE_CTRL_TERMINATE) {
-					ACPI_EXCEPTION((AE_INFO, AE_NO_MEMORY,
+					ACPI_EXCEPTION((AE_INFO, status,
 							"%4.4s 0x%8.8X%8.8X"
-							" Table is duplicated",
+							" Table is already loaded",
 							acpi_ut_valid_nameseg
 							(table_desc->signature.
 							 ascii) ? table_desc->
@@ -783,6 +778,7 @@ acpi_status acpi_tb_delete_namespace_by_owner(u32 table_index)
 	if (ACPI_FAILURE(status)) {
 		return_ACPI_STATUS(status);
 	}
+
 	acpi_ns_delete_namespace_by_owner(owner_id);
 	acpi_ut_release_write_lock(&acpi_gbl_namespace_rw_lock);
 	return_ACPI_STATUS(status);
@@ -965,12 +961,8 @@ acpi_tb_load_table(u32 table_index, struct acpi_namespace_node *parent_node)
 	}
 
 	status = acpi_ns_load_table(table_index, parent_node);
-
-	/* Execute any module-level code that was found in the table */
-
-	if (!acpi_gbl_parse_table_as_term_list
-	    && acpi_gbl_group_module_level_code) {
-		acpi_ns_exec_module_code_list();
+	if (ACPI_FAILURE(status)) {
+		return_ACPI_STATUS(status);
 	}
 
 	/*
@@ -995,6 +987,9 @@ acpi_tb_load_table(u32 table_index, struct acpi_namespace_node *parent_node)
  *
  * PARAMETERS:  address                 - Physical address of the table
  *              flags                   - Allocation flags of the table
+ *              table                   - Pointer to the table (required for
+ *                                        virtual origins, optional for
+ *                                        physical)
  *              override                - Whether override should be performed
  *              table_index             - Where table index is returned
  *
@@ -1006,7 +1001,9 @@ acpi_tb_load_table(u32 table_index, struct acpi_namespace_node *parent_node)
 
 acpi_status
 acpi_tb_install_and_load_table(acpi_physical_address address,
-			       u8 flags, u8 override, u32 *table_index)
+			       u8 flags,
+			       struct acpi_table_header *table,
+			       u8 override, u32 *table_index)
 {
 	acpi_status status;
 	u32 i;
@@ -1015,7 +1012,7 @@ acpi_tb_install_and_load_table(acpi_physical_address address,
 
 	/* Install the table and load it into the namespace */
 
-	status = acpi_tb_install_standard_table(address, flags, TRUE,
+	status = acpi_tb_install_standard_table(address, flags, table, TRUE,
 						override, &i);
 	if (ACPI_FAILURE(status)) {
 		goto exit;

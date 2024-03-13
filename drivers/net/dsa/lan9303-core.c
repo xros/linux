@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2017 Pengutronix, Juergen Borleis <kernel@pengutronix.de>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -17,11 +8,16 @@
 #include <linux/regmap.h>
 #include <linux/mutex.h>
 #include <linux/mii.h>
+#include <linux/of.h>
 #include <linux/phy.h>
 #include <linux/if_bridge.h>
+#include <linux/if_vlan.h>
 #include <linux/etherdevice.h>
 
 #include "lan9303.h"
+
+/* For the LAN9303 and LAN9354, only port 0 is an XMII port. */
+#define IS_PORT_XMII(port)	((port) == 0)
 
 #define LAN9303_NUM_PORTS 3
 
@@ -30,6 +26,10 @@
  */
 #define LAN9303_CHIP_REV 0x14
 # define LAN9303_CHIP_ID 0x9303
+# define LAN9352_CHIP_ID 0x9352
+# define LAN9353_CHIP_ID 0x9353
+# define LAN9354_CHIP_ID 0x9354
+# define LAN9355_CHIP_ID 0x9355
 #define LAN9303_IRQ_CFG 0x15
 # define LAN9303_IRQ_CFG_IRQ_ENABLE BIT(8)
 # define LAN9303_IRQ_CFG_IRQ_POL BIT(4)
@@ -40,6 +40,7 @@
 #define LAN9303_INT_EN 0x17
 # define LAN9303_INT_EN_PHY_INT2_EN BIT(27)
 # define LAN9303_INT_EN_PHY_INT1_EN BIT(26)
+#define LAN9303_BYTE_ORDER 0x19
 #define LAN9303_HW_CFG 0x1D
 # define LAN9303_HW_CFG_READY BIT(27)
 # define LAN9303_HW_CFG_AMDX_EN_PORT2 BIT(26)
@@ -53,6 +54,9 @@
 #define LAN9303_MANUAL_FC_1 0x68
 #define LAN9303_MANUAL_FC_2 0x69
 #define LAN9303_MANUAL_FC_0 0x6a
+# define LAN9303_BP_EN BIT(6)
+# define LAN9303_RX_FC_EN BIT(2)
+# define LAN9303_TX_FC_EN BIT(1)
 #define LAN9303_SWITCH_CSR_DATA 0x6b
 #define LAN9303_SWITCH_CSR_CMD 0x6c
 #define LAN9303_SWITCH_CSR_CMD_BUSY BIT(31)
@@ -228,6 +232,13 @@ const struct regmap_access_table lan9303_register_set = {
 };
 EXPORT_SYMBOL(lan9303_register_set);
 
+/* Flow Control registers indexed by port number */
+static unsigned int flow_ctl_reg[] = {
+	LAN9303_MANUAL_FC_0,
+	LAN9303_MANUAL_FC_1,
+	LAN9303_MANUAL_FC_2
+};
+
 static int lan9303_read(struct regmap *regmap, unsigned int offset, u32 *reg)
 {
 	int ret, i;
@@ -247,6 +258,28 @@ static int lan9303_read(struct regmap *regmap, unsigned int offset, u32 *reg)
 	}
 
 	return -EIO;
+}
+
+static int lan9303_read_wait(struct lan9303 *chip, int offset, u32 mask)
+{
+	int i;
+
+	for (i = 0; i < 25; i++) {
+		u32 reg;
+		int ret;
+
+		ret = lan9303_read(chip->regmap, offset, &reg);
+		if (ret) {
+			dev_err(chip->dev, "%s failed to read offset %d: %d\n",
+				__func__, offset, ret);
+			return ret;
+		}
+		if (!(reg & mask))
+			return 0;
+		usleep_range(1000, 2000);
+	}
+
+	return -ETIMEDOUT;
 }
 
 static int lan9303_virt_phy_reg_read(struct lan9303 *chip, int regnum)
@@ -274,22 +307,8 @@ static int lan9303_virt_phy_reg_write(struct lan9303 *chip, int regnum, u16 val)
 
 static int lan9303_indirect_phy_wait_for_completion(struct lan9303 *chip)
 {
-	int ret, i;
-	u32 reg;
-
-	for (i = 0; i < 25; i++) {
-		ret = lan9303_read(chip->regmap, LAN9303_PMI_ACCESS, &reg);
-		if (ret) {
-			dev_err(chip->dev,
-				"Failed to read pmi access status: %d\n", ret);
-			return ret;
-		}
-		if (!(reg & LAN9303_PMI_ACCESS_MII_BUSY))
-			return 0;
-		usleep_range(1000, 2000);
-	}
-
-	return -EIO;
+	return lan9303_read_wait(chip, LAN9303_PMI_ACCESS,
+				 LAN9303_PMI_ACCESS_MII_BUSY);
 }
 
 static int lan9303_indirect_phy_read(struct lan9303 *chip, int addr, int regnum)
@@ -366,22 +385,8 @@ EXPORT_SYMBOL_GPL(lan9303_indirect_phy_ops);
 
 static int lan9303_switch_wait_for_completion(struct lan9303 *chip)
 {
-	int ret, i;
-	u32 reg;
-
-	for (i = 0; i < 25; i++) {
-		ret = lan9303_read(chip->regmap, LAN9303_SWITCH_CSR_CMD, &reg);
-		if (ret) {
-			dev_err(chip->dev,
-				"Failed to read csr command status: %d\n", ret);
-			return ret;
-		}
-		if (!(reg & LAN9303_SWITCH_CSR_CMD_BUSY))
-			return 0;
-		usleep_range(1000, 2000);
-	}
-
-	return -EIO;
+	return lan9303_read_wait(chip, LAN9303_SWITCH_CSR_CMD,
+				 LAN9303_SWITCH_CSR_CMD_BUSY);
 }
 
 static int lan9303_write_switch_reg(struct lan9303 *chip, u16 regnum, u32 val)
@@ -485,7 +490,8 @@ static int lan9303_detect_phy_setup(struct lan9303 *chip)
 {
 	int reg;
 
-	/* depending on the 'phy_addr_sel_strap' setting, the three phys are
+	/* Calculate chip->phy_addr_base:
+	 * Depending on the 'phy_addr_sel_strap' setting, the three phys are
 	 * using IDs 0-1-2 or IDs 1-2-3. We cannot read back the
 	 * 'phy_addr_sel_strap' setting directly, so we need a test, which
 	 * configuration is active:
@@ -500,13 +506,10 @@ static int lan9303_detect_phy_setup(struct lan9303 *chip)
 		return reg;
 	}
 
-	if ((reg != 0) && (reg != 0xffff))
-		chip->phy_addr_sel_strap = 1;
-	else
-		chip->phy_addr_sel_strap = 0;
+	chip->phy_addr_base = reg != 0 && reg != 0xffff;
 
 	dev_dbg(chip->dev, "Phy setup '%s' detected\n",
-		chip->phy_addr_sel_strap ? "1-2-3" : "0-1-2");
+		chip->phy_addr_base ? "1-2-3" : "0-1-2");
 
 	return 0;
 }
@@ -546,20 +549,19 @@ lan9303_alr_cache_find_mac(struct lan9303 *chip, const u8 *mac_addr)
 	return NULL;
 }
 
-/* Wait a while until mask & reg == value. Otherwise return timeout. */
-static int lan9303_csr_reg_wait(struct lan9303 *chip, int regno,
-				int mask, char value)
+static int lan9303_csr_reg_wait(struct lan9303 *chip, int regno, u32 mask)
 {
 	int i;
 
-	for (i = 0; i < 0x1000; i++) {
+	for (i = 0; i < 25; i++) {
 		u32 reg;
 
 		lan9303_read_switch_reg(chip, regno, &reg);
-		if ((reg & mask) == value)
+		if (!(reg & mask))
 			return 0;
 		usleep_range(1000, 2000);
 	}
+
 	return -ETIMEDOUT;
 }
 
@@ -569,20 +571,20 @@ static int lan9303_alr_make_entry_raw(struct lan9303 *chip, u32 dat0, u32 dat1)
 	lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_WR_DAT_1, dat1);
 	lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD,
 				 LAN9303_ALR_CMD_MAKE_ENTRY);
-	lan9303_csr_reg_wait(chip, LAN9303_SWE_ALR_CMD_STS, ALR_STS_MAKE_PEND,
-			     0);
+	lan9303_csr_reg_wait(chip, LAN9303_SWE_ALR_CMD_STS, ALR_STS_MAKE_PEND);
 	lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD, 0);
 
 	return 0;
 }
 
-typedef void alr_loop_cb_t(struct lan9303 *chip, u32 dat0, u32 dat1,
-			   int portmap, void *ctx);
+typedef int alr_loop_cb_t(struct lan9303 *chip, u32 dat0, u32 dat1,
+			  int portmap, void *ctx);
 
-static void lan9303_alr_loop(struct lan9303 *chip, alr_loop_cb_t *cb, void *ctx)
+static int lan9303_alr_loop(struct lan9303 *chip, alr_loop_cb_t *cb, void *ctx)
 {
-	int i;
+	int ret = 0, i;
 
+	mutex_lock(&chip->alr_mutex);
 	lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD,
 				 LAN9303_ALR_CMD_GET_FIRST);
 	lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD, 0);
@@ -600,12 +602,17 @@ static void lan9303_alr_loop(struct lan9303 *chip, alr_loop_cb_t *cb, void *ctx)
 						LAN9303_ALR_DAT1_PORT_BITOFFS;
 		portmap = alrport_2_portmap[alrport];
 
-		cb(chip, dat0, dat1, portmap, ctx);
+		ret = cb(chip, dat0, dat1, portmap, ctx);
+		if (ret)
+			break;
 
 		lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD,
 					 LAN9303_ALR_CMD_GET_NEXT);
 		lan9303_write_switch_reg(chip, LAN9303_SWE_ALR_CMD, 0);
 	}
+	mutex_unlock(&chip->alr_mutex);
+
+	return ret;
 }
 
 static void alr_reg_to_mac(u32 dat0, u32 dat1, u8 mac[6])
@@ -623,18 +630,20 @@ struct del_port_learned_ctx {
 };
 
 /* Clear learned (non-static) entry on given port */
-static void alr_loop_cb_del_port_learned(struct lan9303 *chip, u32 dat0,
-					 u32 dat1, int portmap, void *ctx)
+static int alr_loop_cb_del_port_learned(struct lan9303 *chip, u32 dat0,
+					u32 dat1, int portmap, void *ctx)
 {
 	struct del_port_learned_ctx *del_ctx = ctx;
 	int port = del_ctx->port;
 
 	if (((BIT(port) & portmap) == 0) || (dat1 & LAN9303_ALR_DAT1_STATIC))
-		return;
+		return 0;
 
 	/* learned entries has only one port, we can just delete */
 	dat1 &= ~LAN9303_ALR_DAT1_VALID; /* delete entry */
 	lan9303_alr_make_entry_raw(chip, dat0, dat1);
+
+	return 0;
 }
 
 struct port_fdb_dump_ctx {
@@ -643,19 +652,19 @@ struct port_fdb_dump_ctx {
 	dsa_fdb_dump_cb_t *cb;
 };
 
-static void alr_loop_cb_fdb_port_dump(struct lan9303 *chip, u32 dat0,
-				      u32 dat1, int portmap, void *ctx)
+static int alr_loop_cb_fdb_port_dump(struct lan9303 *chip, u32 dat0,
+				     u32 dat1, int portmap, void *ctx)
 {
 	struct port_fdb_dump_ctx *dump_ctx = ctx;
 	u8 mac[ETH_ALEN];
 	bool is_static;
 
 	if ((BIT(dump_ctx->port) & portmap) == 0)
-		return;
+		return 0;
 
 	alr_reg_to_mac(dat0, dat1, mac);
 	is_static = !!(dat1 & LAN9303_ALR_DAT1_STATIC);
-	dump_ctx->cb(mac, 0, is_static, dump_ctx->data);
+	return dump_ctx->cb(mac, 0, is_static, dump_ctx->data);
 }
 
 /* Set a static ALR entry. Delete entry if port_map is zero */
@@ -694,16 +703,20 @@ static int lan9303_alr_add_port(struct lan9303 *chip, const u8 *mac, int port,
 {
 	struct lan9303_alr_cache_entry *entr;
 
+	mutex_lock(&chip->alr_mutex);
 	entr = lan9303_alr_cache_find_mac(chip, mac);
 	if (!entr) { /*New entry */
 		entr = lan9303_alr_cache_find_free(chip);
-		if (!entr)
+		if (!entr) {
+			mutex_unlock(&chip->alr_mutex);
 			return -ENOSPC;
+		}
 		ether_addr_copy(entr->mac_addr, mac);
 	}
 	entr->port_map |= BIT(port);
 	entr->stp_override = stp_override;
 	lan9303_alr_set_entry(chip, mac, entr->port_map, stp_override);
+	mutex_unlock(&chip->alr_mutex);
 
 	return 0;
 }
@@ -713,15 +726,18 @@ static int lan9303_alr_del_port(struct lan9303 *chip, const u8 *mac, int port)
 {
 	struct lan9303_alr_cache_entry *entr;
 
+	mutex_lock(&chip->alr_mutex);
 	entr = lan9303_alr_cache_find_mac(chip, mac);
 	if (!entr)
-		return 0;  /* no static entry found */
+		goto out;  /* no static entry found */
 
 	entr->port_map &= ~BIT(port);
 	if (entr->port_map == 0) /* zero means its free again */
 		eth_zero_addr(entr->mac_addr);
 	lan9303_alr_set_entry(chip, mac, entr->port_map, entr->stp_override);
 
+out:
+	mutex_unlock(&chip->alr_mutex);
 	return 0;
 }
 
@@ -818,18 +834,16 @@ static void lan9303_bridge_ports(struct lan9303 *chip)
 	lan9303_alr_add_port(chip, eth_stp_addr, 0, true);
 }
 
-static int lan9303_handle_reset(struct lan9303 *chip)
+static void lan9303_handle_reset(struct lan9303 *chip)
 {
 	if (!chip->reset_gpio)
-		return 0;
+		return;
 
 	if (chip->reset_duration != 0)
 		msleep(chip->reset_duration);
 
 	/* release (deassert) reset and activate the device */
 	gpiod_set_value_cansleep(chip->reset_gpio, 0);
-
-	return 0;
 }
 
 /* stop processing packets for all ports */
@@ -856,17 +870,14 @@ static int lan9303_check_device(struct lan9303 *chip)
 	if (ret) {
 		dev_err(chip->dev, "failed to read chip revision register: %d\n",
 			ret);
-		if (!chip->reset_gpio) {
-			dev_dbg(chip->dev,
-				"hint: maybe failed due to missing reset GPIO\n");
-		}
 		return ret;
 	}
 
-	if ((reg >> 16) != LAN9303_CHIP_ID) {
-		dev_err(chip->dev, "expecting LAN9303 chip, but found: %X\n",
+	if (((reg >> 16) != LAN9303_CHIP_ID) &&
+	    ((reg >> 16) != LAN9354_CHIP_ID)) {
+		dev_err(chip->dev, "unexpected device found: LAN%4.4X\n",
 			reg >> 16);
-		return ret;
+		return -ENODEV;
 	}
 
 	/* The default state of the LAN9303 device is to forward packets between
@@ -880,7 +891,7 @@ static int lan9303_check_device(struct lan9303 *chip)
 	if (ret)
 		dev_warn(chip->dev, "failed to disable switching %d\n", ret);
 
-	dev_info(chip->dev, "Found LAN9303 rev. %u\n", reg & 0xffff);
+	dev_info(chip->dev, "Found LAN%4.4X rev. %u\n", (reg >> 16), reg & 0xffff);
 
 	ret = lan9303_detect_phy_setup(chip);
 	if (ret) {
@@ -895,7 +906,8 @@ static int lan9303_check_device(struct lan9303 *chip)
 /* ---------------------------- DSA -----------------------------------*/
 
 static enum dsa_tag_protocol lan9303_get_tag_protocol(struct dsa_switch *ds,
-						      int port)
+						      int port,
+						      enum dsa_tag_protocol mp)
 {
 	return DSA_TAG_PROTO_LAN9303;
 }
@@ -904,11 +916,23 @@ static int lan9303_setup(struct dsa_switch *ds)
 {
 	struct lan9303 *chip = ds->priv;
 	int ret;
+	u32 reg;
 
 	/* Make sure that port 0 is the cpu port */
 	if (!dsa_is_cpu_port(ds, 0)) {
 		dev_err(chip->dev, "port 0 is not the CPU port\n");
 		return -EINVAL;
+	}
+
+	/* Virtual Phy: Remove Turbo 200Mbit mode */
+	ret = lan9303_read(chip->regmap, LAN9303_VIRT_SPECIAL_CTRL, &reg);
+	if (ret)
+		return (ret);
+
+	/* Clear the TURBO Mode bit if it was set. */
+	if (reg & LAN9303_VIRT_SPECIAL_TURBO) {
+		reg &= ~LAN9303_VIRT_SPECIAL_TURBO;
+		regmap_write(chip->regmap, LAN9303_VIRT_SPECIAL_CTRL, reg);
 	}
 
 	ret = lan9303_setup_tagging(chip);
@@ -963,7 +987,7 @@ static const struct lan9303_mib_desc lan9303_mib[] = {
 	{ .offset = LAN9303_MAC_TX_BRDCST_CNT_0, .name = "TxBroad", },
 	{ .offset = LAN9303_MAC_TX_PAUSE_CNT_0, .name = "TxPause", },
 	{ .offset = LAN9303_MAC_TX_MULCST_CNT_0, .name = "TxMulti", },
-	{ .offset = LAN9303_MAC_RX_UNDSZE_CNT_0, .name = "TxUnderRun", },
+	{ .offset = LAN9303_MAC_RX_UNDSZE_CNT_0, .name = "RxShort", },
 	{ .offset = LAN9303_MAC_TX_64_CNT_0, .name = "Tx64Byte", },
 	{ .offset = LAN9303_MAC_TX_127_CNT_0, .name = "Tx128Byte", },
 	{ .offset = LAN9303_MAC_TX_255_CNT_0, .name = "Tx256Byte", },
@@ -980,9 +1004,13 @@ static const struct lan9303_mib_desc lan9303_mib[] = {
 	{ .offset = LAN9303_MAC_TX_LATECOL_0, .name = "TxLateCol", },
 };
 
-static void lan9303_get_strings(struct dsa_switch *ds, int port, uint8_t *data)
+static void lan9303_get_strings(struct dsa_switch *ds, int port,
+				u32 stringset, uint8_t *data)
 {
 	unsigned int u;
+
+	if (stringset != ETH_SS_STATS)
+		return;
 
 	for (u = 0; u < ARRAY_SIZE(lan9303_mib); u++) {
 		strncpy(data + u * ETH_GSTRING_LEN, lan9303_mib[u].name,
@@ -1003,22 +1031,27 @@ static void lan9303_get_ethtool_stats(struct dsa_switch *ds, int port,
 		ret = lan9303_read_switch_port(
 			chip, port, lan9303_mib[u].offset, &reg);
 
-		if (ret)
+		if (ret) {
 			dev_warn(chip->dev, "Reading status port %d reg %u failed\n",
 				 port, lan9303_mib[u].offset);
+			reg = 0;
+		}
 		data[u] = reg;
 	}
 }
 
-static int lan9303_get_sset_count(struct dsa_switch *ds)
+static int lan9303_get_sset_count(struct dsa_switch *ds, int port, int sset)
 {
+	if (sset != ETH_SS_STATS)
+		return 0;
+
 	return ARRAY_SIZE(lan9303_mib);
 }
 
 static int lan9303_phy_read(struct dsa_switch *ds, int phy, int regnum)
 {
 	struct lan9303 *chip = ds->priv;
-	int phy_base = chip->phy_addr_sel_strap;
+	int phy_base = chip->phy_addr_base;
 
 	if (phy == phy_base)
 		return lan9303_virt_phy_reg_read(chip, regnum);
@@ -1032,7 +1065,7 @@ static int lan9303_phy_write(struct dsa_switch *ds, int phy, int regnum,
 			     u16 val)
 {
 	struct lan9303 *chip = ds->priv;
-	int phy_base = chip->phy_addr_sel_strap;
+	int phy_base = chip->phy_addr_base;
 
 	if (phy == phy_base)
 		return lan9303_virt_phy_reg_write(chip, regnum, val);
@@ -1042,68 +1075,43 @@ static int lan9303_phy_write(struct dsa_switch *ds, int phy, int regnum,
 	return chip->ops->phy_write(chip, phy, regnum, val);
 }
 
-static void lan9303_adjust_link(struct dsa_switch *ds, int port,
-				struct phy_device *phydev)
-{
-	struct lan9303 *chip = ds->priv;
-	int ctl, res;
-
-	if (!phy_is_pseudo_fixed_link(phydev))
-		return;
-
-	ctl = lan9303_phy_read(ds, port, MII_BMCR);
-
-	ctl &= ~BMCR_ANENABLE;
-
-	if (phydev->speed == SPEED_100)
-		ctl |= BMCR_SPEED100;
-	else if (phydev->speed == SPEED_10)
-		ctl &= ~BMCR_SPEED100;
-	else
-		dev_err(ds->dev, "unsupported speed: %d\n", phydev->speed);
-
-	if (phydev->duplex == DUPLEX_FULL)
-		ctl |= BMCR_FULLDPLX;
-	else
-		ctl &= ~BMCR_FULLDPLX;
-
-	res =  lan9303_phy_write(ds, port, MII_BMCR, ctl);
-
-	if (port == chip->phy_addr_sel_strap) {
-		/* Virtual Phy: Remove Turbo 200Mbit mode */
-		lan9303_read(chip->regmap, LAN9303_VIRT_SPECIAL_CTRL, &ctl);
-
-		ctl &= ~LAN9303_VIRT_SPECIAL_TURBO;
-		res =  regmap_write(chip->regmap,
-				    LAN9303_VIRT_SPECIAL_CTRL, ctl);
-	}
-}
-
 static int lan9303_port_enable(struct dsa_switch *ds, int port,
 			       struct phy_device *phy)
 {
+	struct dsa_port *dp = dsa_to_port(ds, port);
 	struct lan9303 *chip = ds->priv;
+
+	if (!dsa_port_is_user(dp))
+		return 0;
+
+	vlan_vid_add(dsa_port_to_conduit(dp), htons(ETH_P_8021Q), port);
 
 	return lan9303_enable_processing_port(chip, port);
 }
 
-static void lan9303_port_disable(struct dsa_switch *ds, int port,
-				 struct phy_device *phy)
+static void lan9303_port_disable(struct dsa_switch *ds, int port)
 {
+	struct dsa_port *dp = dsa_to_port(ds, port);
 	struct lan9303 *chip = ds->priv;
 
+	if (!dsa_port_is_user(dp))
+		return;
+
+	vlan_vid_del(dsa_port_to_conduit(dp), htons(ETH_P_8021Q), port);
+
 	lan9303_disable_processing_port(chip, port);
-	lan9303_phy_write(ds, chip->phy_addr_sel_strap + port,
-			  MII_BMCR, BMCR_PDOWN);
+	lan9303_phy_write(ds, chip->phy_addr_base + port, MII_BMCR, BMCR_PDOWN);
 }
 
 static int lan9303_port_bridge_join(struct dsa_switch *ds, int port,
-				    struct net_device *br)
+				    struct dsa_bridge bridge,
+				    bool *tx_fwd_offload,
+				    struct netlink_ext_ack *extack)
 {
 	struct lan9303 *chip = ds->priv;
 
 	dev_dbg(chip->dev, "%s(port %d)\n", __func__, port);
-	if (dsa_to_port(ds, 1)->bridge_dev == dsa_to_port(ds, 2)->bridge_dev) {
+	if (dsa_port_bridge_same(dsa_to_port(ds, 1), dsa_to_port(ds, 2))) {
 		lan9303_bridge_ports(chip);
 		chip->is_bridged = true;  /* unleash stp_state_set() */
 	}
@@ -1112,7 +1120,7 @@ static int lan9303_port_bridge_join(struct dsa_switch *ds, int port,
 }
 
 static void lan9303_port_bridge_leave(struct dsa_switch *ds, int port,
-				      struct net_device *br)
+				      struct dsa_bridge bridge)
 {
 	struct lan9303 *chip = ds->priv;
 
@@ -1175,26 +1183,23 @@ static void lan9303_port_fast_age(struct dsa_switch *ds, int port)
 }
 
 static int lan9303_port_fdb_add(struct dsa_switch *ds, int port,
-				const unsigned char *addr, u16 vid)
+				const unsigned char *addr, u16 vid,
+				struct dsa_db db)
 {
 	struct lan9303 *chip = ds->priv;
 
 	dev_dbg(chip->dev, "%s(%d, %pM, %d)\n", __func__, port, addr, vid);
-	if (vid)
-		return -EOPNOTSUPP;
 
 	return lan9303_alr_add_port(chip, addr, port, false);
 }
 
 static int lan9303_port_fdb_del(struct dsa_switch *ds, int port,
-				const unsigned char *addr, u16 vid)
-
+				const unsigned char *addr, u16 vid,
+				struct dsa_db db)
 {
 	struct lan9303 *chip = ds->priv;
 
 	dev_dbg(chip->dev, "%s(%d, %pM, %d)\n", __func__, port, addr, vid);
-	if (vid)
-		return -EOPNOTSUPP;
 	lan9303_alr_del_port(chip, addr, port);
 
 	return 0;
@@ -1211,14 +1216,11 @@ static int lan9303_port_fdb_dump(struct dsa_switch *ds, int port,
 	};
 
 	dev_dbg(chip->dev, "%s(%d)\n", __func__, port);
-	lan9303_alr_loop(chip, alr_loop_cb_fdb_port_dump, &dump_ctx);
-
-	return 0;
+	return lan9303_alr_loop(chip, alr_loop_cb_fdb_port_dump, &dump_ctx);
 }
 
 static int lan9303_port_mdb_prepare(struct dsa_switch *ds, int port,
-				    const struct switchdev_obj_port_mdb *mdb,
-				    struct switchdev_trans *trans)
+				    const struct switchdev_obj_port_mdb *mdb)
 {
 	struct lan9303 *chip = ds->priv;
 
@@ -1234,19 +1236,25 @@ static int lan9303_port_mdb_prepare(struct dsa_switch *ds, int port,
 	return 0;
 }
 
-static void lan9303_port_mdb_add(struct dsa_switch *ds, int port,
-				 const struct switchdev_obj_port_mdb *mdb,
-				 struct switchdev_trans *trans)
+static int lan9303_port_mdb_add(struct dsa_switch *ds, int port,
+				const struct switchdev_obj_port_mdb *mdb,
+				struct dsa_db db)
 {
 	struct lan9303 *chip = ds->priv;
+	int err;
+
+	err = lan9303_port_mdb_prepare(ds, port, mdb);
+	if (err)
+		return err;
 
 	dev_dbg(chip->dev, "%s(%d, %pM, %d)\n", __func__, port, mdb->addr,
 		mdb->vid);
-	lan9303_alr_add_port(chip, mdb->addr, port, false);
+	return lan9303_alr_add_port(chip, mdb->addr, port, false);
 }
 
 static int lan9303_port_mdb_del(struct dsa_switch *ds, int port,
-				const struct switchdev_obj_port_mdb *mdb)
+				const struct switchdev_obj_port_mdb *mdb,
+				struct dsa_db db)
 {
 	struct lan9303 *chip = ds->priv;
 
@@ -1259,51 +1267,121 @@ static int lan9303_port_mdb_del(struct dsa_switch *ds, int port,
 	return 0;
 }
 
+static void lan9303_phylink_get_caps(struct dsa_switch *ds, int port,
+				     struct phylink_config *config)
+{
+	struct lan9303 *chip = ds->priv;
+
+	dev_dbg(chip->dev, "%s(%d) entered.", __func__, port);
+
+	config->mac_capabilities = MAC_10 | MAC_100 | MAC_ASYM_PAUSE |
+				   MAC_SYM_PAUSE;
+
+	if (port == 0) {
+		__set_bit(PHY_INTERFACE_MODE_RMII,
+			  config->supported_interfaces);
+		__set_bit(PHY_INTERFACE_MODE_MII,
+			  config->supported_interfaces);
+	} else {
+		__set_bit(PHY_INTERFACE_MODE_INTERNAL,
+			  config->supported_interfaces);
+		/* Compatibility for phylib's default interface type when the
+		 * phy-mode property is absent
+		 */
+		__set_bit(PHY_INTERFACE_MODE_GMII,
+			  config->supported_interfaces);
+	}
+}
+
+static void lan9303_phylink_mac_link_up(struct dsa_switch *ds, int port,
+					unsigned int mode,
+					phy_interface_t interface,
+					struct phy_device *phydev, int speed,
+					int duplex, bool tx_pause,
+					bool rx_pause)
+{
+	struct lan9303 *chip = ds->priv;
+	u32 ctl;
+	u32 reg;
+
+	/* On this device, we are only interested in doing something here if
+	 * this is the xMII port. All other ports are 10/100 phys using MDIO
+	 * to control there link settings.
+	 */
+	if (!IS_PORT_XMII(port))
+		return;
+
+	/* Disable auto-negotiation and force the speed/duplex settings. */
+	ctl = lan9303_phy_read(ds, port, MII_BMCR);
+	ctl &= ~(BMCR_ANENABLE | BMCR_SPEED100 | BMCR_FULLDPLX);
+	if (speed == SPEED_100)
+		ctl |= BMCR_SPEED100;
+	if (duplex == DUPLEX_FULL)
+		ctl |= BMCR_FULLDPLX;
+	lan9303_phy_write(ds, port, MII_BMCR, ctl);
+
+	/* Force the flow control settings. */
+	lan9303_read(chip->regmap, flow_ctl_reg[port], &reg);
+	reg &= ~(LAN9303_BP_EN | LAN9303_RX_FC_EN | LAN9303_TX_FC_EN);
+	if (rx_pause)
+		reg |= (LAN9303_RX_FC_EN | LAN9303_BP_EN);
+	if (tx_pause)
+		reg |= LAN9303_TX_FC_EN;
+	regmap_write(chip->regmap, flow_ctl_reg[port], reg);
+}
+
 static const struct dsa_switch_ops lan9303_switch_ops = {
-	.get_tag_protocol = lan9303_get_tag_protocol,
-	.setup = lan9303_setup,
-	.get_strings = lan9303_get_strings,
-	.phy_read = lan9303_phy_read,
-	.phy_write = lan9303_phy_write,
-	.adjust_link = lan9303_adjust_link,
-	.get_ethtool_stats = lan9303_get_ethtool_stats,
-	.get_sset_count = lan9303_get_sset_count,
-	.port_enable = lan9303_port_enable,
-	.port_disable = lan9303_port_disable,
-	.port_bridge_join       = lan9303_port_bridge_join,
-	.port_bridge_leave      = lan9303_port_bridge_leave,
-	.port_stp_state_set     = lan9303_port_stp_state_set,
-	.port_fast_age          = lan9303_port_fast_age,
-	.port_fdb_add           = lan9303_port_fdb_add,
-	.port_fdb_del           = lan9303_port_fdb_del,
-	.port_fdb_dump          = lan9303_port_fdb_dump,
-	.port_mdb_prepare       = lan9303_port_mdb_prepare,
-	.port_mdb_add           = lan9303_port_mdb_add,
-	.port_mdb_del           = lan9303_port_mdb_del,
+	.get_tag_protocol	= lan9303_get_tag_protocol,
+	.setup			= lan9303_setup,
+	.get_strings		= lan9303_get_strings,
+	.phy_read		= lan9303_phy_read,
+	.phy_write		= lan9303_phy_write,
+	.phylink_get_caps	= lan9303_phylink_get_caps,
+	.phylink_mac_link_up	= lan9303_phylink_mac_link_up,
+	.get_ethtool_stats	= lan9303_get_ethtool_stats,
+	.get_sset_count		= lan9303_get_sset_count,
+	.port_enable		= lan9303_port_enable,
+	.port_disable		= lan9303_port_disable,
+	.port_bridge_join	= lan9303_port_bridge_join,
+	.port_bridge_leave	= lan9303_port_bridge_leave,
+	.port_stp_state_set	= lan9303_port_stp_state_set,
+	.port_fast_age		= lan9303_port_fast_age,
+	.port_fdb_add		= lan9303_port_fdb_add,
+	.port_fdb_del		= lan9303_port_fdb_del,
+	.port_fdb_dump		= lan9303_port_fdb_dump,
+	.port_mdb_add		= lan9303_port_mdb_add,
+	.port_mdb_del		= lan9303_port_mdb_del,
 };
 
 static int lan9303_register_switch(struct lan9303 *chip)
 {
-	chip->ds = dsa_switch_alloc(chip->dev, LAN9303_NUM_PORTS);
+	int base;
+
+	chip->ds = devm_kzalloc(chip->dev, sizeof(*chip->ds), GFP_KERNEL);
 	if (!chip->ds)
 		return -ENOMEM;
 
+	chip->ds->dev = chip->dev;
+	chip->ds->num_ports = LAN9303_NUM_PORTS;
 	chip->ds->priv = chip;
 	chip->ds->ops = &lan9303_switch_ops;
-	chip->ds->phys_mii_mask = chip->phy_addr_sel_strap ? 0xe : 0x7;
+	base = chip->phy_addr_base;
+	chip->ds->phys_mii_mask = GENMASK(LAN9303_NUM_PORTS - 1 + base, base);
 
 	return dsa_register_switch(chip->ds);
 }
 
-static void lan9303_probe_reset_gpio(struct lan9303 *chip,
+static int lan9303_probe_reset_gpio(struct lan9303 *chip,
 				     struct device_node *np)
 {
 	chip->reset_gpio = devm_gpiod_get_optional(chip->dev, "reset",
-						   GPIOD_OUT_LOW);
+						   GPIOD_OUT_HIGH);
+	if (IS_ERR(chip->reset_gpio))
+		return PTR_ERR(chip->reset_gpio);
 
-	if (IS_ERR(chip->reset_gpio)) {
+	if (!chip->reset_gpio) {
 		dev_dbg(chip->dev, "No reset GPIO defined\n");
-		return;
+		return 0;
 	}
 
 	chip->reset_duration = 200;
@@ -1318,19 +1396,36 @@ static void lan9303_probe_reset_gpio(struct lan9303 *chip,
 	/* A sane reset duration should not be longer than 1s */
 	if (chip->reset_duration > 1000)
 		chip->reset_duration = 1000;
+
+	return 0;
 }
 
 int lan9303_probe(struct lan9303 *chip, struct device_node *np)
 {
 	int ret;
+	u32 reg;
 
 	mutex_init(&chip->indirect_mutex);
+	mutex_init(&chip->alr_mutex);
 
-	lan9303_probe_reset_gpio(chip, np);
-
-	ret = lan9303_handle_reset(chip);
+	ret = lan9303_probe_reset_gpio(chip, np);
 	if (ret)
 		return ret;
+
+	lan9303_handle_reset(chip);
+
+	/* First read to the device.  This is a Dummy read to ensure MDIO */
+	/* access is in 32-bit sync. */
+	ret = lan9303_read(chip->regmap, LAN9303_BYTE_ORDER, &reg);
+	if (ret) {
+		dev_err(chip->dev, "failed to access the device: %d\n",
+			ret);
+		if (!chip->reset_gpio) {
+			dev_dbg(chip->dev,
+				"hint: maybe failed due to missing reset GPIO\n");
+		}
+		return ret;
+	}
 
 	ret = lan9303_check_device(chip);
 	if (ret)
@@ -1358,11 +1453,16 @@ int lan9303_remove(struct lan9303 *chip)
 
 	/* assert reset to the whole device to prevent it from doing anything */
 	gpiod_set_value_cansleep(chip->reset_gpio, 1);
-	gpiod_unexport(chip->reset_gpio);
 
 	return 0;
 }
 EXPORT_SYMBOL(lan9303_remove);
+
+void lan9303_shutdown(struct lan9303 *chip)
+{
+	dsa_switch_shutdown(chip->ds);
+}
+EXPORT_SYMBOL(lan9303_shutdown);
 
 MODULE_AUTHOR("Juergen Borleis <kernel@pengutronix.de>");
 MODULE_DESCRIPTION("Core driver for SMSC/Microchip LAN9303 three port ethernet switch");

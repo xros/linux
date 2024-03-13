@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP interface clock support
  *
  * Copyright (C) 2013 Texas Instruments, Inc.
  *
  * Tero Kristo <t-kristo@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk-provider.h>
@@ -32,7 +24,8 @@ static const struct clk_ops ti_interface_clk_ops = {
 	.is_enabled	= &omap2_dflt_clk_is_enabled,
 };
 
-static struct clk *_register_interface(struct device *dev, const char *name,
+static struct clk *_register_interface(struct device_node *node,
+				       const char *name,
 				       const char *parent_name,
 				       struct clk_omap_reg *reg, u8 bit_idx,
 				       const struct clk_hw_omap_ops *ops)
@@ -57,47 +50,13 @@ static struct clk *_register_interface(struct device *dev, const char *name,
 	init.num_parents = 1;
 	init.parent_names = &parent_name;
 
-	clk = ti_clk_register(NULL, &clk_hw->hw, name);
+	clk = of_ti_clk_register_omap_hw(node, &clk_hw->hw, name);
 
 	if (IS_ERR(clk))
 		kfree(clk_hw);
-	else
-		omap2_init_clk_hw_omap_clocks(&clk_hw->hw);
 
 	return clk;
 }
-
-#if defined(CONFIG_ARCH_OMAP3) && defined(CONFIG_ATAGS)
-struct clk *ti_clk_register_interface(struct ti_clk *setup)
-{
-	const struct clk_hw_omap_ops *ops = &clkhwops_iclk_wait;
-	struct clk_omap_reg reg;
-	struct ti_clk_gate *gate;
-
-	gate = setup->data;
-	reg.index = gate->module;
-	reg.offset = gate->reg;
-	reg.ptr = NULL;
-
-	if (gate->flags & CLKF_NO_WAIT)
-		ops = &clkhwops_iclk;
-
-	if (gate->flags & CLKF_HSOTGUSB)
-		ops = &clkhwops_omap3430es2_iclk_hsotgusb_wait;
-
-	if (gate->flags & CLKF_DSS)
-		ops = &clkhwops_omap3430es2_iclk_dss_usbhost_wait;
-
-	if (gate->flags & CLKF_SSI)
-		ops = &clkhwops_omap3430es2_iclk_ssi_wait;
-
-	if (gate->flags & CLKF_AM35XX)
-		ops = &clkhwops_am35xx_ipss_wait;
-
-	return _register_interface(NULL, setup->name, gate->parent,
-				   &reg, gate->bit_shift, ops);
-}
-#endif
 
 static void __init _of_ti_interface_clk_setup(struct device_node *node,
 					      const struct clk_hw_omap_ops *ops)
@@ -106,6 +65,7 @@ static void __init _of_ti_interface_clk_setup(struct device_node *node,
 	const char *parent_name;
 	struct clk_omap_reg reg;
 	u8 enable_bit = 0;
+	const char *name;
 	u32 val;
 
 	if (ti_clk_get_reg_addr(node, 0, &reg))
@@ -116,11 +76,12 @@ static void __init _of_ti_interface_clk_setup(struct device_node *node,
 
 	parent_name = of_clk_get_parent_name(node, 0);
 	if (!parent_name) {
-		pr_err("%s must have a parent\n", node->name);
+		pr_err("%pOFn must have a parent\n", node);
 		return;
 	}
 
-	clk = _register_interface(NULL, node->name, parent_name, &reg,
+	name = ti_dt_clk_name(node);
+	clk = _register_interface(node, name, parent_name, &reg,
 				  enable_bit, ops);
 
 	if (!IS_ERR(clk))

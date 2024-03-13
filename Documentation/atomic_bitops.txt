@@ -1,6 +1,6 @@
-
-On atomic bitops.
-
+=============
+Atomic bitops
+=============
 
 While our bitmap_{}() functions are non-atomic, we have a number of operations
 operating on single bits in a bitmap that are atomic.
@@ -58,8 +58,11 @@ Like with atomic_t, the rule of thumb is:
 
  - RMW operations that have a return value are fully ordered.
 
-Except for test_and_set_bit_lock() which has ACQUIRE semantics and
-clear_bit_unlock() which has RELEASE semantics.
+ - RMW operations that are conditional are fully ordered.
+
+Except for a successful test_and_set_bit_lock() which has ACQUIRE semantics,
+clear_bit_unlock() which has RELEASE semantics and test_bit_acquire which has
+ACQUIRE semantics.
 
 Since a platform only has a single means of achieving atomic operations
 the same barriers as for atomic_t are used, see atomic_t.txt.

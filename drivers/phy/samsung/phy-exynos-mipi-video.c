@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Samsung S5P/EXYNOS SoC series MIPI CSIS/DSIM DPHY driver
+ * Samsung S5P/Exynos SoC series MIPI CSIS/DSIM DPHY driver
  *
  * Copyright (C) 2013,2016 Samsung Electronics Co., Ltd.
  * Author: Sylwester Nawrocki <s.nawrocki@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/err.h>
@@ -14,9 +11,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/phy/phy.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/spinlock.h>
 #include <linux/soc/samsung/exynos-regs-pmu.h>
@@ -231,33 +227,27 @@ struct exynos_mipi_video_phy {
 static int __set_phy_state(const struct exynos_mipi_phy_desc *data,
 			   struct exynos_mipi_video_phy *state, unsigned int on)
 {
-	u32 val;
+	struct regmap *enable_map = state->regmaps[data->enable_map];
+	struct regmap *resetn_map = state->regmaps[data->resetn_map];
 
 	spin_lock(&state->slock);
 
 	/* disable in PMU sysreg */
 	if (!on && data->coupled_phy_id >= 0 &&
-	    state->phys[data->coupled_phy_id].phy->power_count == 0) {
-		regmap_read(state->regmaps[data->enable_map], data->enable_reg,
-			    &val);
-		val &= ~data->enable_val;
-		regmap_write(state->regmaps[data->enable_map], data->enable_reg,
-			     val);
-	}
-
+	    state->phys[data->coupled_phy_id].phy->power_count == 0)
+		regmap_update_bits(enable_map, data->enable_reg,
+				   data->enable_val, 0);
 	/* PHY reset */
-	regmap_read(state->regmaps[data->resetn_map], data->resetn_reg, &val);
-	val = on ? (val | data->resetn_val) : (val & ~data->resetn_val);
-	regmap_write(state->regmaps[data->resetn_map], data->resetn_reg, val);
-
+	if (on)
+		regmap_update_bits(resetn_map, data->resetn_reg,
+				   data->resetn_val, data->resetn_val);
+	else
+		regmap_update_bits(resetn_map, data->resetn_reg,
+				   data->resetn_val, 0);
 	/* enable in PMU sysreg */
-	if (on) {
-		regmap_read(state->regmaps[data->enable_map], data->enable_reg,
-			    &val);
-		val |= data->enable_val;
-		regmap_write(state->regmaps[data->enable_map], data->enable_reg,
-			     val);
-	}
+	if (on)
+		regmap_update_bits(enable_map, data->enable_reg,
+				   data->enable_val, data->enable_val);
 
 	spin_unlock(&state->slock);
 
@@ -307,7 +297,7 @@ static int exynos_mipi_video_phy_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct phy_provider *phy_provider;
-	unsigned int i;
+	unsigned int i = 0;
 
 	phy_dev = of_device_get_match_data(dev);
 	if (!phy_dev)
@@ -317,7 +307,10 @@ static int exynos_mipi_video_phy_probe(struct platform_device *pdev)
 	if (!state)
 		return -ENOMEM;
 
-	for (i = 0; i < phy_dev->num_regmaps; i++) {
+	state->regmaps[i] = syscon_node_to_regmap(dev->parent->of_node);
+	if (!IS_ERR(state->regmaps[i]))
+		i++;
+	for (; i < phy_dev->num_regmaps; i++) {
 		state->regmaps[i] = syscon_regmap_lookup_by_phandle(np,
 						phy_dev->regmap_names[i]);
 		if (IS_ERR(state->regmaps[i]))
@@ -368,10 +361,11 @@ static struct platform_driver exynos_mipi_video_phy_driver = {
 	.driver = {
 		.of_match_table	= exynos_mipi_video_phy_of_match,
 		.name  = "exynos-mipi-video-phy",
+		.suppress_bind_attrs = true,
 	}
 };
 module_platform_driver(exynos_mipi_video_phy_driver);
 
-MODULE_DESCRIPTION("Samsung S5P/EXYNOS SoC MIPI CSI-2/DSI PHY driver");
+MODULE_DESCRIPTION("Samsung S5P/Exynos SoC MIPI CSI-2/DSI PHY driver");
 MODULE_AUTHOR("Sylwester Nawrocki <s.nawrocki@samsung.com>");
 MODULE_LICENSE("GPL v2");

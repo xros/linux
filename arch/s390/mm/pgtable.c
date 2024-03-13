@@ -19,12 +19,30 @@
 #include <linux/ksm.h>
 #include <linux/mman.h>
 
-#include <asm/pgtable.h>
-#include <asm/pgalloc.h>
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
 #include <asm/page-states.h>
+
+pgprot_t pgprot_writecombine(pgprot_t prot)
+{
+	/*
+	 * mio_wb_bit_mask may be set on a different CPU, but it is only set
+	 * once at init and only read afterwards.
+	 */
+	return __pgprot(pgprot_val(prot) | mio_wb_bit_mask);
+}
+EXPORT_SYMBOL_GPL(pgprot_writecombine);
+
+pgprot_t pgprot_writethrough(pgprot_t prot)
+{
+	/*
+	 * mio_wb_bit_mask may be set on a different CPU, but it is only set
+	 * once at init and only read afterwards.
+	 */
+	return __pgprot(pgprot_val(prot) & ~mio_wb_bit_mask);
+}
+EXPORT_SYMBOL_GPL(pgprot_writethrough);
 
 static inline void ptep_ipte_local(struct mm_struct *mm, unsigned long addr,
 				   pte_t *ptep, int nodat)
@@ -97,7 +115,7 @@ static inline pte_t ptep_flush_lazy(struct mm_struct *mm,
 	atomic_inc(&mm->context.flush_count);
 	if (cpumask_equal(&mm->context.cpu_attach_mask,
 			  cpumask_of(smp_processor_id()))) {
-		pte_val(*ptep) |= _PAGE_INVALID;
+		set_pte(ptep, set_pte_bit(*ptep, __pgprot(_PAGE_INVALID)));
 		mm->context.flush_mm = 1;
 	} else
 		ptep_ipte_global(mm, addr, ptep, nodat);
@@ -107,32 +125,23 @@ static inline pte_t ptep_flush_lazy(struct mm_struct *mm,
 
 static inline pgste_t pgste_get_lock(pte_t *ptep)
 {
-	unsigned long new = 0;
+	unsigned long value = 0;
 #ifdef CONFIG_PGSTE
-	unsigned long old;
+	unsigned long *ptr = (unsigned long *)(ptep + PTRS_PER_PTE);
 
-	asm(
-		"	lg	%0,%2\n"
-		"0:	lgr	%1,%0\n"
-		"	nihh	%0,0xff7f\n"	/* clear PCL bit in old */
-		"	oihh	%1,0x0080\n"	/* set PCL bit in new */
-		"	csg	%0,%1,%2\n"
-		"	jl	0b\n"
-		: "=&d" (old), "=&d" (new), "=Q" (ptep[PTRS_PER_PTE])
-		: "Q" (ptep[PTRS_PER_PTE]) : "cc", "memory");
+	do {
+		value = __atomic64_or_barrier(PGSTE_PCL_BIT, ptr);
+	} while (value & PGSTE_PCL_BIT);
+	value |= PGSTE_PCL_BIT;
 #endif
-	return __pgste(new);
+	return __pgste(value);
 }
 
 static inline void pgste_set_unlock(pte_t *ptep, pgste_t pgste)
 {
 #ifdef CONFIG_PGSTE
-	asm(
-		"	nihh	%1,0xff7f\n"	/* clear PCL bit */
-		"	stg	%1,%0\n"
-		: "=Q" (ptep[PTRS_PER_PTE])
-		: "d" (pgste_val(pgste)), "Q" (ptep[PTRS_PER_PTE])
-		: "cc", "memory");
+	barrier();
+	WRITE_ONCE(*(unsigned long *)(ptep + PTRS_PER_PTE), pgste_val(pgste) & ~PGSTE_PCL_BIT);
 #endif
 }
 
@@ -158,7 +167,7 @@ static inline pgste_t pgste_update_all(pte_t pte, pgste_t pgste,
 #ifdef CONFIG_PGSTE
 	unsigned long address, bits, skey;
 
-	if (!mm_use_skey(mm) || pte_val(pte) & _PAGE_INVALID)
+	if (!mm_uses_skeys(mm) || pte_val(pte) & _PAGE_INVALID)
 		return pgste;
 	address = pte_val(pte) & PAGE_MASK;
 	skey = (unsigned long) page_get_storage_key(address);
@@ -180,7 +189,7 @@ static inline void pgste_set_key(pte_t *ptep, pgste_t pgste, pte_t entry,
 	unsigned long address;
 	unsigned long nkey;
 
-	if (!mm_use_skey(mm) || pte_val(entry) & _PAGE_INVALID)
+	if (!mm_uses_skeys(mm) || pte_val(entry) & _PAGE_INVALID)
 		return;
 	VM_BUG_ON(!(pte_val(*ptep) & _PAGE_INVALID));
 	address = pte_val(entry) & PAGE_MASK;
@@ -206,15 +215,15 @@ static inline pgste_t pgste_set_pte(pte_t *ptep, pgste_t pgste, pte_t entry)
 			 * Without enhanced suppression-on-protection force
 			 * the dirty bit on for all writable ptes.
 			 */
-			pte_val(entry) |= _PAGE_DIRTY;
-			pte_val(entry) &= ~_PAGE_PROTECT;
+			entry = set_pte_bit(entry, __pgprot(_PAGE_DIRTY));
+			entry = clear_pte_bit(entry, __pgprot(_PAGE_PROTECT));
 		}
 		if (!(pte_val(entry) & _PAGE_PROTECT))
 			/* This pte allows write access, set user-dirty */
 			pgste_val(pgste) |= PGSTE_UC_BIT;
 	}
 #endif
-	*ptep = entry;
+	set_pte(ptep, entry);
 	return pgste;
 }
 
@@ -257,12 +266,12 @@ static inline pte_t ptep_xchg_commit(struct mm_struct *mm,
 			pgste = pgste_update_all(old, pgste, mm);
 			if ((pgste_val(pgste) & _PGSTE_GPS_USAGE_MASK) ==
 			    _PGSTE_GPS_USAGE_UNUSED)
-				pte_val(old) |= _PAGE_UNUSED;
+				old = set_pte_bit(old, __pgprot(_PAGE_UNUSED));
 		}
 		pgste = pgste_set_pte(ptep, pgste, new);
 		pgste_set_unlock(ptep, pgste);
 	} else {
-		*ptep = new;
+		set_pte(ptep, new);
 	}
 	return old;
 }
@@ -284,6 +293,31 @@ pte_t ptep_xchg_direct(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL(ptep_xchg_direct);
 
+/*
+ * Caller must check that new PTE only differs in _PAGE_PROTECT HW bit, so that
+ * RDP can be used instead of IPTE. See also comments at pte_allow_rdp().
+ */
+void ptep_reset_dat_prot(struct mm_struct *mm, unsigned long addr, pte_t *ptep,
+			 pte_t new)
+{
+	preempt_disable();
+	atomic_inc(&mm->context.flush_count);
+	if (cpumask_equal(mm_cpumask(mm), cpumask_of(smp_processor_id())))
+		__ptep_rdp(addr, ptep, 0, 0, 1);
+	else
+		__ptep_rdp(addr, ptep, 0, 0, 0);
+	/*
+	 * PTE is not invalidated by RDP, only _PAGE_PROTECT is cleared. That
+	 * means it is still valid and active, and must not be changed according
+	 * to the architecture. But writing a new value that only differs in SW
+	 * bits is allowed.
+	 */
+	set_pte(ptep, new);
+	atomic_dec(&mm->context.flush_count);
+	preempt_enable();
+}
+EXPORT_SYMBOL(ptep_reset_dat_prot);
+
 pte_t ptep_xchg_lazy(struct mm_struct *mm, unsigned long addr,
 		     pte_t *ptep, pte_t new)
 {
@@ -301,12 +335,13 @@ pte_t ptep_xchg_lazy(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL(ptep_xchg_lazy);
 
-pte_t ptep_modify_prot_start(struct mm_struct *mm, unsigned long addr,
+pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr,
 			     pte_t *ptep)
 {
 	pgste_t pgste;
 	pte_t old;
 	int nodat;
+	struct mm_struct *mm = vma->vm_mm;
 
 	preempt_disable();
 	pgste = ptep_xchg_start(mm, addr, ptep);
@@ -318,26 +353,25 @@ pte_t ptep_modify_prot_start(struct mm_struct *mm, unsigned long addr,
 	}
 	return old;
 }
-EXPORT_SYMBOL(ptep_modify_prot_start);
 
-void ptep_modify_prot_commit(struct mm_struct *mm, unsigned long addr,
-			     pte_t *ptep, pte_t pte)
+void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
+			     pte_t *ptep, pte_t old_pte, pte_t pte)
 {
 	pgste_t pgste;
+	struct mm_struct *mm = vma->vm_mm;
 
 	if (!MACHINE_HAS_NX)
-		pte_val(pte) &= ~_PAGE_NOEXEC;
+		pte = clear_pte_bit(pte, __pgprot(_PAGE_NOEXEC));
 	if (mm_has_pgste(mm)) {
 		pgste = pgste_get(ptep);
 		pgste_set_key(ptep, pgste, pte, mm);
 		pgste = pgste_set_pte(ptep, pgste, pte);
 		pgste_set_unlock(ptep, pgste);
 	} else {
-		*ptep = pte;
+		set_pte(ptep, pte);
 	}
 	preempt_enable();
 }
-EXPORT_SYMBOL(ptep_modify_prot_commit);
 
 static inline void pmdp_idte_local(struct mm_struct *mm,
 				   unsigned long addr, pmd_t *pmdp)
@@ -347,18 +381,27 @@ static inline void pmdp_idte_local(struct mm_struct *mm,
 			    mm->context.asce, IDTE_LOCAL);
 	else
 		__pmdp_idte(addr, pmdp, 0, 0, IDTE_LOCAL);
+	if (mm_has_pgste(mm) && mm->context.allow_gmap_hpage_1m)
+		gmap_pmdp_idte_local(mm, addr);
 }
 
 static inline void pmdp_idte_global(struct mm_struct *mm,
 				    unsigned long addr, pmd_t *pmdp)
 {
-	if (MACHINE_HAS_TLB_GUEST)
+	if (MACHINE_HAS_TLB_GUEST) {
 		__pmdp_idte(addr, pmdp, IDTE_NODAT | IDTE_GUEST_ASCE,
 			    mm->context.asce, IDTE_GLOBAL);
-	else if (MACHINE_HAS_IDTE)
+		if (mm_has_pgste(mm) && mm->context.allow_gmap_hpage_1m)
+			gmap_pmdp_idte_global(mm, addr);
+	} else if (MACHINE_HAS_IDTE) {
 		__pmdp_idte(addr, pmdp, 0, 0, IDTE_GLOBAL);
-	else
+		if (mm_has_pgste(mm) && mm->context.allow_gmap_hpage_1m)
+			gmap_pmdp_idte_global(mm, addr);
+	} else {
 		__pmdp_csp(pmdp);
+		if (mm_has_pgste(mm) && mm->context.allow_gmap_hpage_1m)
+			gmap_pmdp_csp(mm, addr);
+	}
 }
 
 static inline pmd_t pmdp_flush_direct(struct mm_struct *mm,
@@ -390,14 +433,50 @@ static inline pmd_t pmdp_flush_lazy(struct mm_struct *mm,
 	atomic_inc(&mm->context.flush_count);
 	if (cpumask_equal(&mm->context.cpu_attach_mask,
 			  cpumask_of(smp_processor_id()))) {
-		pmd_val(*pmdp) |= _SEGMENT_ENTRY_INVALID;
+		set_pmd(pmdp, set_pmd_bit(*pmdp, __pgprot(_SEGMENT_ENTRY_INVALID)));
 		mm->context.flush_mm = 1;
+		if (mm_has_pgste(mm))
+			gmap_pmdp_invalidate(mm, addr);
 	} else {
 		pmdp_idte_global(mm, addr, pmdp);
 	}
 	atomic_dec(&mm->context.flush_count);
 	return old;
 }
+
+#ifdef CONFIG_PGSTE
+static int pmd_lookup(struct mm_struct *mm, unsigned long addr, pmd_t **pmdp)
+{
+	struct vm_area_struct *vma;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+
+	/* We need a valid VMA, otherwise this is clearly a fault. */
+	vma = vma_lookup(mm, addr);
+	if (!vma)
+		return -EFAULT;
+
+	pgd = pgd_offset(mm, addr);
+	if (!pgd_present(*pgd))
+		return -ENOENT;
+
+	p4d = p4d_offset(pgd, addr);
+	if (!p4d_present(*p4d))
+		return -ENOENT;
+
+	pud = pud_offset(p4d, addr);
+	if (!pud_present(*pud))
+		return -ENOENT;
+
+	/* Large PUDs are not supported yet. */
+	if (pud_large(*pud))
+		return -EFAULT;
+
+	*pmdp = pmd_offset(pud, addr);
+	return 0;
+}
+#endif
 
 pmd_t pmdp_xchg_direct(struct mm_struct *mm, unsigned long addr,
 		       pmd_t *pmdp, pmd_t new)
@@ -406,7 +485,7 @@ pmd_t pmdp_xchg_direct(struct mm_struct *mm, unsigned long addr,
 
 	preempt_disable();
 	old = pmdp_flush_direct(mm, addr, pmdp);
-	*pmdp = new;
+	set_pmd(pmdp, new);
 	preempt_enable();
 	return old;
 }
@@ -419,7 +498,7 @@ pmd_t pmdp_xchg_lazy(struct mm_struct *mm, unsigned long addr,
 
 	preempt_disable();
 	old = pmdp_flush_lazy(mm, addr, pmdp);
-	*pmdp = new;
+	set_pmd(pmdp, new);
 	preempt_enable();
 	return old;
 }
@@ -476,7 +555,7 @@ pud_t pudp_xchg_direct(struct mm_struct *mm, unsigned long addr,
 
 	preempt_disable();
 	old = pudp_flush_direct(mm, addr, pudp);
-	*pudp = new;
+	set_pud(pudp, new);
 	preempt_enable();
 	return old;
 }
@@ -516,9 +595,9 @@ pgtable_t pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp)
 		list_del(lh);
 	}
 	ptep = (pte_t *) pgtable;
-	pte_val(*ptep) = _PAGE_INVALID;
+	set_pte(ptep, __pte(_PAGE_INVALID));
 	ptep++;
-	pte_val(*ptep) = _PAGE_INVALID;
+	set_pte(ptep, __pte(_PAGE_INVALID));
 	return pgtable;
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
@@ -583,12 +662,12 @@ int ptep_force_prot(struct mm_struct *mm, unsigned long addr,
 	if (prot == PROT_NONE && !pte_i) {
 		ptep_flush_direct(mm, addr, ptep, nodat);
 		pgste = pgste_update_all(entry, pgste, mm);
-		pte_val(entry) |= _PAGE_INVALID;
+		entry = set_pte_bit(entry, __pgprot(_PAGE_INVALID));
 	}
 	if (prot == PROT_READ && !pte_p) {
 		ptep_flush_direct(mm, addr, ptep, nodat);
-		pte_val(entry) &= ~_PAGE_INVALID;
-		pte_val(entry) |= _PAGE_PROTECT;
+		entry = clear_pte_bit(entry, __pgprot(_PAGE_INVALID));
+		entry = set_pte_bit(entry, __pgprot(_PAGE_PROTECT));
 	}
 	pgste_val(pgste) |= bit;
 	pgste = pgste_set_pte(ptep, pgste, entry);
@@ -612,8 +691,8 @@ int ptep_shadow_pte(struct mm_struct *mm, unsigned long saddr,
 	      !(pte_val(pte) & _PAGE_PROTECT))) {
 		pgste_val(spgste) |= PGSTE_VSIE_BIT;
 		tpgste = pgste_get_lock(tptep);
-		pte_val(tpte) = (pte_val(spte) & PAGE_MASK) |
-				(pte_val(pte) & _PAGE_PROTECT);
+		tpte = __pte((pte_val(spte) & PAGE_MASK) |
+			     (pte_val(pte) & _PAGE_PROTECT));
 		/* don't touch the storage key - it belongs to parent pgste */
 		tpgste = pgste_set_pte(tptep, tpgste, tpte);
 		pgste_set_unlock(tptep, tpgste);
@@ -642,7 +721,7 @@ static void ptep_zap_swap_entry(struct mm_struct *mm, swp_entry_t entry)
 	if (!non_swap_entry(entry))
 		dec_mm_counter(mm, MM_SWAPENTS);
 	else if (is_migration_entry(entry)) {
-		struct page *page = migration_entry_to_page(entry);
+		struct page *page = pfn_swap_entry_to_page(entry);
 
 		dec_mm_counter(mm, mm_counter(page));
 	}
@@ -668,7 +747,7 @@ void ptep_zap_unused(struct mm_struct *mm, unsigned long addr,
 		pte_clear(mm, addr, ptep);
 	}
 	if (reset)
-		pgste_val(pgste) &= ~_PGSTE_GPS_USAGE_MASK;
+		pgste_val(pgste) &= ~(_PGSTE_GPS_USAGE_MASK | _PGSTE_GPS_NODAT);
 	pgste_set_unlock(ptep, pgste);
 	preempt_enable();
 }
@@ -685,7 +764,7 @@ void ptep_zap_key(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 	pgste_val(pgste) |= PGSTE_GR_BIT | PGSTE_GC_BIT;
 	ptev = pte_val(*ptep);
 	if (!(ptev & _PAGE_INVALID) && (ptev & _PAGE_WRITE))
-		page_set_storage_key(ptev & PAGE_MASK, PAGE_DEFAULT_KEY, 1);
+		page_set_storage_key(ptev & PAGE_MASK, PAGE_DEFAULT_KEY, 0);
 	pgste_set_unlock(ptep, pgste);
 	preempt_enable();
 }
@@ -693,39 +772,13 @@ void ptep_zap_key(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 /*
  * Test and reset if a guest page is dirty
  */
-bool test_and_clear_guest_dirty(struct mm_struct *mm, unsigned long addr)
+bool ptep_test_and_clear_uc(struct mm_struct *mm, unsigned long addr,
+		       pte_t *ptep)
 {
-	spinlock_t *ptl;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
 	pgste_t pgste;
-	pte_t *ptep;
 	pte_t pte;
 	bool dirty;
 	int nodat;
-
-	pgd = pgd_offset(mm, addr);
-	p4d = p4d_alloc(mm, pgd, addr);
-	if (!p4d)
-		return false;
-	pud = pud_alloc(mm, p4d, addr);
-	if (!pud)
-		return false;
-	pmd = pmd_alloc(mm, pud, addr);
-	if (!pmd)
-		return false;
-	/* We can't run guests backed by huge pages, but userspace can
-	 * still set them up and then try to migrate them without any
-	 * migration support.
-	 */
-	if (pmd_large(*pmd))
-		return true;
-
-	ptep = pte_alloc_map_lock(mm, pmd, addr, &ptl);
-	if (unlikely(!ptep))
-		return false;
 
 	pgste = pgste_get_lock(ptep);
 	dirty = !!(pgste_val(pgste) & PGSTE_UC_BIT);
@@ -736,30 +789,60 @@ bool test_and_clear_guest_dirty(struct mm_struct *mm, unsigned long addr)
 		nodat = !!(pgste_val(pgste) & _PGSTE_GPS_NODAT);
 		ptep_ipte_global(mm, addr, ptep, nodat);
 		if (MACHINE_HAS_ESOP || !(pte_val(pte) & _PAGE_WRITE))
-			pte_val(pte) |= _PAGE_PROTECT;
+			pte = set_pte_bit(pte, __pgprot(_PAGE_PROTECT));
 		else
-			pte_val(pte) |= _PAGE_INVALID;
-		*ptep = pte;
+			pte = set_pte_bit(pte, __pgprot(_PAGE_INVALID));
+		set_pte(ptep, pte);
 	}
 	pgste_set_unlock(ptep, pgste);
-
-	spin_unlock(ptl);
 	return dirty;
 }
-EXPORT_SYMBOL_GPL(test_and_clear_guest_dirty);
+EXPORT_SYMBOL_GPL(ptep_test_and_clear_uc);
 
 int set_guest_storage_key(struct mm_struct *mm, unsigned long addr,
 			  unsigned char key, bool nq)
 {
-	unsigned long keyul;
+	unsigned long keyul, paddr;
 	spinlock_t *ptl;
 	pgste_t old, new;
+	pmd_t *pmdp;
 	pte_t *ptep;
 
-	ptep = get_locked_pte(mm, addr, &ptl);
-	if (unlikely(!ptep))
+	/*
+	 * If we don't have a PTE table and if there is no huge page mapped,
+	 * we can ignore attempts to set the key to 0, because it already is 0.
+	 */
+	switch (pmd_lookup(mm, addr, &pmdp)) {
+	case -ENOENT:
+		return key ? -EFAULT : 0;
+	case 0:
+		break;
+	default:
 		return -EFAULT;
+	}
+again:
+	ptl = pmd_lock(mm, pmdp);
+	if (!pmd_present(*pmdp)) {
+		spin_unlock(ptl);
+		return key ? -EFAULT : 0;
+	}
 
+	if (pmd_large(*pmdp)) {
+		paddr = pmd_val(*pmdp) & HPAGE_MASK;
+		paddr |= addr & ~HPAGE_MASK;
+		/*
+		 * Huge pmds need quiescing operations, they are
+		 * always mapped.
+		 */
+		page_set_storage_key(paddr, key, 1);
+		spin_unlock(ptl);
+		return 0;
+	}
+	spin_unlock(ptl);
+
+	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+	if (!ptep)
+		goto again;
 	new = old = pgste_get_lock(ptep);
 	pgste_val(new) &= ~(PGSTE_GR_BIT | PGSTE_GC_BIT |
 			    PGSTE_ACC_BITS | PGSTE_FP_BIT);
@@ -767,14 +850,14 @@ int set_guest_storage_key(struct mm_struct *mm, unsigned long addr,
 	pgste_val(new) |= (keyul & (_PAGE_CHANGED | _PAGE_REFERENCED)) << 48;
 	pgste_val(new) |= (keyul & (_PAGE_ACC_BITS | _PAGE_FP_BIT)) << 56;
 	if (!(pte_val(*ptep) & _PAGE_INVALID)) {
-		unsigned long address, bits, skey;
+		unsigned long bits, skey;
 
-		address = pte_val(*ptep) & PAGE_MASK;
-		skey = (unsigned long) page_get_storage_key(address);
+		paddr = pte_val(*ptep) & PAGE_MASK;
+		skey = (unsigned long) page_get_storage_key(paddr);
 		bits = skey & (_PAGE_CHANGED | _PAGE_REFERENCED);
 		skey = key & (_PAGE_ACC_BITS | _PAGE_FP_BIT);
 		/* Set storage key ACC and FP */
-		page_set_storage_key(address, skey, !nq);
+		page_set_storage_key(paddr, skey, !nq);
 		/* Merge host changed & referenced into pgste  */
 		pgste_val(new) |= bits << 52;
 	}
@@ -789,7 +872,7 @@ int set_guest_storage_key(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL(set_guest_storage_key);
 
-/**
+/*
  * Conditionally set a guest storage key (handling csske).
  * oldkey will be updated when either mr or mc is set and a pointer is given.
  *
@@ -822,7 +905,7 @@ int cond_set_guest_storage_key(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL(cond_set_guest_storage_key);
 
-/**
+/*
  * Reset a guest reference bit (rrbe), returning the reference and changed bit.
  *
  * Returns < 0 in case of error, otherwise the cc to be reported to the guest.
@@ -830,20 +913,50 @@ EXPORT_SYMBOL(cond_set_guest_storage_key);
 int reset_guest_reference_bit(struct mm_struct *mm, unsigned long addr)
 {
 	spinlock_t *ptl;
+	unsigned long paddr;
 	pgste_t old, new;
+	pmd_t *pmdp;
 	pte_t *ptep;
 	int cc = 0;
 
-	ptep = get_locked_pte(mm, addr, &ptl);
-	if (unlikely(!ptep))
+	/*
+	 * If we don't have a PTE table and if there is no huge page mapped,
+	 * the storage key is 0 and there is nothing for us to do.
+	 */
+	switch (pmd_lookup(mm, addr, &pmdp)) {
+	case -ENOENT:
+		return 0;
+	case 0:
+		break;
+	default:
 		return -EFAULT;
+	}
+again:
+	ptl = pmd_lock(mm, pmdp);
+	if (!pmd_present(*pmdp)) {
+		spin_unlock(ptl);
+		return 0;
+	}
 
+	if (pmd_large(*pmdp)) {
+		paddr = pmd_val(*pmdp) & HPAGE_MASK;
+		paddr |= addr & ~HPAGE_MASK;
+		cc = page_reset_referenced(paddr);
+		spin_unlock(ptl);
+		return cc;
+	}
+	spin_unlock(ptl);
+
+	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+	if (!ptep)
+		goto again;
 	new = old = pgste_get_lock(ptep);
 	/* Reset guest reference bit only */
 	pgste_val(new) &= ~PGSTE_GR_BIT;
 
 	if (!(pte_val(*ptep) & _PAGE_INVALID)) {
-		cc = page_reset_referenced(pte_val(*ptep) & PAGE_MASK);
+		paddr = pte_val(*ptep) & PAGE_MASK;
+		cc = page_reset_referenced(paddr);
 		/* Merge real referenced bit into host-set */
 		pgste_val(new) |= ((unsigned long) cc << 53) & PGSTE_HR_BIT;
 	}
@@ -862,18 +975,50 @@ EXPORT_SYMBOL(reset_guest_reference_bit);
 int get_guest_storage_key(struct mm_struct *mm, unsigned long addr,
 			  unsigned char *key)
 {
+	unsigned long paddr;
 	spinlock_t *ptl;
 	pgste_t pgste;
+	pmd_t *pmdp;
 	pte_t *ptep;
 
-	ptep = get_locked_pte(mm, addr, &ptl);
-	if (unlikely(!ptep))
-		return -EFAULT;
+	/*
+	 * If we don't have a PTE table and if there is no huge page mapped,
+	 * the storage key is 0.
+	 */
+	*key = 0;
 
+	switch (pmd_lookup(mm, addr, &pmdp)) {
+	case -ENOENT:
+		return 0;
+	case 0:
+		break;
+	default:
+		return -EFAULT;
+	}
+again:
+	ptl = pmd_lock(mm, pmdp);
+	if (!pmd_present(*pmdp)) {
+		spin_unlock(ptl);
+		return 0;
+	}
+
+	if (pmd_large(*pmdp)) {
+		paddr = pmd_val(*pmdp) & HPAGE_MASK;
+		paddr |= addr & ~HPAGE_MASK;
+		*key = page_get_storage_key(paddr);
+		spin_unlock(ptl);
+		return 0;
+	}
+	spin_unlock(ptl);
+
+	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+	if (!ptep)
+		goto again;
 	pgste = pgste_get_lock(ptep);
 	*key = (pgste_val(pgste) & (PGSTE_ACC_BITS | PGSTE_FP_BIT)) >> 56;
+	paddr = pte_val(*ptep) & PAGE_MASK;
 	if (!(pte_val(*ptep) & _PAGE_INVALID))
-		*key = page_get_storage_key(pte_val(*ptep) & PAGE_MASK);
+		*key = page_get_storage_key(paddr);
 	/* Reflect guest's logical view, not physical */
 	*key |= (pgste_val(pgste) & (PGSTE_GR_BIT | PGSTE_GC_BIT)) >> 48;
 	pgste_set_unlock(ptep, pgste);
@@ -897,6 +1042,7 @@ EXPORT_SYMBOL(get_guest_storage_key);
 int pgste_perform_essa(struct mm_struct *mm, unsigned long hva, int orc,
 			unsigned long *oldpte, unsigned long *oldpgste)
 {
+	struct vm_area_struct *vma;
 	unsigned long pgstev;
 	spinlock_t *ptl;
 	pgste_t pgste;
@@ -906,6 +1052,10 @@ int pgste_perform_essa(struct mm_struct *mm, unsigned long hva, int orc,
 	WARN_ON_ONCE(orc > ESSA_MAX);
 	if (unlikely(orc > ESSA_MAX))
 		return -EINVAL;
+
+	vma = vma_lookup(mm, hva);
+	if (!vma || is_vm_hugetlb_page(vma))
+		return -EFAULT;
 	ptep = get_locked_pte(mm, hva, &ptl);
 	if (unlikely(!ptep))
 		return -EFAULT;
@@ -998,10 +1148,14 @@ EXPORT_SYMBOL(pgste_perform_essa);
 int set_pgste_bits(struct mm_struct *mm, unsigned long hva,
 			unsigned long bits, unsigned long value)
 {
+	struct vm_area_struct *vma;
 	spinlock_t *ptl;
 	pgste_t new;
 	pte_t *ptep;
 
+	vma = vma_lookup(mm, hva);
+	if (!vma || is_vm_hugetlb_page(vma))
+		return -EFAULT;
 	ptep = get_locked_pte(mm, hva, &ptl);
 	if (unlikely(!ptep))
 		return -EFAULT;
@@ -1026,9 +1180,13 @@ EXPORT_SYMBOL(set_pgste_bits);
  */
 int get_pgste(struct mm_struct *mm, unsigned long hva, unsigned long *pgstep)
 {
+	struct vm_area_struct *vma;
 	spinlock_t *ptl;
 	pte_t *ptep;
 
+	vma = vma_lookup(mm, hva);
+	if (!vma || is_vm_hugetlb_page(vma))
+		return -EFAULT;
 	ptep = get_locked_pte(mm, hva, &ptl);
 	if (unlikely(!ptep))
 		return -EFAULT;

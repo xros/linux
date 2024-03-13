@@ -1,21 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Copyright (C) 2017 Oracle.  All Rights Reserved.
- *
- * Author: Darrick J. Wong <darrick.wong@oracle.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
+ * Author: Darrick J. Wong <djwong@kernel.org>
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -23,30 +9,19 @@
 #include "xfs_format.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
-#include "xfs_defer.h"
-#include "xfs_btree.h"
-#include "xfs_bit.h"
 #include "xfs_log_format.h"
 #include "xfs_trans.h"
-#include "xfs_sb.h"
 #include "xfs_inode.h"
-#include "xfs_icache.h"
-#include "xfs_itable.h"
-#include "xfs_alloc.h"
-#include "xfs_alloc_btree.h"
-#include "xfs_bmap.h"
-#include "xfs_bmap_btree.h"
-#include "xfs_ialloc.h"
-#include "xfs_ialloc_btree.h"
-#include "xfs_refcount.h"
-#include "xfs_refcount_btree.h"
-#include "xfs_rmap.h"
-#include "xfs_rmap_btree.h"
-#include "scrub/xfs_scrub.h"
+#include "xfs_quota.h"
+#include "xfs_qm.h"
+#include "xfs_scrub.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
 #include "scrub/trace.h"
-#include "scrub/btree.h"
+#include "scrub/repair.h"
+#include "scrub/health.h"
+#include "scrub/stats.h"
+#include "scrub/xfile.h"
 
 /*
  * Online Scrub and Repair
@@ -110,6 +85,40 @@
  * structure itself is corrupt, the CORRUPT flag will be set.  If
  * the metadata is correct but otherwise suboptimal, the PREEN flag
  * will be set.
+ *
+ * We perform secondary validation of filesystem metadata by
+ * cross-referencing every record with all other available metadata.
+ * For example, for block mapping extents, we verify that there are no
+ * records in the free space and inode btrees corresponding to that
+ * space extent and that there is a corresponding entry in the reverse
+ * mapping btree.  Inconsistent metadata is noted by setting the
+ * XCORRUPT flag; btree query function errors are noted by setting the
+ * XFAIL flag and deleting the cursor to prevent further attempts to
+ * cross-reference with a defective btree.
+ *
+ * If a piece of metadata proves corrupt or suboptimal, the userspace
+ * program can ask the kernel to apply some tender loving care (TLC) to
+ * the metadata object by setting the REPAIR flag and re-calling the
+ * scrub ioctl.  "Corruption" is defined by metadata violating the
+ * on-disk specification; operations cannot continue if the violation is
+ * left untreated.  It is possible for XFS to continue if an object is
+ * "suboptimal", however performance may be degraded.  Repairs are
+ * usually performed by rebuilding the metadata entirely out of
+ * redundant metadata.  Optimizing, on the other hand, can sometimes be
+ * done without rebuilding entire structures.
+ *
+ * Generally speaking, the repair code has the following code structure:
+ * Lock -> scrub -> repair -> commit -> re-lock -> re-scrub -> unlock.
+ * The first check helps us figure out if we need to rebuild or simply
+ * optimize the structure so that the rebuild knows what to do.  The
+ * second check evaluates the completeness of the repair; that is what
+ * is reported to userspace.
+ *
+ * A quick note on symbol prefixes:
+ * - "xfs_" are general XFS symbols.
+ * - "xchk_" are symbols related to metadata checking.
+ * - "xrep_" are symbols related to metadata repair.
+ * - "xfs_scrub_" are symbols that tie online fsck to the rest of XFS.
  */
 
 /*
@@ -123,14 +132,12 @@
  * supported by the running kernel.
  */
 static int
-xfs_scrub_probe(
-	struct xfs_scrub_context	*sc)
+xchk_probe(
+	struct xfs_scrub	*sc)
 {
-	int				error = 0;
+	int			error = 0;
 
-	if (sc->sm->sm_ino || sc->sm->sm_agno)
-		return -EINVAL;
-	if (xfs_scrub_should_terminate(sc, &error))
+	if (xchk_should_terminate(sc, &error))
 		return error;
 
 	return 0;
@@ -138,254 +145,468 @@ xfs_scrub_probe(
 
 /* Scrub setup and teardown */
 
+static inline void
+xchk_fsgates_disable(
+	struct xfs_scrub	*sc)
+{
+	if (!(sc->flags & XCHK_FSGATES_ALL))
+		return;
+
+	trace_xchk_fsgates_disable(sc, sc->flags & XCHK_FSGATES_ALL);
+
+	if (sc->flags & XCHK_FSGATES_DRAIN)
+		xfs_drain_wait_disable();
+
+	sc->flags &= ~XCHK_FSGATES_ALL;
+}
+
 /* Free all the resources and finish the transactions. */
 STATIC int
-xfs_scrub_teardown(
-	struct xfs_scrub_context	*sc,
-	struct xfs_inode		*ip_in,
-	int				error)
+xchk_teardown(
+	struct xfs_scrub	*sc,
+	int			error)
 {
-	xfs_scrub_ag_free(sc, &sc->sa);
+	xchk_ag_free(sc, &sc->sa);
 	if (sc->tp) {
-		xfs_trans_cancel(sc->tp);
+		if (error == 0 && (sc->sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR))
+			error = xfs_trans_commit(sc->tp);
+		else
+			xfs_trans_cancel(sc->tp);
 		sc->tp = NULL;
 	}
 	if (sc->ip) {
-		xfs_iunlock(sc->ip, sc->ilock_flags);
-		if (sc->ip != ip_in &&
-		    !xfs_internal_inum(sc->mp, sc->ip->i_ino))
-			iput(VFS_I(sc->ip));
+		if (sc->ilock_flags)
+			xchk_iunlock(sc, sc->ilock_flags);
+		xchk_irele(sc, sc->ip);
 		sc->ip = NULL;
 	}
+	if (sc->flags & XCHK_HAVE_FREEZE_PROT) {
+		sc->flags &= ~XCHK_HAVE_FREEZE_PROT;
+		mnt_drop_write_file(sc->file);
+	}
+	if (sc->xfile) {
+		xfile_destroy(sc->xfile);
+		sc->xfile = NULL;
+	}
 	if (sc->buf) {
-		kmem_free(sc->buf);
+		if (sc->buf_cleanup)
+			sc->buf_cleanup(sc->buf);
+		kvfree(sc->buf);
+		sc->buf_cleanup = NULL;
 		sc->buf = NULL;
 	}
+
+	xchk_fsgates_disable(sc);
 	return error;
 }
 
 /* Scrubbing dispatch. */
 
-static const struct xfs_scrub_meta_ops meta_scrub_ops[] = {
-	{ /* ioctl presence test */
-		.setup	= xfs_scrub_setup_fs,
-		.scrub	= xfs_scrub_probe,
+static const struct xchk_meta_ops meta_scrub_ops[] = {
+	[XFS_SCRUB_TYPE_PROBE] = {	/* ioctl presence test */
+		.type	= ST_NONE,
+		.setup	= xchk_setup_fs,
+		.scrub	= xchk_probe,
+		.repair = xrep_probe,
 	},
-	{ /* superblock */
-		.setup	= xfs_scrub_setup_ag_header,
-		.scrub	= xfs_scrub_superblock,
+	[XFS_SCRUB_TYPE_SB] = {		/* superblock */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_agheader,
+		.scrub	= xchk_superblock,
+		.repair	= xrep_superblock,
 	},
-	{ /* agf */
-		.setup	= xfs_scrub_setup_ag_header,
-		.scrub	= xfs_scrub_agf,
+	[XFS_SCRUB_TYPE_AGF] = {	/* agf */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_agheader,
+		.scrub	= xchk_agf,
+		.repair	= xrep_agf,
 	},
-	{ /* agfl */
-		.setup	= xfs_scrub_setup_ag_header,
-		.scrub	= xfs_scrub_agfl,
+	[XFS_SCRUB_TYPE_AGFL]= {	/* agfl */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_agheader,
+		.scrub	= xchk_agfl,
+		.repair	= xrep_agfl,
 	},
-	{ /* agi */
-		.setup	= xfs_scrub_setup_ag_header,
-		.scrub	= xfs_scrub_agi,
+	[XFS_SCRUB_TYPE_AGI] = {	/* agi */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_agheader,
+		.scrub	= xchk_agi,
+		.repair	= xrep_agi,
 	},
-	{ /* bnobt */
-		.setup	= xfs_scrub_setup_ag_allocbt,
-		.scrub	= xfs_scrub_bnobt,
+	[XFS_SCRUB_TYPE_BNOBT] = {	/* bnobt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_allocbt,
+		.scrub	= xchk_allocbt,
+		.repair	= xrep_allocbt,
+		.repair_eval = xrep_revalidate_allocbt,
 	},
-	{ /* cntbt */
-		.setup	= xfs_scrub_setup_ag_allocbt,
-		.scrub	= xfs_scrub_cntbt,
+	[XFS_SCRUB_TYPE_CNTBT] = {	/* cntbt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_allocbt,
+		.scrub	= xchk_allocbt,
+		.repair	= xrep_allocbt,
+		.repair_eval = xrep_revalidate_allocbt,
 	},
-	{ /* inobt */
-		.setup	= xfs_scrub_setup_ag_iallocbt,
-		.scrub	= xfs_scrub_inobt,
+	[XFS_SCRUB_TYPE_INOBT] = {	/* inobt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_iallocbt,
+		.scrub	= xchk_iallocbt,
+		.repair	= xrep_iallocbt,
+		.repair_eval = xrep_revalidate_iallocbt,
 	},
-	{ /* finobt */
-		.setup	= xfs_scrub_setup_ag_iallocbt,
-		.scrub	= xfs_scrub_finobt,
-		.has	= xfs_sb_version_hasfinobt,
+	[XFS_SCRUB_TYPE_FINOBT] = {	/* finobt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_iallocbt,
+		.scrub	= xchk_iallocbt,
+		.has	= xfs_has_finobt,
+		.repair	= xrep_iallocbt,
+		.repair_eval = xrep_revalidate_iallocbt,
 	},
-	{ /* rmapbt */
-		.setup	= xfs_scrub_setup_ag_rmapbt,
-		.scrub	= xfs_scrub_rmapbt,
-		.has	= xfs_sb_version_hasrmapbt,
+	[XFS_SCRUB_TYPE_RMAPBT] = {	/* rmapbt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_rmapbt,
+		.scrub	= xchk_rmapbt,
+		.has	= xfs_has_rmapbt,
+		.repair	= xrep_notsupported,
 	},
-	{ /* refcountbt */
-		.setup	= xfs_scrub_setup_ag_refcountbt,
-		.scrub	= xfs_scrub_refcountbt,
-		.has	= xfs_sb_version_hasreflink,
+	[XFS_SCRUB_TYPE_REFCNTBT] = {	/* refcountbt */
+		.type	= ST_PERAG,
+		.setup	= xchk_setup_ag_refcountbt,
+		.scrub	= xchk_refcountbt,
+		.has	= xfs_has_reflink,
+		.repair	= xrep_refcountbt,
 	},
-	{ /* inode record */
-		.setup	= xfs_scrub_setup_inode,
-		.scrub	= xfs_scrub_inode,
+	[XFS_SCRUB_TYPE_INODE] = {	/* inode record */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_inode,
+		.scrub	= xchk_inode,
+		.repair	= xrep_inode,
 	},
-	{ /* inode data fork */
-		.setup	= xfs_scrub_setup_inode_bmap,
-		.scrub	= xfs_scrub_bmap_data,
+	[XFS_SCRUB_TYPE_BMBTD] = {	/* inode data fork */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_inode_bmap,
+		.scrub	= xchk_bmap_data,
+		.repair	= xrep_bmap_data,
 	},
-	{ /* inode attr fork */
-		.setup	= xfs_scrub_setup_inode_bmap,
-		.scrub	= xfs_scrub_bmap_attr,
+	[XFS_SCRUB_TYPE_BMBTA] = {	/* inode attr fork */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_inode_bmap,
+		.scrub	= xchk_bmap_attr,
+		.repair	= xrep_bmap_attr,
 	},
-	{ /* inode CoW fork */
-		.setup	= xfs_scrub_setup_inode_bmap,
-		.scrub	= xfs_scrub_bmap_cow,
+	[XFS_SCRUB_TYPE_BMBTC] = {	/* inode CoW fork */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_inode_bmap,
+		.scrub	= xchk_bmap_cow,
+		.repair	= xrep_bmap_cow,
 	},
-	{ /* directory */
-		.setup	= xfs_scrub_setup_directory,
-		.scrub	= xfs_scrub_directory,
+	[XFS_SCRUB_TYPE_DIR] = {	/* directory */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_directory,
+		.scrub	= xchk_directory,
+		.repair	= xrep_notsupported,
 	},
-	{ /* extended attributes */
-		.setup	= xfs_scrub_setup_xattr,
-		.scrub	= xfs_scrub_xattr,
+	[XFS_SCRUB_TYPE_XATTR] = {	/* extended attributes */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_xattr,
+		.scrub	= xchk_xattr,
+		.repair	= xrep_notsupported,
 	},
-	{ /* symbolic link */
-		.setup	= xfs_scrub_setup_symlink,
-		.scrub	= xfs_scrub_symlink,
+	[XFS_SCRUB_TYPE_SYMLINK] = {	/* symbolic link */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_symlink,
+		.scrub	= xchk_symlink,
+		.repair	= xrep_notsupported,
 	},
-	{ /* parent pointers */
-		.setup	= xfs_scrub_setup_parent,
-		.scrub	= xfs_scrub_parent,
+	[XFS_SCRUB_TYPE_PARENT] = {	/* parent pointers */
+		.type	= ST_INODE,
+		.setup	= xchk_setup_parent,
+		.scrub	= xchk_parent,
+		.repair	= xrep_notsupported,
 	},
-	{ /* realtime bitmap */
-		.setup	= xfs_scrub_setup_rt,
-		.scrub	= xfs_scrub_rtbitmap,
-		.has	= xfs_sb_version_hasrealtime,
+	[XFS_SCRUB_TYPE_RTBITMAP] = {	/* realtime bitmap */
+		.type	= ST_FS,
+		.setup	= xchk_setup_rtbitmap,
+		.scrub	= xchk_rtbitmap,
+		.repair	= xrep_rtbitmap,
 	},
-	{ /* realtime summary */
-		.setup	= xfs_scrub_setup_rt,
-		.scrub	= xfs_scrub_rtsummary,
-		.has	= xfs_sb_version_hasrealtime,
+	[XFS_SCRUB_TYPE_RTSUM] = {	/* realtime summary */
+		.type	= ST_FS,
+		.setup	= xchk_setup_rtsummary,
+		.scrub	= xchk_rtsummary,
+		.repair	= xrep_notsupported,
 	},
-	{ /* user quota */
-		.setup = xfs_scrub_setup_quota,
-		.scrub = xfs_scrub_quota,
+	[XFS_SCRUB_TYPE_UQUOTA] = {	/* user quota */
+		.type	= ST_FS,
+		.setup	= xchk_setup_quota,
+		.scrub	= xchk_quota,
+		.repair	= xrep_quota,
 	},
-	{ /* group quota */
-		.setup = xfs_scrub_setup_quota,
-		.scrub = xfs_scrub_quota,
+	[XFS_SCRUB_TYPE_GQUOTA] = {	/* group quota */
+		.type	= ST_FS,
+		.setup	= xchk_setup_quota,
+		.scrub	= xchk_quota,
+		.repair	= xrep_quota,
 	},
-	{ /* project quota */
-		.setup = xfs_scrub_setup_quota,
-		.scrub = xfs_scrub_quota,
+	[XFS_SCRUB_TYPE_PQUOTA] = {	/* project quota */
+		.type	= ST_FS,
+		.setup	= xchk_setup_quota,
+		.scrub	= xchk_quota,
+		.repair	= xrep_quota,
+	},
+	[XFS_SCRUB_TYPE_FSCOUNTERS] = {	/* fs summary counters */
+		.type	= ST_FS,
+		.setup	= xchk_setup_fscounters,
+		.scrub	= xchk_fscounters,
+		.repair	= xrep_notsupported,
 	},
 };
 
-/* This isn't a stable feature, warn once per day. */
-static inline void
-xfs_scrub_experimental_warning(
-	struct xfs_mount	*mp)
+static int
+xchk_validate_inputs(
+	struct xfs_mount		*mp,
+	struct xfs_scrub_metadata	*sm)
 {
-	static struct ratelimit_state scrub_warning = RATELIMIT_STATE_INIT(
-			"xfs_scrub_warning", 86400 * HZ, 1);
-	ratelimit_set_flags(&scrub_warning, RATELIMIT_MSG_ON_RELEASE);
+	int				error;
+	const struct xchk_meta_ops	*ops;
 
-	if (__ratelimit(&scrub_warning))
-		xfs_alert(mp,
-"EXPERIMENTAL online scrub feature in use. Use at your own risk!");
+	error = -EINVAL;
+	/* Check our inputs. */
+	sm->sm_flags &= ~XFS_SCRUB_FLAGS_OUT;
+	if (sm->sm_flags & ~XFS_SCRUB_FLAGS_IN)
+		goto out;
+	/* sm_reserved[] must be zero */
+	if (memchr_inv(sm->sm_reserved, 0, sizeof(sm->sm_reserved)))
+		goto out;
+
+	error = -ENOENT;
+	/* Do we know about this type of metadata? */
+	if (sm->sm_type >= XFS_SCRUB_TYPE_NR)
+		goto out;
+	ops = &meta_scrub_ops[sm->sm_type];
+	if (ops->setup == NULL || ops->scrub == NULL)
+		goto out;
+	/* Does this fs even support this type of metadata? */
+	if (ops->has && !ops->has(mp))
+		goto out;
+
+	error = -EINVAL;
+	/* restricting fields must be appropriate for type */
+	switch (ops->type) {
+	case ST_NONE:
+	case ST_FS:
+		if (sm->sm_ino || sm->sm_gen || sm->sm_agno)
+			goto out;
+		break;
+	case ST_PERAG:
+		if (sm->sm_ino || sm->sm_gen ||
+		    sm->sm_agno >= mp->m_sb.sb_agcount)
+			goto out;
+		break;
+	case ST_INODE:
+		if (sm->sm_agno || (sm->sm_gen && !sm->sm_ino))
+			goto out;
+		break;
+	default:
+		goto out;
+	}
+
+	/* No rebuild without repair. */
+	if ((sm->sm_flags & XFS_SCRUB_IFLAG_FORCE_REBUILD) &&
+	    !(sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR))
+		return -EINVAL;
+
+	/*
+	 * We only want to repair read-write v5+ filesystems.  Defer the check
+	 * for ops->repair until after our scrub confirms that we need to
+	 * perform repairs so that we avoid failing due to not supporting
+	 * repairing an object that doesn't need repairs.
+	 */
+	if (sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR) {
+		error = -EOPNOTSUPP;
+		if (!xfs_has_crc(mp))
+			goto out;
+
+		error = -EROFS;
+		if (xfs_is_readonly(mp))
+			goto out;
+	}
+
+	error = 0;
+out:
+	return error;
 }
+
+#ifdef CONFIG_XFS_ONLINE_REPAIR
+static inline void xchk_postmortem(struct xfs_scrub *sc)
+{
+	/*
+	 * Userspace asked us to repair something, we repaired it, rescanned
+	 * it, and the rescan says it's still broken.  Scream about this in
+	 * the system logs.
+	 */
+	if ((sc->sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR) &&
+	    (sc->sm->sm_flags & (XFS_SCRUB_OFLAG_CORRUPT |
+				 XFS_SCRUB_OFLAG_XCORRUPT)))
+		xrep_failure(sc->mp);
+}
+#else
+static inline void xchk_postmortem(struct xfs_scrub *sc)
+{
+	/*
+	 * Userspace asked us to scrub something, it's broken, and we have no
+	 * way of fixing it.  Scream in the logs.
+	 */
+	if (sc->sm->sm_flags & (XFS_SCRUB_OFLAG_CORRUPT |
+				XFS_SCRUB_OFLAG_XCORRUPT))
+		xfs_alert_ratelimited(sc->mp,
+				"Corruption detected during scrub.");
+}
+#endif /* CONFIG_XFS_ONLINE_REPAIR */
 
 /* Dispatch metadata scrubbing. */
 int
 xfs_scrub_metadata(
-	struct xfs_inode		*ip,
+	struct file			*file,
 	struct xfs_scrub_metadata	*sm)
 {
-	struct xfs_scrub_context	sc;
-	struct xfs_mount		*mp = ip->i_mount;
-	const struct xfs_scrub_meta_ops	*ops;
-	bool				try_harder = false;
+	struct xchk_stats_run		run = { };
+	struct xfs_scrub		*sc;
+	struct xfs_mount		*mp = XFS_I(file_inode(file))->i_mount;
+	u64				check_start;
 	int				error = 0;
 
-	trace_xfs_scrub_start(ip, sm, error);
+	BUILD_BUG_ON(sizeof(meta_scrub_ops) !=
+		(sizeof(struct xchk_meta_ops) * XFS_SCRUB_TYPE_NR));
+
+	trace_xchk_start(XFS_I(file_inode(file)), sm, error);
 
 	/* Forbidden if we are shut down or mounted norecovery. */
 	error = -ESHUTDOWN;
-	if (XFS_FORCED_SHUTDOWN(mp))
+	if (xfs_is_shutdown(mp))
 		goto out;
 	error = -ENOTRECOVERABLE;
-	if (mp->m_flags & XFS_MOUNT_NORECOVERY)
+	if (xfs_has_norecovery(mp))
 		goto out;
 
-	/* Check our inputs. */
-	error = -EINVAL;
-	sm->sm_flags &= ~XFS_SCRUB_FLAGS_OUT;
-	if (sm->sm_flags & ~XFS_SCRUB_FLAGS_IN)
-		goto out;
-	if (memchr_inv(sm->sm_reserved, 0, sizeof(sm->sm_reserved)))
+	error = xchk_validate_inputs(mp, sm);
+	if (error)
 		goto out;
 
-	/* Do we know about this type of metadata? */
-	error = -ENOENT;
-	if (sm->sm_type >= XFS_SCRUB_TYPE_NR)
-		goto out;
-	ops = &meta_scrub_ops[sm->sm_type];
-	if (ops->scrub == NULL)
-		goto out;
+	xfs_warn_mount(mp, XFS_OPSTATE_WARNED_SCRUB,
+ "EXPERIMENTAL online scrub feature in use. Use at your own risk!");
 
-	/*
-	 * We won't scrub any filesystem that doesn't have the ability
-	 * to record unwritten extents.  The option was made default in
-	 * 2003, removed from mkfs in 2007, and cannot be disabled in
-	 * v5, so if we find a filesystem without this flag it's either
-	 * really old or totally unsupported.  Avoid it either way.
-	 * We also don't support v1-v3 filesystems, which aren't
-	 * mountable.
-	 */
-	error = -EOPNOTSUPP;
-	if (!xfs_sb_version_hasextflgbit(&mp->m_sb))
+	sc = kzalloc(sizeof(struct xfs_scrub), XCHK_GFP_FLAGS);
+	if (!sc) {
+		error = -ENOMEM;
 		goto out;
+	}
 
-	/* Does this fs even support this type of metadata? */
-	error = -ENOENT;
-	if (ops->has && !ops->has(&mp->m_sb))
-		goto out;
-
-	/* We don't know how to repair anything yet. */
-	error = -EOPNOTSUPP;
-	if (sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR)
-		goto out;
-
-	xfs_scrub_experimental_warning(mp);
-
+	sc->mp = mp;
+	sc->file = file;
+	sc->sm = sm;
+	sc->ops = &meta_scrub_ops[sm->sm_type];
+	sc->sick_mask = xchk_health_mask_for_scrub_type(sm->sm_type);
 retry_op:
+	/*
+	 * When repairs are allowed, prevent freezing or readonly remount while
+	 * scrub is running with a real transaction.
+	 */
+	if (sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR) {
+		error = mnt_want_write_file(sc->file);
+		if (error)
+			goto out_sc;
+
+		sc->flags |= XCHK_HAVE_FREEZE_PROT;
+	}
+
 	/* Set up for the operation. */
-	memset(&sc, 0, sizeof(sc));
-	sc.mp = ip->i_mount;
-	sc.sm = sm;
-	sc.ops = ops;
-	sc.try_harder = try_harder;
-	sc.sa.agno = NULLAGNUMBER;
-	error = sc.ops->setup(&sc, ip);
+	error = sc->ops->setup(sc);
+	if (error == -EDEADLOCK && !(sc->flags & XCHK_TRY_HARDER))
+		goto try_harder;
+	if (error == -ECHRNG && !(sc->flags & XCHK_NEED_DRAIN))
+		goto need_drain;
 	if (error)
 		goto out_teardown;
 
 	/* Scrub for errors. */
-	error = sc.ops->scrub(&sc);
-	if (!try_harder && error == -EDEADLOCK) {
-		/*
-		 * Scrubbers return -EDEADLOCK to mean 'try harder'.
-		 * Tear down everything we hold, then set up again with
-		 * preparation for worst-case scenarios.
-		 */
-		error = xfs_scrub_teardown(&sc, ip, 0);
-		if (error)
-			goto out;
-		try_harder = true;
-		goto retry_op;
-	} else if (error)
+	check_start = xchk_stats_now();
+	if ((sc->flags & XREP_ALREADY_FIXED) && sc->ops->repair_eval != NULL)
+		error = sc->ops->repair_eval(sc);
+	else
+		error = sc->ops->scrub(sc);
+	run.scrub_ns += xchk_stats_elapsed_ns(check_start);
+	if (error == -EDEADLOCK && !(sc->flags & XCHK_TRY_HARDER))
+		goto try_harder;
+	if (error == -ECHRNG && !(sc->flags & XCHK_NEED_DRAIN))
+		goto need_drain;
+	if (error || (sm->sm_flags & XFS_SCRUB_OFLAG_INCOMPLETE))
 		goto out_teardown;
 
-	if (sc.sm->sm_flags & (XFS_SCRUB_OFLAG_CORRUPT |
-			       XFS_SCRUB_OFLAG_XCORRUPT))
-		xfs_alert_ratelimited(mp, "Corruption detected during scrub.");
+	xchk_update_health(sc);
 
+	if (xchk_could_repair(sc)) {
+		/*
+		 * If userspace asked for a repair but it wasn't necessary,
+		 * report that back to userspace.
+		 */
+		if (!xrep_will_attempt(sc)) {
+			sc->sm->sm_flags |= XFS_SCRUB_OFLAG_NO_REPAIR_NEEDED;
+			goto out_nofix;
+		}
+
+		/*
+		 * If it's broken, userspace wants us to fix it, and we haven't
+		 * already tried to fix it, then attempt a repair.
+		 */
+		error = xrep_attempt(sc, &run);
+		if (error == -EAGAIN) {
+			/*
+			 * Either the repair function succeeded or it couldn't
+			 * get all the resources it needs; either way, we go
+			 * back to the beginning and call the scrub function.
+			 */
+			error = xchk_teardown(sc, 0);
+			if (error) {
+				xrep_failure(mp);
+				goto out_sc;
+			}
+			goto retry_op;
+		}
+	}
+
+out_nofix:
+	xchk_postmortem(sc);
 out_teardown:
-	error = xfs_scrub_teardown(&sc, ip, error);
+	error = xchk_teardown(sc, error);
+out_sc:
+	if (error != -ENOENT)
+		xchk_stats_merge(mp, sm, &run);
+	kfree(sc);
 out:
-	trace_xfs_scrub_done(ip, sm, error);
+	trace_xchk_done(XFS_I(file_inode(file)), sm, error);
 	if (error == -EFSCORRUPTED || error == -EFSBADCRC) {
 		sm->sm_flags |= XFS_SCRUB_OFLAG_CORRUPT;
 		error = 0;
 	}
 	return error;
+need_drain:
+	error = xchk_teardown(sc, 0);
+	if (error)
+		goto out_sc;
+	sc->flags |= XCHK_NEED_DRAIN;
+	run.retries++;
+	goto retry_op;
+try_harder:
+	/*
+	 * Scrubbers return -EDEADLOCK to mean 'try harder'.  Tear down
+	 * everything we hold, then set up again with preparation for
+	 * worst-case scenarios.
+	 */
+	error = xchk_teardown(sc, 0);
+	if (error)
+		goto out_sc;
+	sc->flags |= XCHK_TRY_HARDER;
+	run.retries++;
+	goto retry_op;
 }

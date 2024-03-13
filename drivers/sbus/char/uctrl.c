@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* uctrl.c: TS102 Microcontroller interface on Tadpole Sparcbook 3
  *
  * Copyright 1999 Derrick J Brashear (shadow@dementia.org)
@@ -14,15 +15,12 @@
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/platform_device.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
-
-#define UCTRL_MINOR	174
 
 #define DEBUG 1
 #ifdef DEBUG

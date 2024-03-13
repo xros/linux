@@ -35,7 +35,7 @@
 static int sysv_sync_fs(struct super_block *sb, int wait)
 {
 	struct sysv_sb_info *sbi = SYSV_SB(sb);
-	unsigned long time = get_seconds(), old_time;
+	u32 time = (u32)ktime_get_real_seconds(), old_time;
 
 	mutex_lock(&sbi->s_lock);
 
@@ -46,8 +46,8 @@ static int sysv_sync_fs(struct super_block *sb, int wait)
 	 */
 	old_time = fs32_to_cpu(sbi, *sbi->s_sb_time);
 	if (sbi->s_type == FSTYPE_SYSV4) {
-		if (*sbi->s_sb_state == cpu_to_fs32(sbi, 0x7c269d38 - old_time))
-			*sbi->s_sb_state = cpu_to_fs32(sbi, 0x7c269d38 - time);
+		if (*sbi->s_sb_state == cpu_to_fs32(sbi, 0x7c269d38u - old_time))
+			*sbi->s_sb_state = cpu_to_fs32(sbi, 0x7c269d38u - time);
 		*sbi->s_sb_time = cpu_to_fs32(sbi, time);
 		mark_buffer_dirty(sbi->s_bh2);
 	}
@@ -98,8 +98,7 @@ static int sysv_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = sbi->s_ninodes;
 	buf->f_ffree = sysv_count_free_inodes(sb);
 	buf->f_namelen = SYSV_NAMELEN;
-	buf->f_fsid.val[0] = (u32)id;
-	buf->f_fsid.val[1] = (u32)(id >> 32);
+	buf->f_fsid = u64_to_fsid(id);
 	return 0;
 }
 
@@ -201,12 +200,9 @@ struct inode *sysv_iget(struct super_block *sb, unsigned int ino)
 	i_gid_write(inode, (gid_t)fs16_to_cpu(sbi, raw_inode->i_gid));
 	set_nlink(inode, fs16_to_cpu(sbi, raw_inode->i_nlink));
 	inode->i_size = fs32_to_cpu(sbi, raw_inode->i_size);
-	inode->i_atime.tv_sec = fs32_to_cpu(sbi, raw_inode->i_atime);
-	inode->i_mtime.tv_sec = fs32_to_cpu(sbi, raw_inode->i_mtime);
-	inode->i_ctime.tv_sec = fs32_to_cpu(sbi, raw_inode->i_ctime);
-	inode->i_ctime.tv_nsec = 0;
-	inode->i_atime.tv_nsec = 0;
-	inode->i_mtime.tv_nsec = 0;
+	inode_set_atime(inode, fs32_to_cpu(sbi, raw_inode->i_atime), 0);
+	inode_set_mtime(inode, fs32_to_cpu(sbi, raw_inode->i_mtime), 0);
+	inode_set_ctime(inode, fs32_to_cpu(sbi, raw_inode->i_ctime), 0);
 	inode->i_blocks = 0;
 
 	si = SYSV_I(inode);
@@ -255,9 +251,9 @@ static int __sysv_write_inode(struct inode *inode, int wait)
 	raw_inode->i_gid = cpu_to_fs16(sbi, fs_high2lowgid(i_gid_read(inode)));
 	raw_inode->i_nlink = cpu_to_fs16(sbi, inode->i_nlink);
 	raw_inode->i_size = cpu_to_fs32(sbi, inode->i_size);
-	raw_inode->i_atime = cpu_to_fs32(sbi, inode->i_atime.tv_sec);
-	raw_inode->i_mtime = cpu_to_fs32(sbi, inode->i_mtime.tv_sec);
-	raw_inode->i_ctime = cpu_to_fs32(sbi, inode->i_ctime.tv_sec);
+	raw_inode->i_atime = cpu_to_fs32(sbi, inode_get_atime_sec(inode));
+	raw_inode->i_mtime = cpu_to_fs32(sbi, inode_get_mtime_sec(inode));
+	raw_inode->i_ctime = cpu_to_fs32(sbi, inode_get_ctime_sec(inode));
 
 	si = SYSV_I(inode);
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
@@ -275,7 +271,7 @@ static int __sysv_write_inode(struct inode *inode, int wait)
                 }
         }
 	brelse(bh);
-	return 0;
+	return err;
 }
 
 int sysv_write_inode(struct inode *inode, struct writeback_control *wbc)
@@ -307,21 +303,15 @@ static struct inode *sysv_alloc_inode(struct super_block *sb)
 {
 	struct sysv_inode_info *si;
 
-	si = kmem_cache_alloc(sysv_inode_cachep, GFP_KERNEL);
+	si = alloc_inode_sb(sb, sysv_inode_cachep, GFP_KERNEL);
 	if (!si)
 		return NULL;
 	return &si->vfs_inode;
 }
 
-static void sysv_i_callback(struct rcu_head *head)
+static void sysv_free_in_core_inode(struct inode *inode)
 {
-	struct inode *inode = container_of(head, struct inode, i_rcu);
 	kmem_cache_free(sysv_inode_cachep, SYSV_I(inode));
-}
-
-static void sysv_destroy_inode(struct inode *inode)
-{
-	call_rcu(&inode->i_rcu, sysv_i_callback);
 }
 
 static void init_once(void *p)
@@ -333,7 +323,7 @@ static void init_once(void *p)
 
 const struct super_operations sysv_sops = {
 	.alloc_inode	= sysv_alloc_inode,
-	.destroy_inode	= sysv_destroy_inode,
+	.free_inode	= sysv_free_in_core_inode,
 	.write_inode	= sysv_write_inode,
 	.evict_inode	= sysv_evict_inode,
 	.put_super	= sysv_put_super,
@@ -346,7 +336,7 @@ int __init sysv_init_icache(void)
 {
 	sysv_inode_cachep = kmem_cache_create("sysv_inode_cache",
 			sizeof(struct sysv_inode_info), 0,
-			SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD|SLAB_ACCOUNT,
+			SLAB_RECLAIM_ACCOUNT|SLAB_ACCOUNT,
 			init_once);
 	if (!sysv_inode_cachep)
 		return -ENOMEM;

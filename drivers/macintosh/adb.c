@@ -38,10 +38,10 @@
 #include <linux/kthread.h>
 #include <linux/platform_device.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 
 #include <linux/uaccess.h>
 #ifdef CONFIG_PPC
-#include <asm/prom.h>
 #include <asm/machdep.h>
 #endif
 
@@ -65,7 +65,7 @@ static struct adb_driver *adb_driver_list[] = {
 #ifdef CONFIG_ADB_IOP
 	&adb_iop_driver,
 #endif
-#if defined(CONFIG_ADB_PMU) || defined(CONFIG_ADB_PMU68K)
+#ifdef CONFIG_ADB_PMU
 	&via_pmu_driver,
 #endif
 #ifdef CONFIG_ADB_MACIO
@@ -80,7 +80,7 @@ static struct adb_driver *adb_controller;
 BLOCKING_NOTIFIER_HEAD(adb_client_list);
 static int adb_got_sleep;
 static int adb_inited;
-static DEFINE_SEMAPHORE(adb_probe_mutex);
+static DEFINE_SEMAPHORE(adb_probe_mutex, 1);
 static int sleepy_trackpad;
 static int autopoll_devs;
 int __adb_probe_sync;
@@ -163,7 +163,7 @@ static int adb_scan_bus(void)
 			 * See if anybody actually moved. This is suggested
 			 * by HW TechNote 01:
 			 *
-			 * http://developer.apple.com/technotes/hw/hw_01.html
+			 * https://developer.apple.com/technotes/hw/hw_01.html
 			 */
 			adb_request(&req, NULL, ADBREQ_SYNC | ADBREQ_REPLY, 1,
 				    (highFree << 4) | 0xf);
@@ -203,18 +203,17 @@ static int adb_scan_bus(void)
 	}
 
 	/* Now fill in the handler_id field of the adb_handler entries. */
-	printk(KERN_DEBUG "adb devices:");
 	for (i = 1; i < 16; i++) {
 		if (adb_handler[i].original_address == 0)
 			continue;
 		adb_request(&req, NULL, ADBREQ_SYNC | ADBREQ_REPLY, 1,
 			    (i << 4) | 0xf);
 		adb_handler[i].handler_id = req.reply[2];
-		printk(" [%d]: %d %x", i, adb_handler[i].original_address,
+		printk(KERN_DEBUG "adb device [%d]: %d 0x%X\n", i,
+		       adb_handler[i].original_address,
 		       adb_handler[i].handler_id);
 		devmask |= 1 << i;
 	}
-	printk("\n");
 	return devmask;
 }
 
@@ -225,9 +224,9 @@ static int adb_scan_bus(void)
 static int
 adb_probe_task(void *x)
 {
-	printk(KERN_INFO "adb: starting probe task...\n");
+	pr_debug("adb: starting probe task...\n");
 	do_adb_reset_bus();
-	printk(KERN_INFO "adb: finished probe task...\n");
+	pr_debug("adb: finished probe task...\n");
 
 	up(&adb_probe_mutex);
 
@@ -337,7 +336,7 @@ static int __init adb_init(void)
 	    adb_controller->init())
 		adb_controller = NULL;
 	if (adb_controller == NULL) {
-		printk(KERN_WARNING "Warning: no ADB interface detected\n");
+		pr_warn("Warning: no ADB interface detected\n");
 	} else {
 #ifdef CONFIG_PPC
 		if (of_machine_is_compatible("AAPL,PowerBook1998") ||
@@ -479,9 +478,8 @@ adb_register(int default_id, int handler_id, struct adb_ids *ids,
 		if ((adb_handler[i].original_address == default_id) &&
 		    (!handler_id || (handler_id == adb_handler[i].handler_id) || 
 		    try_handler_change(i, handler_id))) {
-			if (adb_handler[i].handler != 0) {
-				printk(KERN_ERR
-				       "Two handlers for ADB device %d\n",
+			if (adb_handler[i].handler) {
+				pr_err("Two handlers for ADB device %d\n",
 				       default_id);
 				continue;
 			}
@@ -535,10 +533,10 @@ adb_input(unsigned char *buf, int nb, int autopoll)
 		
 	id = buf[0] >> 4;
 	if (dump_adb_input) {
-		printk(KERN_INFO "adb packet: ");
+		pr_info("adb packet: ");
 		for (i = 0; i < nb; ++i)
-			printk(" %x", buf[i]);
-		printk(", id = %d\n", id);
+			pr_cont(" %x", buf[i]);
+		pr_cont(", id = %d\n", id);
 	}
 	write_lock_irqsave(&adb_handler_lock, flags);
 	handler = adb_handler[id].handler;
@@ -581,6 +579,8 @@ adb_try_handler_change(int address, int new_id)
 	mutex_lock(&adb_handler_mutex);
 	ret = try_handler_change(address, new_id);
 	mutex_unlock(&adb_handler_mutex);
+	if (ret)
+		pr_debug("adb handler change: [%d] 0x%X\n", address, new_id);
 	return ret;
 }
 EXPORT_SYMBOL(adb_try_handler_change);
@@ -647,7 +647,7 @@ do_adb_query(struct adb_request *req)
 
 	switch(req->data[1]) {
 	case ADB_QUERY_GETDEVINFO:
-		if (req->nbytes < 3)
+		if (req->nbytes < 3 || req->data[2] >= 16)
 			break;
 		mutex_lock(&adb_handler_mutex);
 		req->reply[0] = adb_handler[req->data[2]].original_address;
@@ -673,7 +673,7 @@ static int adb_open(struct inode *inode, struct file *file)
 		goto out;
 	}
 	state = kmalloc(sizeof(struct adbdev_state), GFP_KERNEL);
-	if (state == 0) {
+	if (!state) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -884,11 +884,11 @@ static void __init
 adbdev_init(void)
 {
 	if (register_chrdev(ADB_MAJOR, "adb", &adb_fops)) {
-		printk(KERN_ERR "adb: unable to get major %d\n", ADB_MAJOR);
+		pr_err("adb: unable to get major %d\n", ADB_MAJOR);
 		return;
 	}
 
-	adb_dev_class = class_create(THIS_MODULE, "adb");
+	adb_dev_class = class_create("adb");
 	if (IS_ERR(adb_dev_class))
 		return;
 	device_create(adb_dev_class, NULL, MKDEV(ADB_MAJOR, 0), NULL, "adb");

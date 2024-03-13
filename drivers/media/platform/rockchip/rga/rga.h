@@ -1,15 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
  * Author: Jacob Chen <jacob-chen@iotwrt.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #ifndef __RGA_H__
 #define __RGA_H__
@@ -42,10 +34,15 @@ struct rga_frame {
 
 	/* Image format */
 	struct rga_fmt *fmt;
+	struct v4l2_pix_format_mplane pix;
 
 	/* Variables that can calculated once and reused */
 	u32 stride;
 	u32 size;
+};
+
+struct rga_dma_desc {
+	u32 addr;
 };
 
 struct rockchip_rga_version {
@@ -86,20 +83,39 @@ struct rockchip_rga {
 	/* ctrl parm lock */
 	spinlock_t ctrl_lock;
 
-	wait_queue_head_t irq_queue;
-
 	struct rga_ctx *curr;
 	dma_addr_t cmdbuf_phy;
 	void *cmdbuf_virt;
-	unsigned int *src_mmu_pages;
-	unsigned int *dst_mmu_pages;
 };
+
+struct rga_addr_offset {
+	unsigned int y_off;
+	unsigned int u_off;
+	unsigned int v_off;
+};
+
+struct rga_vb_buffer {
+	struct vb2_v4l2_buffer vb_buf;
+	struct list_head queue;
+
+	/* RGA MMU mapping for this buffer */
+	struct rga_dma_desc *dma_desc;
+	dma_addr_t dma_desc_pa;
+	size_t n_desc;
+
+	/* Plane offsets of this buffer into the mapping */
+	struct rga_addr_offset offset;
+};
+
+static inline struct rga_vb_buffer *vb_to_rga(struct vb2_v4l2_buffer *vb)
+{
+	return container_of(vb, struct rga_vb_buffer, vb_buf);
+}
 
 struct rga_frame *rga_get_frame(struct rga_ctx *ctx, enum v4l2_buf_type type);
 
 /* RGA Buffers Manage */
 extern const struct vb2_ops rga_qops;
-void rga_buf_map(struct vb2_buffer *vb);
 
 /* RGA Hardware */
 static inline void rga_write(struct rockchip_rga *rga, u32 reg, u32 value)
@@ -120,6 +136,7 @@ static inline void rga_mod(struct rockchip_rga *rga, u32 reg, u32 val, u32 mask)
 	rga_write(rga, reg, temp);
 };
 
-void rga_hw_start(struct rockchip_rga *rga);
+void rga_hw_start(struct rockchip_rga *rga,
+		  struct rga_vb_buffer *src, struct rga_vb_buffer *dst);
 
 #endif

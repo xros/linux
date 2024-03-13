@@ -1,29 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  *
  * Copyright(c) 2009 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2015 Intel Mobile Communications GmbH
  * Copyright(c) 2016 - 2017 Intel Deutschland GmbH
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
+ * Copyright(c) 2018, 2023  Intel Corporation
  *****************************************************************************/
 
 #if !defined(__IWLWIFI_DEVICE_TRACE_IWLWIFI) || defined(TRACE_HEADER_MULTI_READ)
@@ -69,19 +50,21 @@ TRACE_EVENT(iwlwifi_dev_hcmd,
 );
 
 TRACE_EVENT(iwlwifi_dev_rx,
-	TP_PROTO(const struct device *dev, const struct iwl_trans *trans,
-		 struct iwl_rx_packet *pkt, size_t len),
-	TP_ARGS(dev, trans, pkt, len),
+	TP_PROTO(const struct device *dev,
+		 struct iwl_rx_packet *pkt, size_t len, size_t trace_len,
+		 size_t hdr_offset),
+	TP_ARGS(dev, pkt, len, trace_len, hdr_offset),
 	TP_STRUCT__entry(
 		DEV_ENTRY
 		__field(u16, cmd)
-		__dynamic_array(u8, rxbuf, iwl_rx_trace_len(trans, pkt, len))
+		__field(u8, hdr_offset)
+		__dynamic_array(u8, rxbuf, trace_len)
 	),
 	TP_fast_assign(
 		DEV_ASSIGN;
 		__entry->cmd = WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd);
-		memcpy(__get_dynamic_array(rxbuf), pkt,
-		       iwl_rx_trace_len(trans, pkt, len));
+		memcpy(__get_dynamic_array(rxbuf), pkt, trace_len);
+		__entry->hdr_offset = hdr_offset;
 	),
 	TP_printk("[%s] RX cmd %#.2x",
 		  __get_str(dev), __entry->cmd)
@@ -95,7 +78,7 @@ TRACE_EVENT(iwlwifi_dev_tx,
 	TP_ARGS(dev, skb, tfd, tfdlen, buf0, buf0_len, hdr_len),
 	TP_STRUCT__entry(
 		DEV_ENTRY
-
+		__field(void *, skbaddr)
 		__field(size_t, framelen)
 		__dynamic_array(u8, tfd, tfdlen)
 
@@ -110,6 +93,7 @@ TRACE_EVENT(iwlwifi_dev_tx,
 	),
 	TP_fast_assign(
 		DEV_ASSIGN;
+		__entry->skbaddr = skb;
 		__entry->framelen = buf0_len;
 		if (hdr_len > 0)
 			__entry->framelen += skb->len - hdr_len;
@@ -120,67 +104,9 @@ TRACE_EVENT(iwlwifi_dev_tx,
 				      __get_dynamic_array(buf1),
 				      skb->len - hdr_len);
 	),
-	TP_printk("[%s] TX %.2x (%zu bytes)",
+	TP_printk("[%s] TX %.2x (%zu bytes) skbaddr=%p",
 		  __get_str(dev), ((u8 *)__get_dynamic_array(buf0))[0],
-		  __entry->framelen)
-);
-
-TRACE_EVENT(iwlwifi_dev_ucode_error,
-	TP_PROTO(const struct device *dev, u32 desc, u32 tsf_low,
-		 u32 data1, u32 data2, u32 line, u32 blink2, u32 ilink1,
-		 u32 ilink2, u32 bcon_time, u32 gp1, u32 gp2, u32 rev_type,
-		 u32 major, u32 minor, u32 hw_ver, u32 brd_ver),
-	TP_ARGS(dev, desc, tsf_low, data1, data2, line,
-		 blink2, ilink1, ilink2, bcon_time, gp1, gp2,
-		 rev_type, major, minor, hw_ver, brd_ver),
-	TP_STRUCT__entry(
-		DEV_ENTRY
-		__field(u32, desc)
-		__field(u32, tsf_low)
-		__field(u32, data1)
-		__field(u32, data2)
-		__field(u32, line)
-		__field(u32, blink2)
-		__field(u32, ilink1)
-		__field(u32, ilink2)
-		__field(u32, bcon_time)
-		__field(u32, gp1)
-		__field(u32, gp2)
-		__field(u32, rev_type)
-		__field(u32, major)
-		__field(u32, minor)
-		__field(u32, hw_ver)
-		__field(u32, brd_ver)
-	),
-	TP_fast_assign(
-		DEV_ASSIGN;
-		__entry->desc = desc;
-		__entry->tsf_low = tsf_low;
-		__entry->data1 = data1;
-		__entry->data2 = data2;
-		__entry->line = line;
-		__entry->blink2 = blink2;
-		__entry->ilink1 = ilink1;
-		__entry->ilink2 = ilink2;
-		__entry->bcon_time = bcon_time;
-		__entry->gp1 = gp1;
-		__entry->gp2 = gp2;
-		__entry->rev_type = rev_type;
-		__entry->major = major;
-		__entry->minor = minor;
-		__entry->hw_ver = hw_ver;
-		__entry->brd_ver = brd_ver;
-	),
-	TP_printk("[%s] #%02d %010u data 0x%08X 0x%08X line %u, "
-		  "blink2 0x%05X ilink 0x%05X 0x%05X "
-		  "bcon_tm %010u gp 0x%08X 0x%08X rev_type 0x%08X major 0x%08X "
-		  "minor 0x%08X hw 0x%08X brd 0x%08X",
-		  __get_str(dev), __entry->desc, __entry->tsf_low,
-		  __entry->data1, __entry->data2, __entry->line,
-		  __entry->blink2, __entry->ilink1, __entry->ilink2,
-		  __entry->bcon_time, __entry->gp1, __entry->gp2,
-		  __entry->rev_type, __entry->major, __entry->minor,
-		  __entry->hw_ver, __entry->brd_ver)
+		  __entry->framelen, __entry->skbaddr)
 );
 
 TRACE_EVENT(iwlwifi_dev_ucode_event,

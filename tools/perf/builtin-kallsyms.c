@@ -1,18 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * builtin-kallsyms.c
  *
  * Builtin command: Look for a symbol in the running kernel and its modules
  *
  * Copyright (C) 2017, Red Hat Inc, Arnaldo Carvalho de Melo <acme@redhat.com>
- *
- * Released under the GPL v2. (and only v2, not any later version)
  */
 #include <inttypes.h>
 #include "builtin.h"
 #include <linux/compiler.h>
 #include <subcmd/parse-options.h>
 #include "debug.h"
+#include "dso.h"
 #include "machine.h"
+#include "map.h"
 #include "symbol.h"
 
 static int __cmd_kallsyms(int argc, const char **argv)
@@ -27,16 +28,18 @@ static int __cmd_kallsyms(int argc, const char **argv)
 
 	for (i = 0; i < argc; ++i) {
 		struct map *map;
-		struct symbol *symbol = machine__find_kernel_function_by_name(machine, argv[i], &map);
+		const struct dso *dso;
+		struct symbol *symbol = machine__find_kernel_symbol_by_name(machine, argv[i], &map);
 
 		if (symbol == NULL) {
 			printf("%s: not found\n", argv[i]);
 			continue;
 		}
 
+		dso = map__dso(map);
 		printf("%s: %s %s %#" PRIx64 "-%#" PRIx64 " (%#" PRIx64 "-%#" PRIx64")\n",
-			symbol->name, map->dso->short_name, map->dso->long_name,
-			map->unmap_ip(map, symbol->start), map->unmap_ip(map, symbol->end),
+			symbol->name, dso->short_name, dso->long_name,
+			map__unmap_ip(map, symbol->start), map__unmap_ip(map, symbol->end),
 			symbol->start, symbol->end);
 	}
 
@@ -59,7 +62,6 @@ int cmd_kallsyms(int argc, const char **argv)
 	if (argc < 1)
 		usage_with_options(kallsyms_usage, options);
 
-	symbol_conf.sort_by_name = true;
 	symbol_conf.try_vmlinux_path = (symbol_conf.vmlinux_name == NULL);
 	if (symbol__init(NULL) < 0)
 		return -1;

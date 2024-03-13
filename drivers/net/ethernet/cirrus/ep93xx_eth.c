@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * EP93xx ethernet network device driver
  * Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
  * Dedicated to Marija Kulikova.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
@@ -25,10 +21,9 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 
-#include <mach/hardware.h>
+#include <linux/platform_data/eth-ep93xx.h>
 
 #define DRV_MODULE_NAME		"ep93xx-eth"
-#define DRV_MODULE_VERSION	"0.1"
 
 #define RX_QUEUE_ENTRIES	64
 #define TX_QUEUE_ENTRIES	8
@@ -332,7 +327,7 @@ static int ep93xx_poll(struct napi_struct *napi, int budget)
 	return rx;
 }
 
-static int ep93xx_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ep93xx_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ep93xx_priv *ep = netdev_priv(dev);
 	struct ep93xx_tdesc *txd;
@@ -694,8 +689,7 @@ static int ep93xx_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 static void ep93xx_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
-	strlcpy(info->version, DRV_MODULE_VERSION, sizeof(info->version));
+	strscpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
 }
 
 static int ep93xx_get_link_ksettings(struct net_device *dev,
@@ -739,7 +733,7 @@ static const struct net_device_ops ep93xx_netdev_ops = {
 	.ndo_open		= ep93xx_open,
 	.ndo_stop		= ep93xx_close,
 	.ndo_start_xmit		= ep93xx_xmit,
-	.ndo_do_ioctl		= ep93xx_ioctl,
+	.ndo_eth_ioctl		= ep93xx_ioctl,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 };
@@ -752,7 +746,7 @@ static struct net_device *ep93xx_dev_alloc(struct ep93xx_eth_data *data)
 	if (dev == NULL)
 		return NULL;
 
-	memcpy(dev->dev_addr, data->dev_addr, ETH_ALEN);
+	eth_hw_addr_set(dev, data->dev_addr);
 
 	dev->ethtool_ops = &ep93xx_ethtool_ops;
 	dev->netdev_ops = &ep93xx_netdev_ops;
@@ -763,14 +757,15 @@ static struct net_device *ep93xx_dev_alloc(struct ep93xx_eth_data *data)
 }
 
 
-static int ep93xx_eth_remove(struct platform_device *pdev)
+static void ep93xx_eth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev;
 	struct ep93xx_priv *ep;
+	struct resource *mem;
 
 	dev = platform_get_drvdata(pdev);
 	if (dev == NULL)
-		return 0;
+		return;
 
 	ep = netdev_priv(dev);
 
@@ -782,13 +777,11 @@ static int ep93xx_eth_remove(struct platform_device *pdev)
 		iounmap(ep->base_addr);
 
 	if (ep->res != NULL) {
-		release_resource(ep->res);
-		kfree(ep->res);
+		mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+		release_mem_region(mem->start, resource_size(mem));
 	}
 
 	free_netdev(dev);
-
-	return 0;
 }
 
 static int ep93xx_eth_probe(struct platform_device *pdev)
@@ -817,7 +810,7 @@ static int ep93xx_eth_probe(struct platform_device *pdev)
 	ep = netdev_priv(dev);
 	ep->dev = dev;
 	SET_NETDEV_DEV(dev, &pdev->dev);
-	netif_napi_add(dev, &ep->napi, ep93xx_poll, 64);
+	netif_napi_add(dev, &ep->napi, ep93xx_poll);
 
 	platform_set_drvdata(pdev, dev);
 
@@ -867,7 +860,7 @@ err_out:
 
 static struct platform_driver ep93xx_eth_driver = {
 	.probe		= ep93xx_eth_probe,
-	.remove		= ep93xx_eth_remove,
+	.remove_new	= ep93xx_eth_remove,
 	.driver		= {
 		.name	= "ep93xx-eth",
 	},
@@ -875,5 +868,6 @@ static struct platform_driver ep93xx_eth_driver = {
 
 module_platform_driver(ep93xx_eth_driver);
 
+MODULE_DESCRIPTION("Cirrus EP93xx Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:ep93xx-eth");

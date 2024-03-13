@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the Freescale Semiconductor MC13783 touchscreen.
  *
@@ -6,10 +7,6 @@
  *
  * Initial development of this code was funded by
  * Phytec Messtechnik GmbH, http://www.phytec.de/
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 #include <linux/platform_device.h>
 #include <linux/mfd/mc13783.h>
@@ -220,18 +217,16 @@ err_free_mem:
 	return ret;
 }
 
-static int mc13783_ts_remove(struct platform_device *pdev)
+static void mc13783_ts_remove(struct platform_device *pdev)
 {
 	struct mc13783_ts_priv *priv = platform_get_drvdata(pdev);
 
 	input_unregister_device(priv->idev);
 	kfree(priv);
-
-	return 0;
 }
 
 static struct platform_driver mc13783_ts_driver = {
-	.remove		= mc13783_ts_remove,
+	.remove_new	= mc13783_ts_remove,
 	.driver		= {
 		.name	= MC13783_TS_NAME,
 	},

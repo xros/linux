@@ -43,19 +43,18 @@ void musb_host_finish_resume(struct work_struct *work)
 	musb->port1_status |= USB_PORT_STAT_C_SUSPEND << 16;
 	usb_hcd_poll_rh_status(musb->hcd);
 	/* NOTE: it might really be A_WAIT_BCON ... */
-	musb->xceiv->otg->state = OTG_STATE_A_HOST;
+	musb_set_state(musb, OTG_STATE_A_HOST);
 
 	spin_unlock_irqrestore(&musb->lock, flags);
 }
 
-void musb_port_suspend(struct musb *musb, bool do_suspend)
+int musb_port_suspend(struct musb *musb, bool do_suspend)
 {
-	struct usb_otg	*otg = musb->xceiv->otg;
 	u8		power;
 	void __iomem	*mbase = musb->mregs;
 
 	if (!is_host_active(musb))
-		return;
+		return 0;
 
 	/* NOTE:  this doesn't necessarily put PHY into low power mode,
 	 * turning off its clock; that's a function of PHY integration and
@@ -66,25 +65,30 @@ void musb_port_suspend(struct musb *musb, bool do_suspend)
 	if (do_suspend) {
 		int retries = 10000;
 
-		power &= ~MUSB_POWER_RESUME;
-		power |= MUSB_POWER_SUSPENDM;
-		musb_writeb(mbase, MUSB_POWER, power);
+		if (power & MUSB_POWER_RESUME)
+			return -EBUSY;
 
-		/* Needed for OPT A tests */
-		power = musb_readb(mbase, MUSB_POWER);
-		while (power & MUSB_POWER_SUSPENDM) {
+		if (!(power & MUSB_POWER_SUSPENDM)) {
+			power |= MUSB_POWER_SUSPENDM;
+			musb_writeb(mbase, MUSB_POWER, power);
+
+			/* Needed for OPT A tests */
 			power = musb_readb(mbase, MUSB_POWER);
-			if (retries-- < 1)
-				break;
+			while (power & MUSB_POWER_SUSPENDM) {
+				power = musb_readb(mbase, MUSB_POWER);
+				if (retries-- < 1)
+					break;
+			}
 		}
 
 		musb_dbg(musb, "Root port suspended, power %02x", power);
 
 		musb->port1_status |= USB_PORT_STAT_SUSPEND;
-		switch (musb->xceiv->otg->state) {
+		switch (musb_get_state(musb)) {
 		case OTG_STATE_A_HOST:
-			musb->xceiv->otg->state = OTG_STATE_A_SUSPEND;
-			musb->is_active = otg->host->b_hnp_enable;
+			musb_set_state(musb, OTG_STATE_A_SUSPEND);
+			musb->is_active = musb->xceiv &&
+				musb->xceiv->otg->host->b_hnp_enable;
 			if (musb->is_active)
 				mod_timer(&musb->otg_timer, jiffies
 					+ msecs_to_jiffies(
@@ -92,13 +96,14 @@ void musb_port_suspend(struct musb *musb, bool do_suspend)
 			musb_platform_try_idle(musb, 0);
 			break;
 		case OTG_STATE_B_HOST:
-			musb->xceiv->otg->state = OTG_STATE_B_WAIT_ACON;
-			musb->is_active = otg->host->b_hnp_enable;
+			musb_set_state(musb, OTG_STATE_B_WAIT_ACON);
+			musb->is_active = musb->xceiv &&
+				musb->xceiv->otg->host->b_hnp_enable;
 			musb_platform_try_idle(musb, 0);
 			break;
 		default:
 			musb_dbg(musb, "bogus rh suspend? %s",
-				usb_otg_state_string(musb->xceiv->otg->state));
+				 musb_otg_state_string(musb));
 		}
 	} else if (power & MUSB_POWER_SUSPENDM) {
 		power &= ~MUSB_POWER_SUSPENDM;
@@ -111,6 +116,7 @@ void musb_port_suspend(struct musb *musb, bool do_suspend)
 		schedule_delayed_work(&musb->finish_resume_work,
 				      msecs_to_jiffies(USB_RESUME_TIMEOUT));
 	}
+	return 0;
 }
 
 void musb_port_reset(struct musb *musb, bool do_reset)
@@ -118,7 +124,7 @@ void musb_port_reset(struct musb *musb, bool do_reset)
 	u8		power;
 	void __iomem	*mbase = musb->mregs;
 
-	if (musb->xceiv->otg->state == OTG_STATE_B_IDLE) {
+	if (musb_get_state(musb) == OTG_STATE_B_IDLE) {
 		musb_dbg(musb, "HNP: Returning from HNP; no hub reset from b_idle");
 		musb->port1_status &= ~USB_PORT_STAT_RESET;
 		return;
@@ -191,32 +197,30 @@ void musb_port_reset(struct musb *musb, bool do_reset)
 
 void musb_root_disconnect(struct musb *musb)
 {
-	struct usb_otg	*otg = musb->xceiv->otg;
-
 	musb->port1_status = USB_PORT_STAT_POWER
 			| (USB_PORT_STAT_C_CONNECTION << 16);
 
 	usb_hcd_poll_rh_status(musb->hcd);
 	musb->is_active = 0;
 
-	switch (musb->xceiv->otg->state) {
+	switch (musb_get_state(musb)) {
 	case OTG_STATE_A_SUSPEND:
-		if (otg->host->b_hnp_enable) {
-			musb->xceiv->otg->state = OTG_STATE_A_PERIPHERAL;
+		if (musb->xceiv && musb->xceiv->otg->host->b_hnp_enable) {
+			musb_set_state(musb, OTG_STATE_A_PERIPHERAL);
 			musb->g.is_a_peripheral = 1;
 			break;
 		}
-		/* FALLTHROUGH */
+		fallthrough;
 	case OTG_STATE_A_HOST:
-		musb->xceiv->otg->state = OTG_STATE_A_WAIT_BCON;
+		musb_set_state(musb, OTG_STATE_A_WAIT_BCON);
 		musb->is_active = 0;
 		break;
 	case OTG_STATE_A_WAIT_VFALL:
-		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
+		musb_set_state(musb, OTG_STATE_B_IDLE);
 		break;
 	default:
 		musb_dbg(musb, "host disconnect (%s)",
-			usb_otg_state_string(musb->xceiv->otg->state));
+			 musb_otg_state_string(musb));
 	}
 }
 EXPORT_SYMBOL_GPL(musb_root_disconnect);
@@ -249,7 +253,7 @@ static int musb_has_gadget(struct musb *musb)
 #ifdef CONFIG_USB_MUSB_HOST
 	return 1;
 #else
-	return musb->port_mode == MUSB_PORT_MODE_HOST;
+	return musb->port_mode == MUSB_HOST;
 #endif
 }
 
@@ -380,25 +384,25 @@ int musb_hub_control(
 
 			wIndex >>= 8;
 			switch (wIndex) {
-			case 1:
-				pr_debug("TEST_J\n");
+			case USB_TEST_J:
+				pr_debug("USB_TEST_J\n");
 				temp = MUSB_TEST_J;
 				break;
-			case 2:
-				pr_debug("TEST_K\n");
+			case USB_TEST_K:
+				pr_debug("USB_TEST_K\n");
 				temp = MUSB_TEST_K;
 				break;
-			case 3:
-				pr_debug("TEST_SE0_NAK\n");
+			case USB_TEST_SE0_NAK:
+				pr_debug("USB_TEST_SE0_NAK\n");
 				temp = MUSB_TEST_SE0_NAK;
 				break;
-			case 4:
-				pr_debug("TEST_PACKET\n");
+			case USB_TEST_PACKET:
+				pr_debug("USB_TEST_PACKET\n");
 				temp = MUSB_TEST_PACKET;
 				musb_load_testpacket(musb);
 				break;
-			case 5:
-				pr_debug("TEST_FORCE_ENABLE\n");
+			case USB_TEST_FORCE_ENABLE:
+				pr_debug("USB_TEST_FORCE_ENABLE\n");
 				temp = MUSB_TEST_FORCE_HOST
 					| MUSB_TEST_FORCE_HS;
 

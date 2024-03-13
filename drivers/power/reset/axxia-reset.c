@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Reset driver for Axxia devices
  *
  * Copyright (C) 2014 LSI
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 #include <linux/init.h>
 #include <linux/err.h>
@@ -65,7 +56,7 @@ static int axxia_reset_probe(struct platform_device *pdev)
 
 	syscon = syscon_regmap_lookup_by_phandle(dev->of_node, "syscon");
 	if (IS_ERR(syscon)) {
-		pr_err("%s: syscon lookup failed\n", dev->of_node->name);
+		pr_err("%pOFn: syscon lookup failed\n", dev->of_node);
 		return PTR_ERR(syscon);
 	}
 
@@ -89,9 +80,4 @@ static struct platform_driver axxia_reset_driver = {
 		.of_match_table = of_match_ptr(of_axxia_reset_match),
 	},
 };
-
-static int __init axxia_reset_init(void)
-{
-	return platform_driver_register(&axxia_reset_driver);
-}
-device_initcall(axxia_reset_init);
+builtin_platform_driver(axxia_reset_driver);

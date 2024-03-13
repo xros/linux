@@ -6,8 +6,7 @@
  * Copyright 2016 Linaro Ltd.
  */
 
-#include "greybus.h"
-
+#include <linux/greybus.h>
 #include <linux/cdev.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
@@ -37,7 +36,10 @@ struct gb_cap {
 	dev_t			dev_num;
 };
 
-static struct class *cap_class;
+static const struct class cap_class = {
+	.name = "gb_authenticate",
+};
+
 static dev_t cap_dev_num;
 static DEFINE_IDA(cap_minors_map);
 static LIST_HEAD(cap_list);
@@ -202,7 +204,7 @@ static int cap_release(struct inode *inode, struct file *file)
 }
 
 static int cap_ioctl(struct gb_cap *cap, unsigned int cmd,
-			 void __user *buf)
+		     void __user *buf)
 {
 	struct cap_ioc_get_endpoint_uid endpoint_uid;
 	struct cap_ioc_get_ims_certificate *ims_cert;
@@ -337,7 +339,7 @@ int gb_cap_connection_init(struct gb_connection *connection)
 		goto err_remove_ida;
 
 	/* Add a soft link to the previously added char-dev within the bundle */
-	cap->class_device = device_create(cap_class, cap->parent, cap->dev_num,
+	cap->class_device = device_create(&cap_class, cap->parent, cap->dev_num,
 					  NULL, "gb-authenticate-%d", minor);
 	if (IS_ERR(cap->class_device)) {
 		ret = PTR_ERR(cap->class_device);
@@ -371,7 +373,7 @@ void gb_cap_connection_exit(struct gb_connection *connection)
 
 	cap = gb_connection_get_data(connection);
 
-	device_destroy(cap_class, cap->dev_num);
+	device_destroy(&cap_class, cap->dev_num);
 	cdev_del(&cap->cdev);
 	ida_simple_remove(&cap_minors_map, MINOR(cap->dev_num));
 
@@ -403,9 +405,9 @@ int cap_init(void)
 {
 	int ret;
 
-	cap_class = class_create(THIS_MODULE, "gb_authenticate");
-	if (IS_ERR(cap_class))
-		return PTR_ERR(cap_class);
+	ret = class_register(&cap_class);
+	if (ret)
+		return ret;
 
 	ret = alloc_chrdev_region(&cap_dev_num, 0, NUM_MINORS,
 				  "gb_authenticate");
@@ -415,13 +417,13 @@ int cap_init(void)
 	return 0;
 
 err_remove_class:
-	class_destroy(cap_class);
+	class_unregister(&cap_class);
 	return ret;
 }
 
 void cap_exit(void)
 {
 	unregister_chrdev_region(cap_dev_num, NUM_MINORS);
-	class_destroy(cap_class);
+	class_unregister(&cap_class);
 	ida_destroy(&cap_minors_map);
 }

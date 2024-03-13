@@ -16,31 +16,18 @@
 #include <linux/bug.h>
 #include <linux/jiffies.h>
 #include <linux/refcount.h>
+#include <linux/rcuref.h>
 #include <net/neighbour.h>
 #include <asm/processor.h>
-
-#define DST_GC_MIN	(HZ/10)
-#define DST_GC_INC	(HZ/2)
-#define DST_GC_MAX	(120*HZ)
-
-/* Each dst_entry has reference count and sits in some parent list(s).
- * When it is removed from parent list, it is "freed" (dst_free).
- * After this it enters dead state (dst->obsolete > 0) and if its refcnt
- * is zero, it can be destroyed immediately, otherwise it is added
- * to gc list and garbage collector periodically checks the refcnt.
- */
+#include <linux/indirect_call_wrapper.h>
 
 struct sk_buff;
 
 struct dst_entry {
 	struct net_device       *dev;
-	struct rcu_head		rcu_head;
-	struct dst_entry	*child;
 	struct  dst_ops	        *ops;
 	unsigned long		_metrics;
 	unsigned long           expires;
-	struct dst_entry	*path;
-	struct dst_entry	*from;
 #ifdef CONFIG_XFRM
 	struct xfrm_state	*xfrm;
 #else
@@ -50,7 +37,6 @@ struct dst_entry {
 	int			(*output)(struct net *net, struct sock *sk, struct sk_buff *skb);
 
 	unsigned short		flags;
-#define DST_HOST		0x0001
 #define DST_NOXFRM		0x0002
 #define DST_NOPOLICY		0x0004
 #define DST_NOCOUNT		0x0008
@@ -58,8 +44,6 @@ struct dst_entry {
 #define DST_XFRM_TUNNEL		0x0020
 #define DST_XFRM_QUEUE		0x0040
 #define DST_METADATA		0x0080
-
-	short			error;
 
 	/* A non-zero value of dst->obsolete forces by-hand validation
 	 * of the route entry.  Positive values are set by the generic
@@ -76,41 +60,44 @@ struct dst_entry {
 #define DST_OBSOLETE_KILL	-2
 	unsigned short		header_len;	/* more space at head required */
 	unsigned short		trailer_len;	/* space to reserve at tail */
-	unsigned short		__pad3;
 
-#ifdef CONFIG_IP_ROUTE_CLASSID
-	__u32			tclassid;
-#else
-	__u32			__pad2;
-#endif
-
-#ifdef CONFIG_64BIT
 	/*
-	 * Align __refcnt to a 64 bytes alignment
-	 * (L1_CACHE_SIZE would be too much)
-	 */
-	long			__pad_to_align_refcnt[2];
-#endif
-	/*
-	 * __refcnt wants to be on a different cache line from
+	 * __rcuref wants to be on a different cache line from
 	 * input/output/ops or performance tanks badly
 	 */
-	atomic_t		__refcnt;	/* client references	*/
+#ifdef CONFIG_64BIT
+	rcuref_t		__rcuref;	/* 64-bit offset 64 */
+#endif
 	int			__use;
 	unsigned long		lastuse;
+	struct rcu_head		rcu_head;
+	short			error;
+	short			__pad;
+	__u32			tclassid;
+#ifndef CONFIG_64BIT
 	struct lwtunnel_state   *lwtstate;
-	union {
-		struct dst_entry	*next;
-		struct rtable __rcu	*rt_next;
-		struct rt6_info __rcu	*rt6_next;
-		struct dn_route __rcu	*dn_next;
-	};
+	rcuref_t		__rcuref;	/* 32-bit offset 64 */
+#endif
+	netdevice_tracker	dev_tracker;
+
+	/*
+	 * Used by rtable and rt6_info. Moves lwtstate into the next cache
+	 * line on 64bit so that lwtstate does not cause false sharing with
+	 * __rcuref under contention of __rcuref. This also puts the
+	 * frequently accessed members of rtable and rt6_info out of the
+	 * __rcuref cache line.
+	 */
+	struct list_head	rt_uncached;
+	struct uncached_list	*rt_uncached_list;
+#ifdef CONFIG_64BIT
+	struct lwtunnel_state   *lwtstate;
+#endif
 };
 
 struct dst_metrics {
 	u32		metrics[RTAX_MAX];
 	refcount_t	refcnt;
-};
+} __aligned(4);		/* Low pointer bits contain DST_METRICS_FLAGS */
 extern const struct dst_metrics dst_default_metrics;
 
 u32 *dst_cow_metrics_generic(struct dst_entry *dst, unsigned long old);
@@ -211,7 +198,7 @@ static inline void dst_metric_set(struct dst_entry *dst, int metric, u32 val)
 }
 
 /* Kernel-internal feature bits that are unallocated in user space. */
-#define DST_FEATURE_ECN_CA	(1 << 31)
+#define DST_FEATURE_ECN_CA	(1U << 31)
 
 #define DST_FEATURE_MASK	(DST_FEATURE_ECN_CA)
 #define DST_FEATURE_ECN_MASK	(DST_FEATURE_ECN_CA | RTAX_FEATURE_ECN)
@@ -222,9 +209,11 @@ dst_feature(const struct dst_entry *dst, u32 feature)
 	return dst_metric(dst, RTAX_FEATURES) & feature;
 }
 
+INDIRECT_CALLABLE_DECLARE(unsigned int ip6_mtu(const struct dst_entry *));
+INDIRECT_CALLABLE_DECLARE(unsigned int ipv4_mtu(const struct dst_entry *));
 static inline u32 dst_mtu(const struct dst_entry *dst)
 {
-	return dst->ops->mtu(dst);
+	return INDIRECT_CALL_INET(dst->ops->mtu, ip6_mtu, ipv4_mtu, dst);
 }
 
 /* RTT metrics are stored in milliseconds for user ABI, but used as jiffies */
@@ -233,27 +222,20 @@ static inline unsigned long dst_metric_rtt(const struct dst_entry *dst, int metr
 	return msecs_to_jiffies(dst_metric(dst, metric));
 }
 
-static inline u32
-dst_allfrag(const struct dst_entry *dst)
-{
-	int ret = dst_feature(dst,  RTAX_FEATURE_ALLFRAG);
-	return ret;
-}
-
 static inline int
 dst_metric_locked(const struct dst_entry *dst, int metric)
 {
-	return dst_metric(dst, RTAX_LOCK) & (1<<metric);
+	return dst_metric(dst, RTAX_LOCK) & (1 << metric);
 }
 
 static inline void dst_hold(struct dst_entry *dst)
 {
 	/*
 	 * If your kernel compilation stops here, please check
-	 * __pad_to_align_refcnt declaration in struct dst_entry
+	 * the placement of __rcuref in struct dst_entry
 	 */
-	BUILD_BUG_ON(offsetof(struct dst_entry, __refcnt) & 63);
-	WARN_ON(atomic_inc_not_zero(&dst->__refcnt) == 0);
+	BUILD_BUG_ON(offsetof(struct dst_entry, __rcuref) & 63);
+	WARN_ON(!rcuref_get(&dst->__rcuref));
 }
 
 static inline void dst_use_noref(struct dst_entry *dst, unsigned long time)
@@ -262,12 +244,6 @@ static inline void dst_use_noref(struct dst_entry *dst, unsigned long time)
 		dst->__use++;
 		dst->lastuse = time;
 	}
-}
-
-static inline void dst_hold_and_use(struct dst_entry *dst, unsigned long time)
-{
-	dst_hold(dst);
-	dst_use_noref(dst, time);
 }
 
 static inline struct dst_entry *dst_clone(struct dst_entry *dst)
@@ -303,6 +279,7 @@ static inline void skb_dst_drop(struct sk_buff *skb)
 
 static inline void __skb_dst_copy(struct sk_buff *nskb, unsigned long refdst)
 {
+	nskb->slow_gro |= !!refdst;
 	nskb->_skb_refdst = refdst;
 	if (!(nskb->_skb_refdst & SKB_DST_NOREF))
 		dst_clone(skb_dst(nskb));
@@ -322,7 +299,7 @@ static inline void skb_dst_copy(struct sk_buff *nskb, const struct sk_buff *oskb
  */
 static inline bool dst_hold_safe(struct dst_entry *dst)
 {
-	return atomic_inc_not_zero(&dst->__refcnt);
+	return rcuref_get(&dst->__rcuref);
 }
 
 /**
@@ -330,8 +307,9 @@ static inline bool dst_hold_safe(struct dst_entry *dst)
  * @skb: buffer
  *
  * If dst is not yet refcounted and not destroyed, grab a ref on it.
+ * Returns true if dst is refcounted.
  */
-static inline void skb_dst_force(struct sk_buff *skb)
+static inline bool skb_dst_force(struct sk_buff *skb)
 {
 	if (skb_dst_is_noref(skb)) {
 		struct dst_entry *dst = skb_dst(skb);
@@ -341,7 +319,10 @@ static inline void skb_dst_force(struct sk_buff *skb)
 			dst = NULL;
 
 		skb->_skb_refdst = (unsigned long)dst;
+		skb->slow_gro |= !!dst;
 	}
+
+	return skb->_skb_refdst != 0UL;
 }
 
 
@@ -373,6 +354,7 @@ static inline void __skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
  *	skb_tunnel_rx - prepare skb for rx reinsert
  *	@skb: buffer
  *	@dev: tunnel device
+ *	@net: netns for packet i/o
  *
  *	After decapsulation, packet is going to re-enter (netif_rx()) our stack,
  *	so make some cleanups, and perform accounting.
@@ -381,9 +363,8 @@ static inline void __skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
 static inline void skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
 				 struct net *net)
 {
-	/* TODO : stats should be SMP safe */
-	dev->stats.rx_packets++;
-	dev->stats.rx_bytes += skb->len;
+	DEV_STATS_INC(dev, rx_packets);
+	DEV_STATS_ADD(dev, rx_bytes, skb->len);
 	__skb_tunnel_rx(skb, dev, net);
 }
 
@@ -404,10 +385,10 @@ static inline int dst_discard(struct sk_buff *skb)
 {
 	return dst_discard_out(&init_net, skb->sk, skb);
 }
-void *dst_alloc(struct dst_ops *ops, struct net_device *dev, int initial_ref,
+void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
 		int initial_obsolete, unsigned short flags);
 void dst_init(struct dst_entry *dst, struct dst_ops *ops,
-	      struct net_device *dev, int initial_ref, int initial_obsolete,
+	      struct net_device *dev, int initial_obsolete,
 	      unsigned short flags);
 struct dst_entry *dst_destroy(struct dst_entry *dst);
 void dst_dev_put(struct dst_entry *dst);
@@ -425,7 +406,13 @@ static inline struct neighbour *dst_neigh_lookup(const struct dst_entry *dst, co
 static inline struct neighbour *dst_neigh_lookup_skb(const struct dst_entry *dst,
 						     struct sk_buff *skb)
 {
-	struct neighbour *n =  dst->ops->neigh_lookup(dst, skb, NULL);
+	struct neighbour *n;
+
+	if (WARN_ON_ONCE(!dst->ops->neigh_lookup))
+		return NULL;
+
+	n = dst->ops->neigh_lookup(dst, skb, NULL);
+
 	return IS_ERR(n) ? NULL : n;
 }
 
@@ -454,22 +441,36 @@ static inline void dst_set_expires(struct dst_entry *dst, int timeout)
 		dst->expires = expires;
 }
 
+INDIRECT_CALLABLE_DECLARE(int ip6_output(struct net *, struct sock *,
+					 struct sk_buff *));
+INDIRECT_CALLABLE_DECLARE(int ip_output(struct net *, struct sock *,
+					 struct sk_buff *));
 /* Output packet to network from transport.  */
 static inline int dst_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	return skb_dst(skb)->output(net, sk, skb);
+	return INDIRECT_CALL_INET(skb_dst(skb)->output,
+				  ip6_output, ip_output,
+				  net, sk, skb);
 }
 
+INDIRECT_CALLABLE_DECLARE(int ip6_input(struct sk_buff *));
+INDIRECT_CALLABLE_DECLARE(int ip_local_deliver(struct sk_buff *));
 /* Input packet from network to transport.  */
 static inline int dst_input(struct sk_buff *skb)
 {
-	return skb_dst(skb)->input(skb);
+	return INDIRECT_CALL_INET(skb_dst(skb)->input,
+				  ip6_input, ip_local_deliver, skb);
 }
 
+INDIRECT_CALLABLE_DECLARE(struct dst_entry *ip6_dst_check(struct dst_entry *,
+							  u32));
+INDIRECT_CALLABLE_DECLARE(struct dst_entry *ipv4_dst_check(struct dst_entry *,
+							   u32));
 static inline struct dst_entry *dst_check(struct dst_entry *dst, u32 cookie)
 {
 	if (dst->obsolete)
-		dst = dst->ops->check(dst, cookie);
+		dst = INDIRECT_CALL_INET(dst->ops->check, ip6_dst_check,
+					 ipv4_dst_check, dst, cookie);
 	return dst;
 }
 
@@ -487,6 +488,14 @@ static inline struct dst_entry *xfrm_lookup(struct net *net,
 					    const struct flowi *fl,
 					    const struct sock *sk,
 					    int flags)
+{
+	return dst_orig;
+}
+
+static inline struct dst_entry *
+xfrm_lookup_with_ifid(struct net *net, struct dst_entry *dst_orig,
+		      const struct flowi *fl, const struct sock *sk,
+		      int flags, u32 if_id)
 {
 	return dst_orig;
 }
@@ -510,6 +519,12 @@ struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 			      const struct flowi *fl, const struct sock *sk,
 			      int flags);
 
+struct dst_entry *xfrm_lookup_with_ifid(struct net *net,
+					struct dst_entry *dst_orig,
+					const struct flowi *fl,
+					const struct sock *sk, int flags,
+					u32 if_id);
+
 struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
 				    const struct flowi *fl, const struct sock *sk,
 				    int flags);
@@ -526,7 +541,27 @@ static inline void skb_dst_update_pmtu(struct sk_buff *skb, u32 mtu)
 	struct dst_entry *dst = skb_dst(skb);
 
 	if (dst && dst->ops->update_pmtu)
-		dst->ops->update_pmtu(dst, NULL, skb, mtu);
+		dst->ops->update_pmtu(dst, NULL, skb, mtu, true);
 }
+
+/* update dst pmtu but not do neighbor confirm */
+static inline void skb_dst_update_pmtu_no_confirm(struct sk_buff *skb, u32 mtu)
+{
+	struct dst_entry *dst = skb_dst(skb);
+
+	if (dst && dst->ops->update_pmtu)
+		dst->ops->update_pmtu(dst, NULL, skb, mtu, false);
+}
+
+struct dst_entry *dst_blackhole_check(struct dst_entry *dst, u32 cookie);
+void dst_blackhole_update_pmtu(struct dst_entry *dst, struct sock *sk,
+			       struct sk_buff *skb, u32 mtu, bool confirm_neigh);
+void dst_blackhole_redirect(struct dst_entry *dst, struct sock *sk,
+			    struct sk_buff *skb);
+u32 *dst_blackhole_cow_metrics(struct dst_entry *dst, unsigned long old);
+struct neighbour *dst_blackhole_neigh_lookup(const struct dst_entry *dst,
+					     struct sk_buff *skb,
+					     const void *daddr);
+unsigned int dst_blackhole_mtu(const struct dst_entry *dst);
 
 #endif /* _NET_DST_H */

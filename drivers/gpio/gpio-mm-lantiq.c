@@ -1,7 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License version 2 as published
- *  by the Free Software Foundation.
  *
  *  Copyright (C) 2012 John Crispin <john@phrozen.org>
  */
@@ -11,9 +9,9 @@
 #include <linux/types.h>
 #include <linux/platform_device.h>
 #include <linux/mutex.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
+#include <linux/gpio/legacy-of-mm-gpiochip.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/io.h>
 #include <linux/slab.h>
 
@@ -38,7 +36,7 @@ struct ltq_mm {
  * @chip:     Pointer to our private data structure.
  *
  * Write the shadow value to the EBU to set the gpios. We need to set the
- * global EBU lock to make sure that PCI/MTD dont break.
+ * global EBU lock to make sure that PCI/MTD don't break.
  */
 static void ltq_mm_apply(struct ltq_mm *chip)
 {
@@ -123,13 +121,11 @@ static int ltq_mm_probe(struct platform_device *pdev)
 	return of_mm_gpiochip_add_data(pdev->dev.of_node, &chip->mmchip, chip);
 }
 
-static int ltq_mm_remove(struct platform_device *pdev)
+static void ltq_mm_remove(struct platform_device *pdev)
 {
 	struct ltq_mm *chip = platform_get_drvdata(pdev);
 
 	of_mm_gpiochip_remove(&chip->mmchip);
-
-	return 0;
 }
 
 static const struct of_device_id ltq_mm_match[] = {
@@ -140,7 +136,7 @@ MODULE_DEVICE_TABLE(of, ltq_mm_match);
 
 static struct platform_driver ltq_mm_driver = {
 	.probe = ltq_mm_probe,
-	.remove = ltq_mm_remove,
+	.remove_new = ltq_mm_remove,
 	.driver = {
 		.name = "gpio-mm-ltq",
 		.of_match_table = ltq_mm_match,

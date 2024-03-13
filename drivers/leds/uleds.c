@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Userspace driver for the LED subsystem
  *
  * Copyright (C) 2016 David Lechner <david@lechnology.com>
  *
  * Based on uinput.c: Aristeu Sergio Rozanski Filho <aris@cathedrallabs.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -74,7 +65,7 @@ static int uleds_open(struct inode *inode, struct file *file)
 	udev->state = ULEDS_STATE_UNKNOWN;
 
 	file->private_data = udev;
-	nonseekable_open(inode, file);
+	stream_open(inode, file);
 
 	return 0;
 }
@@ -183,7 +174,7 @@ static __poll_t uleds_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &udev->waitq, wait);
 
 	if (udev->new_data)
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
 	return 0;
 }
@@ -218,17 +209,7 @@ static struct miscdevice uleds_misc = {
 	.name		= ULEDS_NAME,
 };
 
-static int __init uleds_init(void)
-{
-	return misc_register(&uleds_misc);
-}
-module_init(uleds_init);
-
-static void __exit uleds_exit(void)
-{
-	misc_deregister(&uleds_misc);
-}
-module_exit(uleds_exit);
+module_misc_device(uleds_misc);
 
 MODULE_AUTHOR("David Lechner <david@lechnology.com>");
 MODULE_DESCRIPTION("Userspace driver for the LED subsystem");

@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2014 Redpine Signals Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
@@ -17,6 +17,7 @@
 #include "rsi_mgmt.h"
 #include "rsi_common.h"
 #include "rsi_hal.h"
+#include "rsi_coex.h"
 
 /**
  * rsi_determine_min_weight_queue() - This function determines the queue with
@@ -192,8 +193,7 @@ get_queue_num:
 		if (recontend_queue)
 			goto get_queue_num;
 
-		q_num = INVALID_QUEUE;
-		return q_num;
+		return INVALID_QUEUE;
 	}
 
 	common->selected_qnum = q_num;
@@ -301,14 +301,23 @@ void rsi_core_qos_processor(struct rsi_common *common)
 			mutex_unlock(&common->tx_lock);
 			break;
 		}
-
-		if (q_num == MGMT_SOFT_Q) {
-			status = rsi_send_mgmt_pkt(common, skb);
-		} else if (q_num == MGMT_BEACON_Q) {
+		if (q_num == MGMT_BEACON_Q) {
 			status = rsi_send_pkt_to_bus(common, skb);
 			dev_kfree_skb(skb);
 		} else {
-			status = rsi_send_data_pkt(common, skb);
+#ifdef CONFIG_RSI_COEX
+			if (common->coex_mode > 1) {
+				status = rsi_coex_send_pkt(common, skb,
+							   RSI_WLAN_Q);
+			} else {
+#endif
+				if (q_num == MGMT_SOFT_Q)
+					status = rsi_send_mgmt_pkt(common, skb);
+				else
+					status = rsi_send_data_pkt(common, skb);
+#ifdef CONFIG_RSI_COEX
+			}
+#endif
 		}
 
 		if (status) {
@@ -390,6 +399,8 @@ void rsi_core_xmit(struct rsi_common *common, struct sk_buff *skb)
 
 	info = IEEE80211_SKB_CB(skb);
 	tx_params = (struct skb_info *)info->driver_data;
+	/* info->driver_data and info->control part of union so make copy */
+	tx_params->have_key = !!info->control.hw_key;
 	wh = (struct ieee80211_hdr *)&skb->data[0];
 	tx_params->sta_id = 0;
 
@@ -401,11 +412,31 @@ void rsi_core_xmit(struct rsi_common *common, struct sk_buff *skb)
 	if ((ieee80211_is_mgmt(wh->frame_control)) ||
 	    (ieee80211_is_ctl(wh->frame_control)) ||
 	    (ieee80211_is_qos_nullfunc(wh->frame_control))) {
+		if (ieee80211_is_assoc_req(wh->frame_control) ||
+		    ieee80211_is_reassoc_req(wh->frame_control)) {
+			struct ieee80211_bss_conf *bss = &vif->bss_conf;
+
+			common->eapol4_confirm = false;
+			rsi_hal_send_sta_notify_frame(common,
+						      RSI_IFTYPE_STATION,
+						      STA_CONNECTED, bss->bssid,
+						      bss->qos, vif->cfg.aid,
+						      0,
+						      vif);
+		}
+
 		q_num = MGMT_SOFT_Q;
 		skb->priority = q_num;
+
+		if (rsi_prepare_mgmt_desc(common, skb)) {
+			rsi_dbg(ERR_ZONE, "Failed to prepare desc\n");
+			goto xmit_fail;
+		}
 	} else {
 		if (ieee80211_is_data_qos(wh->frame_control)) {
-			tid = (skb->data[24] & IEEE80211_QOS_TID);
+			u8 *qos = ieee80211_get_qos_ctl(wh);
+
+			tid = *qos & IEEE80211_QOS_CTL_TID_MASK;
 			skb->priority = TID_TO_WME_AC(tid);
 		} else {
 			tid = IEEE80211_NONQOS_TID;
@@ -423,6 +454,8 @@ void rsi_core_xmit(struct rsi_common *common, struct sk_buff *skb)
 			if (!rsta)
 				goto xmit_fail;
 			tx_params->sta_id = rsta->sta_id;
+		} else {
+			tx_params->sta_id = 0;
 		}
 
 		if (rsta) {
@@ -432,6 +465,16 @@ void rsi_core_xmit(struct rsi_common *common, struct sk_buff *skb)
 				ieee80211_start_tx_ba_session(rsta->sta,
 							      tid, 0);
 			}
+		}
+
+		if (IEEE80211_SKB_CB(skb)->control.flags &
+		    IEEE80211_TX_CTRL_PORT_CTRL_PROTO) {
+			q_num = MGMT_SOFT_Q;
+			skb->priority = q_num;
+		}
+		if (rsi_prepare_data_desc(common, skb)) {
+			rsi_dbg(ERR_ZONE, "Failed to prepare data desc\n");
+			goto xmit_fail;
 		}
 	}
 
@@ -446,7 +489,7 @@ void rsi_core_xmit(struct rsi_common *common, struct sk_buff *skb)
 	}
 
 	rsi_core_queue_pkt(common, skb);
-	rsi_dbg(DATA_TX_ZONE, "%s: ===> Scheduling TX thead <===\n", __func__);
+	rsi_dbg(DATA_TX_ZONE, "%s: ===> Scheduling TX thread <===\n", __func__);
 	rsi_set_event(&common->tx_thread.event);
 
 	return;

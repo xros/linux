@@ -282,9 +282,6 @@ static void neo_copy_data_from_uart_to_queue(struct jsm_channel *ch)
 	u16 head;
 	u16 tail;
 
-	if (!ch)
-		return;
-
 	/* cache head and tail of queue */
 	head = ch->ch_r_head & RQUEUEMASK;
 	tail = ch->ch_r_tail & RQUEUEMASK;
@@ -294,7 +291,8 @@ static void neo_copy_data_from_uart_to_queue(struct jsm_channel *ch)
 	ch->ch_cached_lsr = 0;
 
 	/* Store how much space we have left in the queue */
-	if ((qleft = tail - head - 1) < 0)
+	qleft = tail - head - 1;
+	if (qleft < 0)
 		qleft += RQUEUEMASK + 1;
 
 	/*
@@ -818,7 +816,9 @@ static void neo_parse_isr(struct jsm_board *brd, u32 port)
 		/* Parse any modem signal changes */
 		jsm_dbg(INTR, &ch->ch_bd->pci_dev,
 			"MOD_STAT: sending to parse_modem_sigs\n");
+		uart_port_lock_irqsave(&ch->uart_port, &lock_flags);
 		neo_parse_modem(ch, readb(&ch->ch_neo_uart->msr));
+		uart_port_unlock_irqrestore(&ch->uart_port, lock_flags);
 	}
 }
 
@@ -938,7 +938,7 @@ static void neo_param(struct jsm_channel *ch)
 	/*
 	 * If baud rate is zero, flush queues, and set mval to drop DTR.
 	 */
-	if ((ch->ch_c_cflag & (CBAUD)) == 0) {
+	if ((ch->ch_c_cflag & CBAUD) == B0) {
 		ch->ch_r_head = ch->ch_r_tail = 0;
 		ch->ch_e_head = ch->ch_e_tail = 0;
 
@@ -997,33 +997,13 @@ static void neo_param(struct jsm_channel *ch)
 	if (!(ch->ch_c_cflag & PARODD))
 		lcr |= UART_LCR_EPAR;
 
-	/*
-	 * Not all platforms support mark/space parity,
-	 * so this will hide behind an ifdef.
-	 */
-#ifdef CMSPAR
 	if (ch->ch_c_cflag & CMSPAR)
 		lcr |= UART_LCR_SPAR;
-#endif
 
 	if (ch->ch_c_cflag & CSTOPB)
 		lcr |= UART_LCR_STOP;
 
-	switch (ch->ch_c_cflag & CSIZE) {
-	case CS5:
-		lcr |= UART_LCR_WLEN5;
-		break;
-	case CS6:
-		lcr |= UART_LCR_WLEN6;
-		break;
-	case CS7:
-		lcr |= UART_LCR_WLEN7;
-		break;
-	case CS8:
-	default:
-		lcr |= UART_LCR_WLEN8;
-	break;
-	}
+	lcr |= UART_LCR_WLEN(tty_get_char_size(ch->ch_c_cflag));
 
 	ier = readb(&ch->ch_neo_uart->ier);
 	uart_lcr = readb(&ch->ch_neo_uart->lcr);
@@ -1175,6 +1155,9 @@ static irqreturn_t neo_intr(int irq, void *voidbrd)
 				continue;
 
 			ch = brd->channels[port];
+			if (!ch)
+				continue;
+
 			neo_copy_data_from_uart_to_queue(ch);
 
 			/* Call our tty layer to enforce queue flow control if needed. */
@@ -1326,25 +1309,6 @@ static void neo_uart_off(struct jsm_channel *ch)
 	writeb(0, &ch->ch_neo_uart->ier);
 }
 
-static u32 neo_get_uart_bytes_left(struct jsm_channel *ch)
-{
-	u8 left = 0;
-	u8 lsr = readb(&ch->ch_neo_uart->lsr);
-
-	/* We must cache the LSR as some of the bits get reset once read... */
-	ch->ch_cached_lsr |= lsr;
-
-	/* Determine whether the Transmitter is empty or not */
-	if (!(lsr & UART_LSR_TEMT))
-		left = 1;
-	else {
-		ch->ch_flags |= (CH_TX_FIFO_EMPTY | CH_TX_FIFO_LWM);
-		left = 0;
-	}
-
-	return left;
-}
-
 /* Channel lock MUST be held by the calling function! */
 static void neo_send_break(struct jsm_channel *ch)
 {
@@ -1365,25 +1329,6 @@ static void neo_send_break(struct jsm_channel *ch)
 	}
 }
 
-/*
- * neo_send_immediate_char.
- *
- * Sends a specific character as soon as possible to the UART,
- * jumping over any bytes that might be in the write queue.
- *
- * The channel lock MUST be held by the calling function.
- */
-static void neo_send_immediate_char(struct jsm_channel *ch, unsigned char c)
-{
-	if (!ch)
-		return;
-
-	writeb(c, &ch->ch_neo_uart->txrx);
-
-	/* flush write operation */
-	neo_pci_posting_flush(ch->ch_bd);
-}
-
 struct board_ops jsm_neo_ops = {
 	.intr				= neo_intr,
 	.uart_init			= neo_uart_init,
@@ -1399,6 +1344,4 @@ struct board_ops jsm_neo_ops = {
 	.send_start_character		= neo_send_start_character,
 	.send_stop_character		= neo_send_stop_character,
 	.copy_data_from_queue_to_uart	= neo_copy_data_from_queue_to_uart,
-	.get_uart_bytes_left		= neo_get_uart_bytes_left,
-	.send_immediate_char		= neo_send_immediate_char
 };

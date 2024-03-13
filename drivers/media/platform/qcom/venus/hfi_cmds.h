@@ -1,16 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  * Copyright (C) 2017 Linaro Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 #ifndef __VENUS_HFI_CMDS_H__
 #define __VENUS_HFI_CMDS_H__
@@ -65,7 +56,7 @@ struct hfi_sys_set_resource_pkt {
 	struct hfi_pkt_hdr hdr;
 	u32 resource_handle;
 	u32 resource_type;
-	u32 resource_data[1];
+	u32 resource_data[];
 };
 
 struct hfi_sys_release_resource_pkt {
@@ -77,7 +68,7 @@ struct hfi_sys_release_resource_pkt {
 struct hfi_sys_set_property_pkt {
 	struct hfi_pkt_hdr hdr;
 	u32 num_properties;
-	u32 data[1];
+	u32 data[];
 };
 
 struct hfi_sys_get_property_pkt {
@@ -116,7 +107,7 @@ struct hfi_session_abort_pkt {
 struct hfi_session_set_property_pkt {
 	struct hfi_session_hdr_pkt shdr;
 	u32 num_properties;
-	u32 data[0];
+	u32 data[];
 };
 
 struct hfi_session_set_buffers_pkt {
@@ -126,7 +117,7 @@ struct hfi_session_set_buffers_pkt {
 	u32 extradata_size;
 	u32 min_buffer_size;
 	u32 num_buffers;
-	u32 buffer_info[1];
+	u32 buffer_info[];
 };
 
 struct hfi_session_get_sequence_header_pkt {
@@ -251,7 +242,7 @@ struct hfi_session_parse_sequence_header_pkt {
 
 struct hfi_sfr {
 	u32 buf_size;
-	u8 data[1];
+	u8 data[] __counted_by(buf_size);
 };
 
 struct hfi_sys_test_ssr_pkt {
@@ -265,6 +256,7 @@ void pkt_sys_init(struct hfi_sys_init_pkt *pkt, u32 arch_type);
 void pkt_sys_pc_prep(struct hfi_sys_pc_prep_pkt *pkt);
 void pkt_sys_idle_indicator(struct hfi_sys_set_property_pkt *pkt, u32 enable);
 void pkt_sys_power_control(struct hfi_sys_set_property_pkt *pkt, u32 enable);
+void pkt_sys_ubwc_config(struct hfi_sys_set_property_pkt *pkt, const struct hfi_ubwc_config *hfi);
 int pkt_sys_set_resource(struct hfi_sys_set_resource_pkt *pkt, u32 id, u32 size,
 			 u32 addr, void *cookie);
 int pkt_sys_unset_resource(struct hfi_sys_release_resource_pkt *pkt, u32 id,

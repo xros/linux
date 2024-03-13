@@ -1,9 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: MIT */
 #ifndef __NVKM_OBJECT_H__
 #define __NVKM_OBJECT_H__
 #include <core/oclass.h>
 struct nvkm_event;
 struct nvkm_gpuobj;
+struct nvkm_uevent;
 
 struct nvkm_object {
 	const struct nvkm_object_func *func;
@@ -43,6 +44,7 @@ struct nvkm_object_func {
 	int (*bind)(struct nvkm_object *, struct nvkm_gpuobj *, int align,
 		    struct nvkm_gpuobj **);
 	int (*sclass)(struct nvkm_object *, int index, struct nvkm_oclass *);
+	int (*uevent)(struct nvkm_object *, void *argv, u32 argc, struct nvkm_uevent *);
 };
 
 void nvkm_object_ctor(const struct nvkm_object_func *,

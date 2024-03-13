@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * drivers/net/ethernet/ibm/emac/tah.c
  *
@@ -12,13 +13,10 @@
  * Matt Porter <mporter@kernel.crashing.org>
  *
  * Copyright (c) 2005 Eugene Surovegin <ebs@ebshome.net>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
+#include <linux/mod_devicetable.h>
 #include <linux/of_address.h>
+#include <linux/platform_device.h>
 #include <asm/io.h>
 
 #include "emac.h"
@@ -132,7 +130,7 @@ static int tah_probe(struct platform_device *ofdev)
 	return rc;
 }
 
-static int tah_remove(struct platform_device *ofdev)
+static void tah_remove(struct platform_device *ofdev)
 {
 	struct tah_instance *dev = platform_get_drvdata(ofdev);
 
@@ -140,8 +138,6 @@ static int tah_remove(struct platform_device *ofdev)
 
 	iounmap(dev->base);
 	kfree(dev);
-
-	return 0;
 }
 
 static const struct of_device_id tah_match[] =
@@ -162,7 +158,7 @@ static struct platform_driver tah_driver = {
 		.of_match_table = tah_match,
 	},
 	.probe = tah_probe,
-	.remove = tah_remove,
+	.remove_new = tah_remove,
 };
 
 int __init tah_init(void)

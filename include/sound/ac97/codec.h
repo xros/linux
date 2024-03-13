@@ -1,10 +1,8 @@
-/*
- *  Copyright (C) 2016 Robert Jarzmik <robert.jarzmik@free.fr>
+/* SPDX-License-Identifier: GPL-2.0
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ *  Copyright (C) 2016 Robert Jarzmik <robert.jarzmik@free.fr>
  */
+
 #ifndef __SOUND_AC97_CODEC2_H
 #define __SOUND_AC97_CODEC2_H
 
@@ -65,7 +63,7 @@ struct ac97_codec_device {
 struct ac97_codec_driver {
 	struct device_driver	driver;
 	int			(*probe)(struct ac97_codec_device *);
-	int			(*remove)(struct ac97_codec_device *);
+	void			(*remove)(struct ac97_codec_device *dev);
 	void			(*shutdown)(struct ac97_codec_device *);
 	const struct ac97_id	*id_table;
 };

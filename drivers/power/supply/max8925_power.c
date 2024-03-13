@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Battery driver for Maxim MAX8925
  *
  * Copyright (c) 2009-2010 Marvell International Ltd.
  *	Haojian Zhuang <haojian.zhuang@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -124,6 +121,7 @@ static irqreturn_t max8925_charger_handler(int irq, void *data)
 	case MAX8925_IRQ_VCHG_THM_OK_F:
 		/* Battery is not ready yet */
 		dev_dbg(chip->dev, "Battery temperature is out of range\n");
+		fallthrough;
 	case MAX8925_IRQ_VCHG_DC_OVP:
 		dev_dbg(chip->dev, "Error detection\n");
 		__set_charger(info, 0);
@@ -568,7 +566,7 @@ out:
 	return ret;
 }
 
-static int max8925_power_remove(struct platform_device *pdev)
+static void max8925_power_remove(struct platform_device *pdev)
 {
 	struct max8925_power_info *info = platform_get_drvdata(pdev);
 
@@ -578,12 +576,11 @@ static int max8925_power_remove(struct platform_device *pdev)
 		power_supply_unregister(info->battery);
 		max8925_deinit_charger(info);
 	}
-	return 0;
 }
 
 static struct platform_driver max8925_power_driver = {
 	.probe	= max8925_power_probe,
-	.remove	= max8925_power_remove,
+	.remove_new = max8925_power_remove,
 	.driver	= {
 		.name	= "max8925-power",
 	},

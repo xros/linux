@@ -1,17 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2009-2010 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
  *
  * Authors:
  *	Jesse Barnes <jbarnes@virtuousgeek.org>
@@ -601,6 +590,8 @@ static void ips_disable_gpu_turbo(struct ips_driver *ips)
  * @ips: IPS driver struct
  *
  * Check whether the MCP is over its thermal or power budget.
+ *
+ * Returns: %true if the temp or power has exceeded its maximum, else %false
  */
 static bool mcp_exceeded(struct ips_driver *ips)
 {
@@ -630,6 +621,8 @@ static bool mcp_exceeded(struct ips_driver *ips)
  * @cpu: CPU number to check
  *
  * Check a given CPU's average temp or power is over its limit.
+ *
+ * Returns: %true if the temp or power has exceeded its maximum, else %false
  */
 static bool cpu_exceeded(struct ips_driver *ips, int cpu)
 {
@@ -656,6 +649,8 @@ static bool cpu_exceeded(struct ips_driver *ips, int cpu)
  * @ips: IPS driver struct
  *
  * Check the MCH temp & power against their maximums.
+ *
+ * Returns: %true if the temp or power has exceeded its maximum, else %false
  */
 static bool mch_exceeded(struct ips_driver *ips)
 {
@@ -753,12 +748,13 @@ static void update_turbo_limits(struct ips_driver *ips)
  *   - down (at TDP limit)
  *     - adjust both CPU and GPU down if possible
  *
-		cpu+ gpu+	cpu+gpu-	cpu-gpu+	cpu-gpu-
-cpu < gpu <	cpu+gpu+	cpu+		gpu+		nothing
-cpu < gpu >=	cpu+gpu-(mcp<)	cpu+gpu-(mcp<)	gpu-		gpu-
-cpu >= gpu <	cpu-gpu+(mcp<)	cpu-		cpu-gpu+(mcp<)	cpu-
-cpu >= gpu >=	cpu-gpu-	cpu-gpu-	cpu-gpu-	cpu-gpu-
+ *              |cpu+ gpu+      cpu+gpu-        cpu-gpu+        cpu-gpu-
+ * cpu < gpu <  |cpu+gpu+       cpu+            gpu+            nothing
+ * cpu < gpu >= |cpu+gpu-(mcp<) cpu+gpu-(mcp<)  gpu-            gpu-
+ * cpu >= gpu < |cpu-gpu+(mcp<) cpu-            cpu-gpu+(mcp<)  cpu-
+ * cpu >= gpu >=|cpu-gpu-       cpu-gpu-        cpu-gpu-        cpu-gpu-
  *
+ * Returns: %0
  */
 static int ips_adjust(void *data)
 {
@@ -840,7 +836,7 @@ static u16 calc_avg_temp(struct ips_driver *ips, u16 *array)
 
 static u16 read_mgtv(struct ips_driver *ips)
 {
-	u16 ret;
+	u16 __maybe_unused ret;
 	u64 slope, offset;
 	u64 val;
 
@@ -858,10 +854,7 @@ static u16 read_mgtv(struct ips_driver *ips)
 
 static u16 read_ptv(struct ips_driver *ips)
 {
-	u16 val, slope, offset;
-
-	slope = (ips->pta_val & PTA_SLOPE_MASK) >> PTA_SLOPE_SHIFT;
-	offset = ips->pta_val & PTA_OFFSET_MASK;
+	u16 val;
 
 	val = thm_readw(THM_PTV) & PTV_MASK;
 
@@ -949,11 +942,13 @@ static void monitor_timeout(struct timer_list *t)
  * @data: ips driver structure
  *
  * This is the main function for the IPS driver.  It monitors power and
- * tempurature in the MCP and adjusts CPU and GPU power clams accordingly.
+ * temperature in the MCP and adjusts CPU and GPU power clamps accordingly.
  *
- * We keep a 5s moving average of power consumption and tempurature.  Using
+ * We keep a 5s moving average of power consumption and temperature.  Using
  * that data, along with CPU vs GPU preference, we adjust the power clamps
  * up or down.
+ *
+ * Returns: %0 on success or -errno on error
  */
 static int ips_monitor(void *data)
 {
@@ -964,12 +959,12 @@ static int ips_monitor(void *data)
 	u16 *mcp_samples, *ctv1_samples, *ctv2_samples, *mch_samples;
 	u8 cur_seqno, last_seqno;
 
-	mcp_samples = kzalloc(sizeof(u16) * IPS_SAMPLE_COUNT, GFP_KERNEL);
-	ctv1_samples = kzalloc(sizeof(u16) * IPS_SAMPLE_COUNT, GFP_KERNEL);
-	ctv2_samples = kzalloc(sizeof(u16) * IPS_SAMPLE_COUNT, GFP_KERNEL);
-	mch_samples = kzalloc(sizeof(u16) * IPS_SAMPLE_COUNT, GFP_KERNEL);
-	cpu_samples = kzalloc(sizeof(u32) * IPS_SAMPLE_COUNT, GFP_KERNEL);
-	mchp_samples = kzalloc(sizeof(u32) * IPS_SAMPLE_COUNT, GFP_KERNEL);
+	mcp_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u16), GFP_KERNEL);
+	ctv1_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u16), GFP_KERNEL);
+	ctv2_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u16), GFP_KERNEL);
+	mch_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u16), GFP_KERNEL);
+	cpu_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u32), GFP_KERNEL);
+	mchp_samples = kcalloc(IPS_SAMPLE_COUNT, sizeof(u32), GFP_KERNEL);
 	if (!mcp_samples || !ctv1_samples || !ctv2_samples || !mch_samples ||
 			!cpu_samples || !mchp_samples) {
 		dev_err(ips->dev,
@@ -1119,39 +1114,6 @@ static int ips_monitor(void *data)
 	return 0;
 }
 
-#if 0
-#define THM_DUMPW(reg) \
-	{ \
-	u16 val = thm_readw(reg); \
-	dev_dbg(ips->dev, #reg ": 0x%04x\n", val); \
-	}
-#define THM_DUMPL(reg) \
-	{ \
-	u32 val = thm_readl(reg); \
-	dev_dbg(ips->dev, #reg ": 0x%08x\n", val); \
-	}
-#define THM_DUMPQ(reg) \
-	{ \
-	u64 val = thm_readq(reg); \
-	dev_dbg(ips->dev, #reg ": 0x%016x\n", val); \
-	}
-
-static void dump_thermal_info(struct ips_driver *ips)
-{
-	u16 ptl;
-
-	ptl = thm_readw(THM_PTL);
-	dev_dbg(ips->dev, "Processor temp limit: %d\n", ptl);
-
-	THM_DUMPW(THM_CTA);
-	THM_DUMPW(THM_TRC);
-	THM_DUMPW(THM_CTV1);
-	THM_DUMPL(THM_STS);
-	THM_DUMPW(THM_PTV);
-	THM_DUMPQ(THM_MGTV);
-}
-#endif
-
 /**
  * ips_irq_handler - handle temperature triggers and other IPS events
  * @irq: irq number
@@ -1160,6 +1122,8 @@ static void dump_thermal_info(struct ips_driver *ips)
  * Handle temperature limit trigger events, generally by lowering the clamps.
  * If we're at a critical limit, we clamp back to the lowest possible value
  * to prevent emergency shutdown.
+ *
+ * Returns: IRQ_NONE or IRQ_HANDLED
  */
 static irqreturn_t ips_irq_handler(int irq, void *arg)
 {
@@ -1224,13 +1188,7 @@ static void ips_debugfs_cleanup(struct ips_driver *ips) { return; }
 
 /* Expose current state and limits in debugfs if possible */
 
-struct ips_debugfs_node {
-	struct ips_driver *ips;
-	char *name;
-	int (*show)(struct seq_file *m, void *data);
-};
-
-static int show_cpu_temp(struct seq_file *m, void *data)
+static int cpu_temp_show(struct seq_file *m, void *data)
 {
 	struct ips_driver *ips = m->private;
 
@@ -1239,8 +1197,9 @@ static int show_cpu_temp(struct seq_file *m, void *data)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(cpu_temp);
 
-static int show_cpu_power(struct seq_file *m, void *data)
+static int cpu_power_show(struct seq_file *m, void *data)
 {
 	struct ips_driver *ips = m->private;
 
@@ -1248,8 +1207,9 @@ static int show_cpu_power(struct seq_file *m, void *data)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(cpu_power);
 
-static int show_cpu_clamp(struct seq_file *m, void *data)
+static int cpu_clamp_show(struct seq_file *m, void *data)
 {
 	u64 turbo_override;
 	int tdp, tdc;
@@ -1269,8 +1229,9 @@ static int show_cpu_clamp(struct seq_file *m, void *data)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(cpu_clamp);
 
-static int show_mch_temp(struct seq_file *m, void *data)
+static int mch_temp_show(struct seq_file *m, void *data)
 {
 	struct ips_driver *ips = m->private;
 
@@ -1279,8 +1240,9 @@ static int show_mch_temp(struct seq_file *m, void *data)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(mch_temp);
 
-static int show_mch_power(struct seq_file *m, void *data)
+static int mch_power_show(struct seq_file *m, void *data)
 {
 	struct ips_driver *ips = m->private;
 
@@ -1288,76 +1250,33 @@ static int show_mch_power(struct seq_file *m, void *data)
 
 	return 0;
 }
-
-static struct ips_debugfs_node ips_debug_files[] = {
-	{ NULL, "cpu_temp", show_cpu_temp },
-	{ NULL, "cpu_power", show_cpu_power },
-	{ NULL, "cpu_clamp", show_cpu_clamp },
-	{ NULL, "mch_temp", show_mch_temp },
-	{ NULL, "mch_power", show_mch_power },
-};
-
-static int ips_debugfs_open(struct inode *inode, struct file *file)
-{
-	struct ips_debugfs_node *node = inode->i_private;
-
-	return single_open(file, node->show, node->ips);
-}
-
-static const struct file_operations ips_debugfs_ops = {
-	.owner = THIS_MODULE,
-	.open = ips_debugfs_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(mch_power);
 
 static void ips_debugfs_cleanup(struct ips_driver *ips)
 {
-	if (ips->debug_root)
-		debugfs_remove_recursive(ips->debug_root);
-	return;
+	debugfs_remove_recursive(ips->debug_root);
 }
 
 static void ips_debugfs_init(struct ips_driver *ips)
 {
-	int i;
-
 	ips->debug_root = debugfs_create_dir("ips", NULL);
-	if (!ips->debug_root) {
-		dev_err(ips->dev, "failed to create debugfs entries: %ld\n",
-			PTR_ERR(ips->debug_root));
-		return;
-	}
 
-	for (i = 0; i < ARRAY_SIZE(ips_debug_files); i++) {
-		struct dentry *ent;
-		struct ips_debugfs_node *node = &ips_debug_files[i];
-
-		node->ips = ips;
-		ent = debugfs_create_file(node->name, S_IFREG | S_IRUGO,
-					  ips->debug_root, node,
-					  &ips_debugfs_ops);
-		if (!ent) {
-			dev_err(ips->dev, "failed to create debug file: %ld\n",
-				PTR_ERR(ent));
-			goto err_cleanup;
-		}
-	}
-
-	return;
-
-err_cleanup:
-	ips_debugfs_cleanup(ips);
-	return;
+	debugfs_create_file("cpu_temp", 0444, ips->debug_root, ips, &cpu_temp_fops);
+	debugfs_create_file("cpu_power", 0444, ips->debug_root, ips, &cpu_power_fops);
+	debugfs_create_file("cpu_clamp", 0444, ips->debug_root, ips, &cpu_clamp_fops);
+	debugfs_create_file("mch_temp", 0444, ips->debug_root, ips, &mch_temp_fops);
+	debugfs_create_file("mch_power", 0444, ips->debug_root, ips, &mch_power_fops);
 }
 #endif /* CONFIG_DEBUG_FS */
 
 /**
  * ips_detect_cpu - detect whether CPU supports IPS
+ * @ips: IPS driver struct
  *
  * Walk our list and see if we're on a supported CPU.  If we find one,
  * return the limits for it.
+ *
+ * Returns: the &ips_mcp_limits struct that matches the boot CPU or %NULL
  */
 static struct ips_mcp_limits *ips_detect_cpu(struct ips_driver *ips)
 {
@@ -1414,6 +1333,8 @@ static struct ips_mcp_limits *ips_detect_cpu(struct ips_driver *ips)
  * monitor and control graphics turbo mode.  If we can find them, we can
  * enable graphics turbo, otherwise we must disable it to avoid exceeding
  * thermal and power limits in the MCP.
+ *
+ * Returns: %true if the required symbols are found, else %false
  */
 static bool ips_get_i915_syms(struct ips_driver *ips)
 {
@@ -1660,9 +1581,6 @@ static void ips_remove(struct pci_dev *dev)
 	struct ips_driver *ips = pci_get_drvdata(dev);
 	u64 turbo_override;
 
-	if (!ips)
-		return;
-
 	ips_debugfs_cleanup(ips);
 
 	/* Release i915 driver */
@@ -1700,6 +1618,6 @@ static struct pci_driver ips_pci_driver = {
 
 module_pci_driver(ips_pci_driver);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Jesse Barnes <jbarnes@virtuousgeek.org>");
 MODULE_DESCRIPTION("Intelligent Power Sharing Driver");

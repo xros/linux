@@ -7,6 +7,8 @@
  * Copyright (C) 2004 Sun Microsystems Inc.
  * Copyright (C) 2007-2016 Broadcom Corporation.
  * Copyright (C) 2016-2017 Broadcom Limited.
+ * Copyright (C) 2018 Broadcom. All Rights Reserved. The term "Broadcom"
+ * refers to Broadcom Inc. and/or its subsidiaries.
  */
 
 #ifndef _T3_H
@@ -1863,7 +1865,7 @@
 #define NVRAM_STAT			0x00007004
 #define NVRAM_WRDATA			0x00007008
 #define NVRAM_ADDR			0x0000700c
-#define  NVRAM_ADDR_MSK			0x00ffffff
+#define  NVRAM_ADDR_MSK			0x07ffffff
 #define NVRAM_RDDATA			0x00007010
 #define NVRAM_CFG1			0x00007014
 #define  NVRAM_CFG1_FLASHIF_ENAB	 0x00000001
@@ -1945,6 +1947,11 @@
 #define  FLASH_5720_EEPROM_LD		 0x00000003
 #define  FLASH_5762_EEPROM_HD		 0x02000001
 #define  FLASH_5762_EEPROM_LD		 0x02000003
+#define  FLASH_5762_MX25L_100           0x00800000
+#define  FLASH_5762_MX25L_200           0x00800002
+#define  FLASH_5762_MX25L_400           0x00800001
+#define  FLASH_5762_MX25L_800           0x00800003
+#define  FLASH_5762_MX25L_160_320       0x03800002
 #define  FLASH_5720VENDOR_M_ATMEL_DB011D 0x01000000
 #define  FLASH_5720VENDOR_M_ATMEL_DB021D 0x01000002
 #define  FLASH_5720VENDOR_M_ATMEL_DB041D 0x01000001
@@ -2009,7 +2016,11 @@
 /* 0x702c unused */
 
 #define NVRAM_ADDR_LOCKOUT		0x00007030
-/* 0x7034 --> 0x7500 unused */
+#define NVRAM_AUTOSENSE_STATUS         0x00007038
+#define AUTOSENSE_DEVID                        0x00000010
+#define AUTOSENSE_DEVID_MASK           0x00000007
+#define AUTOSENSE_SIZE_IN_MB           17
+/* 0x703c --> 0x7500 unused */
 
 #define OTP_MODE			0x00007500
 #define OTP_MODE_OTP_THRU_GRC		 0x00000001
@@ -2499,6 +2510,7 @@
 #define TG3_APE_LOCK_PHY3		5
 #define TG3_APE_LOCK_GPIO		7
 
+#define TG3_APE_HB_INTERVAL             (tp->ape_hb_interval)
 #define TG3_EEPROM_SB_F1R2_MBA_OFF	0x10
 
 
@@ -2835,7 +2847,7 @@ struct tg3_ocir {
 	u32				port1_flags;
 	u32				port2_flags;
 	u32				port3_flags;
-	u32				reserved2[1];
+	u32				reserved2;
 };
 
 
@@ -2861,7 +2873,7 @@ struct tg3_tx_ring_info {
 struct tg3_link_config {
 	/* Describes what we're trying to get. */
 	u32				advertising;
-	u16				speed;
+	u32				speed;
 	u8				duplex;
 	u8				autoneg;
 	u8				flowctrl;
@@ -2870,7 +2882,7 @@ struct tg3_link_config {
 	u8				active_flowctrl;
 
 	u8				active_duplex;
-	u16				active_speed;
+	u32				active_speed;
 	u32				rmt_adv;
 };
 
@@ -3006,6 +3018,7 @@ struct tg3_napi {
 	u16				*rx_rcb_prod_idx;
 	struct tg3_rx_prodring_set	prodring;
 	struct tg3_rx_buffer_desc	*rx_rcb;
+	unsigned long			rx_dropped;
 
 	u32				tx_prod	____cacheline_aligned;
 	u32				tx_cons;
@@ -3014,6 +3027,7 @@ struct tg3_napi {
 	u32				prodmbox;
 	struct tg3_tx_buffer_desc	*tx_ring;
 	struct tg3_tx_ring_info		*tx_buffers;
+	unsigned long			tx_dropped;
 
 	dma_addr_t			status_mapping;
 	dma_addr_t			rx_rcb_mapping;
@@ -3178,6 +3192,7 @@ struct tg3 {
 	struct ptp_clock_info		ptp_info;
 	struct ptp_clock		*ptp_clock;
 	s64				ptp_adjust;
+	u8				ptp_txts_retrycnt;
 
 	/* begin "tx thread" cacheline section */
 	void				(*write32_tx_mbox) (struct tg3 *, u32,
@@ -3207,8 +3222,6 @@ struct tg3 {
 
 
 	/* begin "everything else" cacheline(s) section */
-	unsigned long			rx_dropped;
-	unsigned long			tx_dropped;
 	struct rtnl_link_stats64	net_stats_prev;
 	struct tg3_ethtool_stats	estats_prev;
 
@@ -3360,6 +3373,8 @@ struct tg3 {
 	struct tg3_hw_stats		*hw_stats;
 	dma_addr_t			stats_mapping;
 	struct work_struct		reset_task;
+	struct sk_buff			*tx_tstamp_skb;
+	u64				pre_tx_ts;
 
 	int				nvram_lock_cnt;
 	u32				nvram_size;
@@ -3378,6 +3393,7 @@ struct tg3 {
 #define JEDEC_ST			0x20
 #define JEDEC_SAIFUN			0x4f
 #define JEDEC_SST			0xbf
+#define JEDEC_MACRONIX                 0xc2
 
 #define ATMEL_AT24C02_CHIP_SIZE		TG3_NVRAM_SIZE_2KB
 #define ATMEL_AT24C02_PAGE_SIZE		(8)
@@ -3413,6 +3429,10 @@ struct tg3 {
 	struct device			*hwmon_dev;
 	bool				link_up;
 	bool				pcierr_recovery;
+
+	u32                             ape_hb;
+	unsigned long                   ape_hb_interval;
+	unsigned long                   ape_hb_jiffies;
 };
 
 /* Accessor macros for chip and asic attributes

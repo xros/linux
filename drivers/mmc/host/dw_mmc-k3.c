@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2013 Linaro Ltd.
- * Copyright (c) 2013 Hisilicon Limited.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * Copyright (c) 2013 HiSilicon Limited.
  */
 
 #include <linux/bitops.h>
@@ -135,6 +131,9 @@ static int dw_mci_hi6220_parse_dt(struct dw_mci *host)
 	if (priv->ctrl_id < 0)
 		priv->ctrl_id = 0;
 
+	if (priv->ctrl_id >= TIMING_MODE)
+		return -EINVAL;
+
 	host->priv = priv;
 	return 0;
 }
@@ -207,6 +206,7 @@ static int dw_mci_hi6220_execute_tuning(struct dw_mci_slot *slot, u32 opcode)
 
 static const struct dw_mci_drv_data hi6220_data = {
 	.caps			= dw_mci_hi6220_caps,
+	.num_caps		= ARRAY_SIZE(dw_mci_hi6220_caps),
 	.switch_voltage		= dw_mci_hi6220_switch_voltage,
 	.set_ios		= dw_mci_hi6220_set_ios,
 	.parse_dt		= dw_mci_hi6220_parse_dt,
@@ -238,7 +238,7 @@ static void dw_mci_hs_set_timing(struct dw_mci *host, int timing,
 		if (smpl_phase >= USE_DLY_MIN_SMPL &&
 				smpl_phase <= USE_DLY_MAX_SMPL)
 			use_smpl_dly = 1;
-			/* fallthrough */
+		fallthrough;
 	case MMC_TIMING_UHS_SDR50:
 		if (smpl_phase >= ENABLE_SHIFT_MIN_SMPL &&
 				smpl_phase <= ENABLE_SHIFT_MAX_SMPL)
@@ -424,7 +424,7 @@ static int dw_mci_hi3660_switch_voltage(struct mmc_host *mmc,
 
 	if (!IS_ERR(mmc->supply.vqmmc)) {
 		ret = mmc_regulator_set_vqmmc(mmc, ios);
-		if (ret) {
+		if (ret < 0) {
 			dev_err(host->dev, "Regulator set error %d\n", ret);
 			return ret;
 		}
@@ -470,9 +470,10 @@ static const struct dev_pm_ops dw_mci_k3_dev_pm_ops = {
 
 static struct platform_driver dw_mci_k3_pltfm_driver = {
 	.probe		= dw_mci_k3_probe,
-	.remove		= dw_mci_pltfm_remove,
+	.remove_new	= dw_mci_pltfm_remove,
 	.driver		= {
 		.name		= "dwmmc_k3",
+		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table	= dw_mci_k3_match,
 		.pm		= &dw_mci_k3_dev_pm_ops,
 	},

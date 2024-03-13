@@ -30,15 +30,13 @@
 
 #include "dce110/irq_service_dce110.h"
 
+#if defined(CONFIG_DRM_AMD_DC_SI)
+#include "dce60/irq_service_dce60.h"
+#endif
 
 #include "dce80/irq_service_dce80.h"
-
 #include "dce120/irq_service_dce120.h"
-
-
-#if defined(CONFIG_DRM_AMD_DC_DCN1_0)
 #include "dcn10/irq_service_dcn10.h"
-#endif
 
 #include "reg_helper.h"
 #include "irq_service.h"
@@ -47,6 +45,8 @@
 
 #define CTX \
 		irq_service->ctx
+#define DC_LOGGER \
+	irq_service->ctx->logger
 
 void dal_irq_service_construct(
 	struct irq_service *irq_service,
@@ -72,11 +72,11 @@ void dal_irq_service_destroy(struct irq_service **irq_service)
 	*irq_service = NULL;
 }
 
-const struct irq_source_info *find_irq_source_info(
+static const struct irq_source_info *find_irq_source_info(
 	struct irq_service *irq_service,
 	enum dc_irq_source source)
 {
-	if (source > DAL_IRQ_SOURCES_NUMBER || source < DC_IRQ_SOURCE_INVALID)
+	if (source >= DAL_IRQ_SOURCES_NUMBER || source < DC_IRQ_SOURCE_INVALID)
 		return NULL;
 
 	return &irq_service->info[source];
@@ -104,9 +104,7 @@ bool dal_irq_service_set(
 		find_irq_source_info(irq_service, source);
 
 	if (!info) {
-		dm_logger_write(
-			irq_service->ctx->logger, LOG_ERROR,
-			"%s: cannot find irq info table entry for %d\n",
+		DC_LOG_ERROR("%s: cannot find irq info table entry for %d\n",
 			__func__,
 			source);
 		return false;
@@ -114,8 +112,15 @@ bool dal_irq_service_set(
 
 	dal_irq_service_ack(irq_service, source);
 
-	if (info->funcs->set)
+	if (info->funcs && info->funcs->set) {
+		if (info->funcs->set == dal_irq_service_dummy_set) {
+			DC_LOG_WARNING("%s: src: %d, st: %d\n", __func__,
+				       source, enable);
+			ASSERT(0);
+		}
+
 		return info->funcs->set(irq_service, info, enable);
+	}
 
 	dal_irq_service_set_generic(irq_service, info, enable);
 
@@ -142,16 +147,20 @@ bool dal_irq_service_ack(
 		find_irq_source_info(irq_service, source);
 
 	if (!info) {
-		dm_logger_write(
-			irq_service->ctx->logger, LOG_ERROR,
-			"%s: cannot find irq info table entry for %d\n",
+		DC_LOG_ERROR("%s: cannot find irq info table entry for %d\n",
 			__func__,
 			source);
 		return false;
 	}
 
-	if (info->funcs->ack)
+	if (info->funcs && info->funcs->ack) {
+		if (info->funcs->ack == dal_irq_service_dummy_ack) {
+			DC_LOG_WARNING("%s: src: %d\n", __func__, source);
+			ASSERT(0);
+		}
+
 		return info->funcs->ack(irq_service, info);
+	}
 
 	dal_irq_service_ack_generic(irq_service, info);
 

@@ -259,14 +259,13 @@ static int tca8418_configure(struct tca8418_keypad *keypad_data,
 	return error;
 }
 
-static int tca8418_keypad_probe(struct i2c_client *client,
-				const struct i2c_device_id *id)
+static int tca8418_keypad_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct tca8418_keypad *keypad_data;
 	struct input_dev *input;
 	u32 rows = 0, cols = 0;
-	int error, row_shift, max_keys;
+	int error, row_shift;
 	u8 reg;
 
 	/* Check i2c driver capabilities */
@@ -291,7 +290,6 @@ static int tca8418_keypad_probe(struct i2c_client *client,
 	}
 
 	row_shift = get_count_order(cols);
-	max_keys = rows << row_shift;
 
 	/* Allocate memory for keypad_data and input device */
 	keypad_data = devm_kzalloc(dev, sizeof(*keypad_data), GFP_KERNEL);

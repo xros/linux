@@ -1,24 +1,10 @@
-/*
- * MXC GPIO support. (c) 2008 Daniel Mack <daniel@caiaq.de>
- * Copyright 2008 Juergen Beisert, kernel@pengutronix.de
- *
- * Based on code from Freescale,
- * Copyright (C) 2004-2010 Freescale Semiconductor, Inc. All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301, USA.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// MXS GPIO support. (c) 2008 Daniel Mack <daniel@caiaq.de>
+// Copyright 2008 Juergen Beisert, kernel@pengutronix.de
+//
+// Based on code from Freescale,
+// Copyright (C) 2004-2010 Freescale Semiconductor, Inc. All Rights Reserved.
 
 #include <linux/err.h>
 #include <linux/init.h>
@@ -28,12 +14,9 @@
 #include <linux/irqdomain.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/gpio/driver.h>
-/* FIXME: for gpio_get_value(), replace this by direct register read */
-#include <linux/gpio.h>
 #include <linux/module.h>
 
 #define MXS_SET		0x4
@@ -76,11 +59,6 @@ static inline int is_imx23_gpio(struct mxs_gpio_port *port)
 	return port->devid == IMX23_GPIO;
 }
 
-static inline int is_imx28_gpio(struct mxs_gpio_port *port)
-{
-	return port->devid == IMX28_GPIO;
-}
-
 /* Note: This driver assumes 32 GPIOs are handled in one register */
 
 static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
@@ -100,7 +78,7 @@ static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
 	port->both_edges &= ~pin_mask;
 	switch (type) {
 	case IRQ_TYPE_EDGE_BOTH:
-		val = gpio_get_value(port->gc.base + d->hwirq);
+		val = readl(port->base + PINCTRL_DIN(port)) & pin_mask;
 		if (val)
 			edge = GPIO_INT_FALL_EDGE;
 		else
@@ -140,8 +118,7 @@ static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
 	else
 		writel(pin_mask, pin_addr + MXS_CLR);
 
-	writel(pin_mask,
-	       port->base + PINCTRL_IRQSTAT(port) + MXS_CLR);
+	writel(pin_mask, port->base + PINCTRL_IRQSTAT(port) + MXS_CLR);
 
 	return 0;
 }
@@ -179,7 +156,7 @@ static void mxs_gpio_irq_handler(struct irq_desc *desc)
 		if (port->both_edges & (1 << irqoffset))
 			mxs_flip_edge(port, irqoffset);
 
-		generic_handle_irq(irq_find_mapping(port->domain, irqoffset));
+		generic_handle_domain_irq(port->domain, irqoffset);
 		irq_stat &= ~(1 << irqoffset);
 	}
 }
@@ -251,35 +228,25 @@ static int mxs_gpio_init_gc(struct mxs_gpio_port *port, int irq_base)
 	return rv;
 }
 
-static int mxs_gpio_to_irq(struct gpio_chip *gc, unsigned offset)
+static int mxs_gpio_to_irq(struct gpio_chip *gc, unsigned int offset)
 {
 	struct mxs_gpio_port *port = gpiochip_get_data(gc);
 
 	return irq_find_mapping(port->domain, offset);
 }
 
-static int mxs_gpio_get_direction(struct gpio_chip *gc, unsigned offset)
+static int mxs_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
 {
 	struct mxs_gpio_port *port = gpiochip_get_data(gc);
 	u32 mask = 1 << offset;
 	u32 dir;
 
 	dir = readl(port->base + PINCTRL_DOE(port));
-	return !(dir & mask);
-}
+	if (dir & mask)
+		return GPIO_LINE_DIRECTION_OUT;
 
-static const struct platform_device_id mxs_gpio_ids[] = {
-	{
-		.name = "imx23-gpio",
-		.driver_data = IMX23_GPIO,
-	}, {
-		.name = "imx28-gpio",
-		.driver_data = IMX28_GPIO,
-	}, {
-		/* sentinel */
-	}
-};
-MODULE_DEVICE_TABLE(platform, mxs_gpio_ids);
+	return GPIO_LINE_DIRECTION_IN;
+}
 
 static const struct of_device_id mxs_gpio_dt_ids[] = {
 	{ .compatible = "fsl,imx23-gpio", .data = (void *) IMX23_GPIO, },
@@ -290,8 +257,6 @@ MODULE_DEVICE_TABLE(of, mxs_gpio_dt_ids);
 
 static int mxs_gpio_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *of_id =
-			of_match_device(mxs_gpio_dt_ids, &pdev->dev);
 	struct device_node *np = pdev->dev.of_node;
 	struct device_node *parent;
 	static void __iomem *base;
@@ -306,7 +271,7 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	port->id = of_alias_get_id(np, "gpio");
 	if (port->id < 0)
 		return port->id;
-	port->devid = (enum mxs_gpio_id) of_id->data;
+	port->devid = (uintptr_t)of_device_get_match_data(&pdev->dev);
 	port->dev = &pdev->dev;
 	port->irq = platform_get_irq(pdev, 0);
 	if (port->irq < 0)
@@ -386,7 +351,6 @@ static struct platform_driver mxs_gpio_driver = {
 		.suppress_bind_attrs = true,
 	},
 	.probe		= mxs_gpio_probe,
-	.id_table	= mxs_gpio_ids,
 };
 
 static int __init mxs_gpio_init(void)
@@ -399,4 +363,3 @@ MODULE_AUTHOR("Freescale Semiconductor, "
 	      "Daniel Mack <danielncaiaq.de>, "
 	      "Juergen Beisert <kernel@pengutronix.de>");
 MODULE_DESCRIPTION("Freescale MXS GPIO");
-MODULE_LICENSE("GPL");

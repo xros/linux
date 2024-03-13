@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Battery charger driver for Dialog Semiconductor DA9030
  *
  * Copyright (C) 2008 Compulab, Ltd.
  * 	Mike Rapoport <mike@compulab.co.il>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -175,17 +172,7 @@ static int bat_debug_show(struct seq_file *s, void *data)
 	return 0;
 }
 
-static int debug_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, bat_debug_show, inode->i_private);
-}
-
-static const struct file_operations bat_debug_fops = {
-	.open		= debug_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(bat_debug);
 
 static struct dentry *da9030_bat_create_debugfs(struct da9030_charger *charger)
 {
@@ -565,7 +552,7 @@ err_charger_init:
 	return ret;
 }
 
-static int da9030_battery_remove(struct platform_device *dev)
+static void da9030_battery_remove(struct platform_device *dev)
 {
 	struct da9030_charger *charger = platform_get_drvdata(dev);
 
@@ -577,8 +564,6 @@ static int da9030_battery_remove(struct platform_device *dev)
 	cancel_delayed_work_sync(&charger->work);
 	da9030_set_charge(charger, 0);
 	power_supply_unregister(charger->psy);
-
-	return 0;
 }
 
 static struct platform_driver da903x_battery_driver = {
@@ -586,7 +571,7 @@ static struct platform_driver da903x_battery_driver = {
 		.name	= "da903x-battery",
 	},
 	.probe = da9030_battery_probe,
-	.remove = da9030_battery_remove,
+	.remove_new = da9030_battery_remove,
 };
 
 module_platform_driver(da903x_battery_driver);

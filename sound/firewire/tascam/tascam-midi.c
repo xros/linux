@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * tascam-midi.c - a part of driver for TASCAM FireWire series
  *
  * Copyright (c) 2015 Takashi Sakamoto
- *
- * Licensed under the terms of the GNU General Public License, version 2.
  */
 
 #include "tascam.h"
@@ -109,9 +108,9 @@ int snd_tscm_create_midi_devices(struct snd_tscm *tscm)
 		/* TODO: support virtual MIDI ports. */
 		if (subs->number < tscm->spec->midi_capture_ports) {
 			/* Hardware MIDI ports. */
-			snprintf(subs->name, sizeof(subs->name),
-				 "%s MIDI %d",
-				 tscm->card->shortname, subs->number + 1);
+			scnprintf(subs->name, sizeof(subs->name),
+				  "%s MIDI %d",
+				  tscm->card->shortname, subs->number + 1);
 		}
 	}
 
@@ -124,9 +123,9 @@ int snd_tscm_create_midi_devices(struct snd_tscm *tscm)
 	list_for_each_entry(subs, &stream->substreams, list) {
 		if (subs->number < tscm->spec->midi_playback_ports) {
 			/* Hardware MIDI ports only. */
-			snprintf(subs->name, sizeof(subs->name),
-				 "%s MIDI %d",
-				 tscm->card->shortname, subs->number + 1);
+			scnprintf(subs->name, sizeof(subs->name),
+				  "%s MIDI %d",
+				  tscm->card->shortname, subs->number + 1);
 		}
 	}
 

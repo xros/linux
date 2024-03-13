@@ -27,6 +27,8 @@
 #define SDMA1_REGISTER_OFFSET                             0x200 /* not a register */
 #define SDMA_MAX_INSTANCE 2
 
+#define KFD_VI_SDMA_QUEUE_OFFSET                      0x80 /* not a register */
+
 /* crtc instance offsets */
 #define CRTC0_REGISTER_OFFSET                 (0x1b9c - 0x1b9c)
 #define CRTC1_REGISTER_OFFSET                 (0x1d9c - 0x1b9c)
@@ -64,8 +66,6 @@
 #define HPD3_REGISTER_OFFSET                 (0x18b0 - 0x1898)
 #define HPD4_REGISTER_OFFSET                 (0x18b8 - 0x1898)
 #define HPD5_REGISTER_OFFSET                 (0x18c0 - 0x1898)
-
-#define AMDGPU_NUM_OF_VMIDS			8
 
 #define		PIPEID(x)					((x) << 0)
 #define		MEID(x)						((x) << 2)
@@ -330,7 +330,7 @@
 #              define PACKET3_DMA_DATA_CMD_SAIC    (1 << 28)
 #              define PACKET3_DMA_DATA_CMD_DAIC    (1 << 29)
 #              define PACKET3_DMA_DATA_CMD_RAW_WAIT  (1 << 30)
-#define	PACKET3_AQUIRE_MEM				0x58
+#define	PACKET3_ACQUIRE_MEM				0x58
 #define	PACKET3_REWIND					0x59
 #define	PACKET3_LOAD_UCONFIG_REG			0x5E
 #define	PACKET3_LOAD_SH_REG				0x5F

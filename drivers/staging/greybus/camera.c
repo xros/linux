@@ -14,9 +14,9 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/greybus.h>
 
 #include "gb-camera.h"
-#include "greybus.h"
 #include "greybus_protocols.h"
 
 enum gb_camera_debugs_buffer_id {
@@ -220,7 +220,7 @@ static int gb_camera_operation_sync_flags(struct gb_connection *connection,
 }
 
 static int gb_camera_get_max_pkt_size(struct gb_camera *gcam,
-		struct gb_camera_configure_streams_response *resp)
+				      struct gb_camera_configure_streams_response *resp)
 {
 	unsigned int max_pkt_size = 0;
 	unsigned int i;
@@ -267,8 +267,7 @@ static int gb_camera_get_max_pkt_size(struct gb_camera *gcam,
  * Validate the stream configuration response verifying padding is correctly
  * set and the returned number of streams is supported
  */
-static const int gb_camera_configure_streams_validate_response(
-		struct gb_camera *gcam,
+static const int gb_camera_configure_streams_validate_response(struct gb_camera *gcam,
 		struct gb_camera_configure_streams_response *resp,
 		unsigned int nstreams)
 {
@@ -378,8 +377,8 @@ struct ap_csi_config_request {
 #define GB_CAMERA_CSI_CLK_FREQ_MARGIN		150000000U
 
 static int gb_camera_setup_data_connection(struct gb_camera *gcam,
-		struct gb_camera_configure_streams_response *resp,
-		struct gb_camera_csi_params *csi_params)
+					   struct gb_camera_configure_streams_response *resp,
+					   struct gb_camera_csi_params *csi_params)
 {
 	struct ap_csi_config_request csi_cfg;
 	struct gb_connection *conn;
@@ -783,8 +782,8 @@ static ssize_t gb_camera_op_capabilities(void *priv, char *data, size_t len)
 }
 
 static int gb_camera_op_configure_streams(void *priv, unsigned int *nstreams,
-		unsigned int *flags, struct gb_camera_stream *streams,
-		struct gb_camera_csi_params *csi_params)
+					  unsigned int *flags, struct gb_camera_stream *streams,
+					  struct gb_camera_csi_params *csi_params)
 {
 	struct gb_camera *gcam = priv;
 	struct gb_camera_stream_config *gb_streams;
@@ -841,8 +840,8 @@ done:
 }
 
 static int gb_camera_op_capture(void *priv, u32 request_id,
-		unsigned int streams, unsigned int num_frames,
-		size_t settings_size, const void *settings)
+				unsigned int streams, unsigned int num_frames,
+				size_t settings_size, const void *settings)
 {
 	struct gb_camera *gcam = priv;
 
@@ -869,7 +868,7 @@ static const struct gb_camera_ops gb_cam_ops = {
  */
 
 static ssize_t gb_camera_debugfs_capabilities(struct gb_camera *gcam,
-		char *buf, size_t len)
+					      char *buf, size_t len)
 {
 	struct gb_camera_debugfs_buffer *buffer =
 		&gcam->debugfs.buffers[GB_CAMERA_DEBUGFS_BUFFER_CAPABILITIES];
@@ -905,7 +904,7 @@ done:
 }
 
 static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
-		char *buf, size_t len)
+						   char *buf, size_t len)
 {
 	struct gb_camera_debugfs_buffer *buffer =
 		&gcam->debugfs.buffers[GB_CAMERA_DEBUGFS_BUFFER_STREAMS];
@@ -918,7 +917,7 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 
 	/* Retrieve number of streams to configure */
 	token = strsep(&buf, ";");
-	if (token == NULL)
+	if (!token)
 		return -EINVAL;
 
 	ret = kstrtouint(token, 10, &nstreams);
@@ -929,7 +928,7 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 		return -EINVAL;
 
 	token = strsep(&buf, ";");
-	if (token == NULL)
+	if (!token)
 		return -EINVAL;
 
 	ret = kstrtouint(token, 10, &flags);
@@ -946,7 +945,7 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 
 		/* width */
 		token = strsep(&buf, ";");
-		if (token == NULL) {
+		if (!token) {
 			ret = -EINVAL;
 			goto done;
 		}
@@ -956,7 +955,7 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 
 		/* height */
 		token = strsep(&buf, ";");
-		if (token == NULL)
+		if (!token)
 			goto done;
 
 		ret = kstrtouint(token, 10, &stream->height);
@@ -965,7 +964,7 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 
 		/* Image format code */
 		token = strsep(&buf, ";");
-		if (token == NULL)
+		if (!token)
 			goto done;
 
 		ret = kstrtouint(token, 16, &stream->format);
@@ -999,7 +998,7 @@ done:
 };
 
 static ssize_t gb_camera_debugfs_capture(struct gb_camera *gcam,
-		char *buf, size_t len)
+					 char *buf, size_t len)
 {
 	unsigned int request_id;
 	unsigned int streams_mask;
@@ -1009,7 +1008,7 @@ static ssize_t gb_camera_debugfs_capture(struct gb_camera *gcam,
 
 	/* Request id */
 	token = strsep(&buf, ";");
-	if (token == NULL)
+	if (!token)
 		return -EINVAL;
 	ret = kstrtouint(token, 10, &request_id);
 	if (ret < 0)
@@ -1017,7 +1016,7 @@ static ssize_t gb_camera_debugfs_capture(struct gb_camera *gcam,
 
 	/* Stream mask */
 	token = strsep(&buf, ";");
-	if (token == NULL)
+	if (!token)
 		return -EINVAL;
 	ret = kstrtouint(token, 16, &streams_mask);
 	if (ret < 0)
@@ -1025,7 +1024,7 @@ static ssize_t gb_camera_debugfs_capture(struct gb_camera *gcam,
 
 	/* number of frames */
 	token = strsep(&buf, ";");
-	if (token == NULL)
+	if (!token)
 		return -EINVAL;
 	ret = kstrtouint(token, 10, &num_frames);
 	if (ret < 0)
@@ -1040,7 +1039,7 @@ static ssize_t gb_camera_debugfs_capture(struct gb_camera *gcam,
 }
 
 static ssize_t gb_camera_debugfs_flush(struct gb_camera *gcam,
-		char *buf, size_t len)
+				       char *buf, size_t len)
 {
 	struct gb_camera_debugfs_buffer *buffer =
 		&gcam->debugfs.buffers[GB_CAMERA_DEBUGFS_BUFFER_FLUSH];
@@ -1120,16 +1119,9 @@ static ssize_t gb_camera_debugfs_write(struct file *file,
 	if (len > 1024)
 		return -EINVAL;
 
-	kbuf = kmalloc(len + 1, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
-
-	if (copy_from_user(kbuf, buf, len)) {
-		ret = -EFAULT;
-		goto done;
-	}
-
-	kbuf[len] = '\0';
+	kbuf = memdup_user_nul(buf, len);
+	if (IS_ERR(kbuf))
+		return PTR_ERR(kbuf);
 
 	ret = op->execute(gcam, kbuf, len);
 
@@ -1174,33 +1166,22 @@ static int gb_camera_debugfs_init(struct gb_camera *gcam)
 		 gcam->bundle->id);
 
 	gcam->debugfs.root = debugfs_create_dir(dirname, gb_debugfs_get());
-	if (IS_ERR(gcam->debugfs.root)) {
-		gcam_err(gcam, "debugfs root create failed (%ld)\n",
-			 PTR_ERR(gcam->debugfs.root));
-		return PTR_ERR(gcam->debugfs.root);
-	}
 
-	gcam->debugfs.buffers = vmalloc(sizeof(*gcam->debugfs.buffers) *
-					GB_CAMERA_DEBUGFS_BUFFER_MAX);
+	gcam->debugfs.buffers =
+		vmalloc(array_size(GB_CAMERA_DEBUGFS_BUFFER_MAX,
+				   sizeof(*gcam->debugfs.buffers)));
 	if (!gcam->debugfs.buffers)
 		return -ENOMEM;
 
 	for (i = 0; i < ARRAY_SIZE(gb_camera_debugfs_entries); ++i) {
 		const struct gb_camera_debugfs_entry *entry =
 			&gb_camera_debugfs_entries[i];
-		struct dentry *dentry;
 
 		gcam->debugfs.buffers[i].length = 0;
 
-		dentry = debugfs_create_file(entry->name, entry->mask,
-					     gcam->debugfs.root, gcam,
-					     &gb_camera_debugfs_ops);
-		if (IS_ERR(dentry)) {
-			gcam_err(gcam,
-				 "debugfs operation %s create failed (%ld)\n",
-				 entry->name, PTR_ERR(dentry));
-			return PTR_ERR(dentry);
-		}
+		debugfs_create_file(entry->name, entry->mask,
+				    gcam->debugfs.root, gcam,
+				    &gb_camera_debugfs_ops);
 	}
 
 	return 0;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Atmel SMC (Static Memory Controller) helper functions.
  *
@@ -5,13 +6,10 @@
  * Copyright (C) 2017 Free Electrons
  *
  * Author: Boris Brezillon <boris.brezillon@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/mfd/syscon/atmel-smc.h>
+#include <linux/string.h>
 
 /**
  * atmel_smc_cs_conf_init - initialize a SMC CS conf
@@ -239,10 +237,10 @@ EXPORT_SYMBOL_GPL(atmel_smc_cs_conf_set_cycle);
  * atmel_smc_cs_conf_apply - apply an SMC CS conf
  * @regmap: the SMC regmap
  * @cs: the CS id
- * @conf the SMC CS conf to apply
+ * @conf: the SMC CS conf to apply
  *
  * Applies an SMC CS configuration.
- * Only valid on at91sam9/avr32 SoCs.
+ * Only valid on at91sam9 SoCs.
  */
 void atmel_smc_cs_conf_apply(struct regmap *regmap, int cs,
 			     const struct atmel_smc_cs_conf *conf)
@@ -259,7 +257,7 @@ EXPORT_SYMBOL_GPL(atmel_smc_cs_conf_apply);
  * @regmap: the HSMC regmap
  * @cs: the CS id
  * @layout: the layout of registers
- * @conf the SMC CS conf to apply
+ * @conf: the SMC CS conf to apply
  *
  * Applies an SMC CS configuration.
  * Only valid on post-sama5 SoCs.
@@ -283,7 +281,7 @@ EXPORT_SYMBOL_GPL(atmel_hsmc_cs_conf_apply);
  * @conf: the SMC CS conf object to store the current conf
  *
  * Retrieve the SMC CS configuration.
- * Only valid on at91sam9/avr32 SoCs.
+ * Only valid on at91sam9 SoCs.
  */
 void atmel_smc_cs_conf_get(struct regmap *regmap, int cs,
 			   struct atmel_smc_cs_conf *conf)
@@ -325,7 +323,7 @@ static const struct atmel_hsmc_reg_layout sama5d2_reg_layout = {
 	.timing_regs_offset = 0x700,
 };
 
-static const struct of_device_id atmel_smc_ids[] = {
+static const struct of_device_id atmel_smc_ids[] __maybe_unused = {
 	{ .compatible = "atmel,at91sam9260-smc", .data = NULL },
 	{ .compatible = "atmel,sama5d3-smc", .data = &sama5d3_reg_layout },
 	{ .compatible = "atmel,sama5d2-smc", .data = &sama5d2_reg_layout },

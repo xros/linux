@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /dts-v1/;
 
-/include/ "bcm7125.dtsi"
+#include "bcm7125.dtsi"
 
 / {
 	compatible = "brcm,bcm97125cbmb", "brcm,bcm7125";
@@ -47,6 +47,10 @@
 };
 
 &pwma {
+	status = "okay";
+};
+
+&watchdog {
 	status = "okay";
 };
 

@@ -1,17 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*******************************************************************************
     AudioScience HPI driver
     Common Linux HPI ioctl and module probe/remove functions
 
     Copyright (C) 1997-2014  AudioScience Inc. <support@audioscience.com>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of version 2 of the GNU General Public License as
-    published by the Free Software Foundation;
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 
 *******************************************************************************/
 #define SOURCEFILE_NAME "hpioctl.c"
@@ -33,6 +26,7 @@
 #include <linux/stringify.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
+#include <linux/nospec.h>
 
 #ifdef MODULE_FIRMWARE
 MODULE_FIRMWARE("asihpi/dsp5000.bin");
@@ -45,14 +39,14 @@ MODULE_FIRMWARE("asihpi/dsp8900.bin");
 #endif
 
 static int prealloc_stream_buf;
-module_param(prealloc_stream_buf, int, S_IRUGO);
+module_param(prealloc_stream_buf, int, 0444);
 MODULE_PARM_DESC(prealloc_stream_buf,
 	"Preallocate size for per-adapter stream buffer");
 
 /* Allow the debug level to be changed after module load.
  E.g.   echo 2 > /sys/module/asihpi/parameters/hpiDebugLevel
 */
-module_param(hpi_debug_level, int, S_IRUGO | S_IWUSR);
+module_param(hpi_debug_level, int, 0644);
 MODULE_PARM_DESC(hpi_debug_level, "debug verbosity 0..5");
 
 /* List of adapters found */
@@ -186,7 +180,8 @@ long asihpi_hpi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		struct hpi_adapter *pa = NULL;
 
 		if (hm->h.adapter_index < ARRAY_SIZE(adapters))
-			pa = &adapters[hm->h.adapter_index];
+			pa = &adapters[array_index_nospec(hm->h.adapter_index,
+							  ARRAY_SIZE(adapters))];
 
 		if (!pa || !pa->adapter || !pa->adapter->type) {
 			hpi_init_response(&hr->r0, hm->h.object,
@@ -334,8 +329,17 @@ static irqreturn_t asihpi_isr(int irq, void *dev_id)
 	   asihpi_irq_count, a->adapter->type, a->adapter->index); */
 
 	if (a->interrupt_callback)
-		a->interrupt_callback(a);
+		return IRQ_WAKE_THREAD;
 
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t asihpi_isr_thread(int irq, void *dev_id)
+{
+	struct hpi_adapter *a = dev_id;
+
+	if (a->interrupt_callback)
+		a->interrupt_callback(a);
 	return IRQ_HANDLED;
 }
 
@@ -348,7 +352,7 @@ int asihpi_adapter_probe(struct pci_dev *pci_dev,
 	struct hpi_message hm;
 	struct hpi_response hr;
 	struct hpi_adapter adapter;
-	struct hpi_pci pci;
+	struct hpi_pci pci = { 0 };
 
 	memset(&adapter, 0, sizeof(adapter));
 
@@ -357,7 +361,7 @@ int asihpi_adapter_probe(struct pci_dev *pci_dev,
 		pci_dev->device, pci_dev->subsystem_vendor,
 		pci_dev->subsystem_device, pci_dev->devfn);
 
-	if (pci_enable_device(pci_dev) < 0) {
+	if (pcim_enable_device(pci_dev) < 0) {
 		dev_err(&pci_dev->dev,
 			"pci_enable_device failed, disabling device\n");
 		return -EIO;
@@ -483,8 +487,9 @@ int asihpi_adapter_probe(struct pci_dev *pci_dev,
 		}
 
 		/* Note: request_irq calls asihpi_isr here */
-		if (request_irq(pci_dev->irq, asihpi_isr, IRQF_SHARED,
-				"asihpi", &adapters[adapter_index])) {
+		if (request_threaded_irq(pci_dev->irq, asihpi_isr,
+					 asihpi_isr_thread, IRQF_SHARED,
+					 "asihpi", &adapters[adapter_index])) {
 			dev_err(&pci_dev->dev, "request_irq(%d) failed\n",
 				pci_dev->irq);
 			goto err;
@@ -504,7 +509,7 @@ int asihpi_adapter_probe(struct pci_dev *pci_dev,
 	return 0;
 
 err:
-	for (idx = 0; idx < HPI_MAX_ADAPTER_MEM_SPACES; idx++) {
+	while (--idx >= 0) {
 		if (pci.ap_mem_base[idx]) {
 			iounmap(pci.ap_mem_base[idx]);
 			pci.ap_mem_base[idx] = NULL;

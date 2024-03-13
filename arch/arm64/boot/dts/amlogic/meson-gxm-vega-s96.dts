@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
  * Copyright (c) 2017 BayLibre, SAS.
  * Author: Neil Armstrong <narmstrong@baylibre.com>
  * Copyright (c) 2017 Oleg <balbes-150@yandex.ru>
- *
- * SPDX-License-Identifier: (GPL-2.0+ OR MIT)
  */
 
 /dts-v1/;
@@ -35,4 +34,12 @@
 		/* Realtek RTL8211F (0x001cc916) */
 		reg = <0>;
 	};
+};
+
+&ir {
+	linux,rc-map-name = "rc-vega-s9x";
+};
+
+&usb {
+	dr_mode = "host";
 };

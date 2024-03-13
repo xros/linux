@@ -1,18 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * rt5645.h  --  RT5645 ALSA SoC audio driver
  *
  * Copyright 2013 Realtek Microelectronics
  * Author: Bard Liao <bardliao@realtek.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __RT5645_H__
 #define __RT5645_H__
-
-#include <sound/rt5645.h>
 
 /* Info */
 #define RT5645_RESET				0x00
@@ -2200,10 +2195,13 @@ enum {
 	RT5645_AD_MONO_R_FILTER = (0x1 << 5),
 };
 
-int rt5645_sel_asrc_clk_src(struct snd_soc_codec *codec,
+int rt5645_sel_asrc_clk_src(struct snd_soc_component *component,
 		unsigned int filter_mask, unsigned int clk_src);
 
-int rt5645_set_jack_detect(struct snd_soc_codec *codec,
+int rt5645_set_jack_detect(struct snd_soc_component *component,
 	struct snd_soc_jack *hp_jack, struct snd_soc_jack *mic_jack,
 	struct snd_soc_jack *btn_jack);
+
+const char *rt5645_components(struct device *codec_dev);
+
 #endif /* __RT5645_H__ */

@@ -16,8 +16,8 @@ goal is not to support these devices as if they were simple input-only devices
 (as it is already the case), but to really enable the rendering of force
 effects.
 This document only describes the force feedback part of the Linux input
-interface. Please read joystick.txt and input.txt before reading further this
-document.
+interface. Please read joydev/joystick.rst and input.rst before reading further
+this document.
 
 Instructions to the user
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -31,12 +31,12 @@ To enable force feedback, you have to:
 
 Before you start, let me WARN you that some devices shake violently during the
 initialisation phase. This happens for example with my "AVB Top Shot Pegasus".
-To stop this annoying behaviour, move you joystick to its limits. Anyway, you
+To stop this annoying behaviour, move your joystick to its limits. Anyway, you
 should keep a hand on your device, in order to avoid it to break down if
 something goes wrong.
 
 If you have a serial iforce device, you need to start inputattach. See
-joystick.txt for details.
+joydev/joystick.rst for details.
 
 Does it work ?
 --------------
@@ -121,7 +121,7 @@ uploaded, but not played.
 The content of effect may be modified. In particular, its field "id" is set
 to the unique id assigned by the driver. This data is required for performing
 some operations (removing an effect, controlling the playback).
-This if field must be set to -1 by the user in order to tell the driver to
+The "id" field must be set to -1 by the user in order to tell the driver to
 allocate a new effect.
 
 Effects are file descriptor specific.
@@ -178,7 +178,7 @@ Control of playing is done with write(). Below is an example:
 	stop.code = effect.id;
 	stop.value = 0;
 
-	write(fd, (const void*) &play, sizeof(stop));
+	write(fd, (const void*) &stop, sizeof(stop));
 
 Setting the gain
 ----------------

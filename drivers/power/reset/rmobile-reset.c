@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas R-Mobile Reset Driver
  *
  * Copyright (C) 2014 Glider bvba
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 
 #include <linux/io.h>
@@ -62,11 +59,10 @@ fail_unmap:
 	return error;
 }
 
-static int rmobile_reset_remove(struct platform_device *pdev)
+static void rmobile_reset_remove(struct platform_device *pdev)
 {
 	unregister_restart_handler(&rmobile_reset_nb);
 	iounmap(sysc_base2);
-	return 0;
 }
 
 static const struct of_device_id rmobile_reset_of_match[] = {
@@ -77,7 +73,7 @@ MODULE_DEVICE_TABLE(of, rmobile_reset_of_match);
 
 static struct platform_driver rmobile_reset_driver = {
 	.probe = rmobile_reset_probe,
-	.remove = rmobile_reset_remove,
+	.remove_new = rmobile_reset_remove,
 	.driver = {
 		.name = "rmobile_reset",
 		.of_match_table = rmobile_reset_of_match,

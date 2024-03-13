@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2017 Broadcom
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2017 Broadcom
 
 /*
  * Broadcom SBA RAID Driver
@@ -45,7 +35,9 @@
 #include <linux/mailbox_client.h>
 #include <linux/mailbox/brcm-message.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/raid/pq.h>
 
@@ -120,7 +112,7 @@ struct sba_request {
 	struct brcm_message msg;
 	struct dma_async_tx_descriptor tx;
 	/* SBA commands */
-	struct brcm_sba_command cmds[0];
+	struct brcm_sba_command cmds[];
 };
 
 enum sba_version {
@@ -164,7 +156,6 @@ struct sba_device {
 	struct list_head reqs_free_list;
 	/* DebugFS directory entries */
 	struct dentry *root;
-	struct dentry *stats;
 };
 
 /* ====== Command helper routines ===== */
@@ -1459,8 +1450,7 @@ static void sba_receive_message(struct mbox_client *cl, void *msg)
 
 static int sba_debugfs_stats_show(struct seq_file *file, void *offset)
 {
-	struct platform_device *pdev = to_platform_device(file->private);
-	struct sba_device *sba = platform_get_drvdata(pdev);
+	struct sba_device *sba = dev_get_drvdata(file->private);
 
 	/* Write stats in file */
 	sba_write_stats_in_seqfile(sba, file);
@@ -1499,9 +1489,8 @@ static int sba_prealloc_channel_resources(struct sba_device *sba)
 
 	for (i = 0; i < sba->max_req; i++) {
 		req = devm_kzalloc(sba->dev,
-				sizeof(*req) +
-				sba->max_cmd_per_req * sizeof(req->cmds[0]),
-				GFP_KERNEL);
+				   struct_size(req, cmds, sba->max_cmd_per_req),
+				   GFP_KERNEL);
 		if (!req) {
 			ret = -ENOMEM;
 			goto fail_free_cmds_pool;
@@ -1718,17 +1707,11 @@ static int sba_probe(struct platform_device *pdev)
 
 	/* Create debugfs root entry */
 	sba->root = debugfs_create_dir(dev_name(sba->dev), NULL);
-	if (IS_ERR_OR_NULL(sba->root)) {
-		dev_err(sba->dev, "failed to create debugfs root entry\n");
-		sba->root = NULL;
-		goto skip_debugfs;
-	}
 
 	/* Create debugfs stats entry */
-	sba->stats = debugfs_create_devm_seqfile(sba->dev, "stats", sba->root,
-						 sba_debugfs_stats_show);
-	if (IS_ERR_OR_NULL(sba->stats))
-		dev_err(sba->dev, "failed to create debugfs stats file\n");
+	debugfs_create_devm_seqfile(sba->dev, "stats", sba->root,
+				    sba_debugfs_stats_show);
+
 skip_debugfs:
 
 	/* Register DMA device with Linux async framework */
@@ -1751,7 +1734,7 @@ fail_free_mchan:
 	return ret;
 }
 
-static int sba_remove(struct platform_device *pdev)
+static void sba_remove(struct platform_device *pdev)
 {
 	struct sba_device *sba = platform_get_drvdata(pdev);
 
@@ -1762,8 +1745,6 @@ static int sba_remove(struct platform_device *pdev)
 	sba_freeup_channel_resources(sba);
 
 	mbox_free_channel(sba->mchan);
-
-	return 0;
 }
 
 static const struct of_device_id sba_of_match[] = {
@@ -1775,7 +1756,7 @@ MODULE_DEVICE_TABLE(of, sba_of_match);
 
 static struct platform_driver sba_driver = {
 	.probe = sba_probe,
-	.remove = sba_remove,
+	.remove_new = sba_remove,
 	.driver = {
 		.name = "bcm-sba-raid",
 		.of_match_table = sba_of_match,

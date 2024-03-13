@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: exoparg1 - AML execution - opcodes with 1 argument
  *
+ * Copyright (C) 2000 - 2023, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -197,6 +163,7 @@ acpi_status acpi_ex_opcode_1A_0T_0R(struct acpi_walk_state *walk_state)
 	return_ACPI_STATUS(status);
 }
 
+#ifdef _OBSOLETE_CODE		/* Was originally used for Load() operator */
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ex_opcode_1A_1T_0R
@@ -221,10 +188,12 @@ acpi_status acpi_ex_opcode_1A_1T_0R(struct acpi_walk_state *walk_state)
 	/* Examine the AML opcode */
 
 	switch (walk_state->opcode) {
+#ifdef _OBSOLETE_CODE
 	case AML_LOAD_OP:
 
 		status = acpi_ex_load_op(operand[0], operand[1], walk_state);
 		break;
+#endif
 
 	default:		/* Unknown opcode */
 
@@ -238,6 +207,7 @@ cleanup:
 
 	return_ACPI_STATUS(status);
 }
+#endif
 
 /*******************************************************************************
  *
@@ -249,6 +219,8 @@ cleanup:
  *
  * DESCRIPTION: Execute opcode with one argument, one target, and a
  *              return value.
+ *              January 2022: Added Load operator, with new ACPI 6.4
+ *              semantics.
  *
  ******************************************************************************/
 
@@ -273,6 +245,7 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 	case AML_FIND_SET_LEFT_BIT_OP:
 	case AML_FIND_SET_RIGHT_BIT_OP:
 	case AML_FROM_BCD_OP:
+	case AML_LOAD_OP:
 	case AML_TO_BCD_OP:
 	case AML_CONDITIONAL_REF_OF_OP:
 
@@ -369,6 +342,20 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 				/* Next power of 10 */
 
 				power_of_ten *= 10;
+			}
+			break;
+
+		case AML_LOAD_OP:	/* Result1 = Load (Operand[0], Result1) */
+
+			return_desc->integer.value = 0;
+			status =
+			    acpi_ex_load_op(operand[0], return_desc,
+					    walk_state);
+			if (ACPI_SUCCESS(status)) {
+
+				/* Return -1 (non-zero) indicates success */
+
+				return_desc->integer.value = 0xFFFFFFFFFFFFFFFF;
 			}
 			break;
 
@@ -1041,7 +1028,8 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 						    (walk_state, return_desc,
 						     &temp_desc);
 						if (ACPI_FAILURE(status)) {
-							goto cleanup;
+							return_ACPI_STATUS
+							    (status);
 						}
 
 						return_desc = temp_desc;

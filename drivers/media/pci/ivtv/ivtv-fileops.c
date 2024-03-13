@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
     file operation functions
     Copyright (C) 2003-2004  Kevin Thayer <nufan_wfk at yahoo.com>
     Copyright (C) 2004  Chris Kennedy <c@groovy.org>
     Copyright (C) 2005-2007  Hans Verkuil <hverkuil@xs4all.nl>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "ivtv-driver.h"
@@ -420,7 +408,7 @@ static ssize_t ivtv_read_pos(struct ivtv_stream *s, char __user *ubuf, size_t co
 
 	IVTV_DEBUG_HI_FILE("read %zd from %s, got %zd\n", count, s->name, rc);
 	if (rc > 0)
-		pos += rc;
+		*pos += rc;
 	return rc;
 }
 
@@ -747,7 +735,7 @@ __poll_t ivtv_v4l2_dec_poll(struct file *filp, poll_table *wait)
 		/* Turn off the old-style vsync events */
 		clear_bit(IVTV_F_I_EV_VSYNC_ENABLED, &itv->i_flags);
 		if (v4l2_event_pending(&id->fh))
-			res = POLLPRI;
+			res = EPOLLPRI;
 	} else {
 		/* This is the old-style API which is here only for backwards
 		   compatibility. */
@@ -755,12 +743,12 @@ __poll_t ivtv_v4l2_dec_poll(struct file *filp, poll_table *wait)
 		set_bit(IVTV_F_I_EV_VSYNC_ENABLED, &itv->i_flags);
 		if (test_bit(IVTV_F_I_EV_VSYNC, &itv->i_flags) ||
 		    test_bit(IVTV_F_I_EV_DEC_STOPPED, &itv->i_flags))
-			res = POLLPRI;
+			res = EPOLLPRI;
 	}
 
 	/* Allow write if buffers are available for writing */
 	if (s->q_free.buffers)
-		res |= POLLOUT | POLLWRNORM;
+		res |= EPOLLOUT | EPOLLWRNORM;
 	return res;
 }
 
@@ -776,7 +764,7 @@ __poll_t ivtv_v4l2_enc_poll(struct file *filp, poll_table *wait)
 	/* Start a capture if there is none */
 	if (!eof && !test_bit(IVTV_F_S_STREAMING, &s->s_flags) &&
 			s->type != IVTV_ENC_STREAM_TYPE_RAD &&
-			(req_events & (POLLIN | POLLRDNORM))) {
+			(req_events & (EPOLLIN | EPOLLRDNORM))) {
 		int rc;
 
 		mutex_lock(&itv->serialize_lock);
@@ -785,7 +773,7 @@ __poll_t ivtv_v4l2_enc_poll(struct file *filp, poll_table *wait)
 		if (rc) {
 			IVTV_DEBUG_INFO("Could not start capture for %s (%d)\n",
 					s->name, rc);
-			return POLLERR;
+			return EPOLLERR;
 		}
 		IVTV_DEBUG_FILE("Encoder poll started capture\n");
 	}
@@ -794,14 +782,14 @@ __poll_t ivtv_v4l2_enc_poll(struct file *filp, poll_table *wait)
 	IVTV_DEBUG_HI_FILE("Encoder poll\n");
 	poll_wait(filp, &s->waitq, wait);
 	if (v4l2_event_pending(&id->fh))
-		res |= POLLPRI;
+		res |= EPOLLPRI;
 	else
 		poll_wait(filp, &id->fh.wait, wait);
 
 	if (s->q_full.length || s->q_io.length)
-		return res | POLLIN | POLLRDNORM;
+		return res | EPOLLIN | EPOLLRDNORM;
 	if (eof)
-		return res | POLLHUP;
+		return res | EPOLLHUP;
 	return res;
 }
 

@@ -1,45 +1,9 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /*******************************************************************************
  *
  * Module Name: nsnames - Name manipulation and search
  *
  ******************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -48,9 +12,6 @@
 
 #define _COMPONENT          ACPI_NAMESPACE
 ACPI_MODULE_NAME("nsnames")
-
-/* Local Prototypes */
-static void acpi_ns_normalize_pathname(char *original_path);
 
 /*******************************************************************************
  *
@@ -66,7 +27,6 @@ static void acpi_ns_normalize_pathname(char *original_path);
  *              for error and debug statements.
  *
  ******************************************************************************/
-
 char *acpi_ns_get_external_pathname(struct acpi_namespace_node *node)
 {
 	char *name_buffer;
@@ -144,8 +104,8 @@ acpi_ns_handle_to_name(acpi_handle target_handle, struct acpi_buffer *buffer)
 	/* Just copy the ACPI name from the Node and zero terminate it */
 
 	node_name = acpi_ut_get_node_name(node);
-	ACPI_MOVE_NAME(buffer->pointer, node_name);
-	((char *)buffer->pointer)[ACPI_NAME_SIZE] = 0;
+	ACPI_COPY_NAMESEG(buffer->pointer, node_name);
+	((char *)buffer->pointer)[ACPI_NAMESEG_SIZE] = 0;
 
 	ACPI_DEBUG_PRINT((ACPI_DB_EXEC, "%4.4s\n", (char *)buffer->pointer));
 	return_ACPI_STATUS(AE_OK);
@@ -200,7 +160,7 @@ acpi_ns_handle_to_pathname(acpi_handle target_handle,
 	/* Build the path in the caller buffer */
 
 	(void)acpi_ns_build_normalized_path(node, buffer->pointer,
-					    required_size, no_trailing);
+					    (u32)required_size, no_trailing);
 
 	ACPI_DEBUG_PRINT((ACPI_DB_EXEC, "%s [%X]\n",
 			  (char *)buffer->pointer, (u32) required_size));
@@ -234,7 +194,7 @@ acpi_ns_build_normalized_path(struct acpi_namespace_node *node,
 			      char *full_path, u32 path_size, u8 no_trailing)
 {
 	u32 length = 0, i;
-	char name[ACPI_NAME_SIZE];
+	char name[ACPI_NAMESEG_SIZE];
 	u8 do_no_trailing;
 	char c, *left, *right;
 	struct acpi_namespace_node *next_node;
@@ -351,8 +311,11 @@ char *acpi_ns_get_normalized_pathname(struct acpi_namespace_node *node,
 
 	/* Build the path in the allocated buffer */
 
-	(void)acpi_ns_build_normalized_path(node, name_buffer, size,
+	(void)acpi_ns_build_normalized_path(node, name_buffer, (u32)size,
 					    no_trailing);
+
+	ACPI_DEBUG_PRINT_RAW((ACPI_DB_NAMES, "%s: Path \"%s\"\n",
+			      ACPI_GET_FUNCTION_NAME, name_buffer));
 
 	return_PTR(name_buffer);
 }
@@ -379,7 +342,7 @@ char *acpi_ns_build_prefixed_pathname(union acpi_generic_state *prefix_scope,
 	char *full_path = NULL;
 	char *external_path = NULL;
 	char *prefix_path = NULL;
-	u32 prefix_path_length = 0;
+	acpi_size prefix_path_length = 0;
 
 	/* If there is a prefix, get the pathname to it */
 
@@ -444,7 +407,7 @@ cleanup:
  *
  ******************************************************************************/
 
-static void acpi_ns_normalize_pathname(char *original_path)
+void acpi_ns_normalize_pathname(char *original_path)
 {
 	char *input_path = original_path;
 	char *new_path_buffer;
@@ -479,7 +442,7 @@ static void acpi_ns_normalize_pathname(char *original_path)
 
 		/* Do one nameseg at a time */
 
-		for (i = 0; (i < ACPI_NAME_SIZE) && *input_path; i++) {
+		for (i = 0; (i < ACPI_NAMESEG_SIZE) && *input_path; i++) {
 			if ((i == 0) || (*input_path != '_')) {	/* First char is allowed to be underscore */
 				*new_path = *input_path;
 				new_path++;

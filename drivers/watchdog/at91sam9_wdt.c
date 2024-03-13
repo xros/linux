@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Watchdog driver for Atmel AT91SAM9x processors.
  *
  * Copyright (C) 2008 Renaud CERRATO r.cerrato@til-technologies.fr
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 /*
@@ -209,10 +206,9 @@ static int at91_wdt_init(struct platform_device *pdev, struct at91wdt *wdt)
 			 "min heartbeat and max heartbeat might be too close for the system to handle it correctly\n");
 
 	if ((tmp & AT91_WDT_WDFIEN) && wdt->irq) {
-		err = request_irq(wdt->irq, wdt_interrupt,
-				  IRQF_SHARED | IRQF_IRQPOLL |
-				  IRQF_NO_SUSPEND,
-				  pdev->name, wdt);
+		err = devm_request_irq(dev, wdt->irq, wdt_interrupt,
+				       IRQF_SHARED | IRQF_IRQPOLL | IRQF_NO_SUSPEND,
+				       pdev->name, wdt);
 		if (err)
 			return err;
 	}
@@ -328,9 +324,8 @@ static inline int of_at91wdt_init(struct device_node *np, struct at91wdt *wdt)
 }
 #endif
 
-static int __init at91wdt_probe(struct platform_device *pdev)
+static int at91wdt_probe(struct platform_device *pdev)
 {
-	struct resource	*r;
 	int err;
 	struct at91wdt *wdt;
 
@@ -349,30 +344,25 @@ static int __init at91wdt_probe(struct platform_device *pdev)
 	wdt->wdd.min_timeout = 1;
 	wdt->wdd.max_timeout = 0xFFFF;
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	wdt->base = devm_ioremap_resource(&pdev->dev, r);
+	wdt->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(wdt->base))
 		return PTR_ERR(wdt->base);
 
-	wdt->sclk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(wdt->sclk))
-		return PTR_ERR(wdt->sclk);
-
-	err = clk_prepare_enable(wdt->sclk);
-	if (err) {
+	wdt->sclk = devm_clk_get_enabled(&pdev->dev, NULL);
+	if (IS_ERR(wdt->sclk)) {
 		dev_err(&pdev->dev, "Could not enable slow clock\n");
-		return err;
+		return PTR_ERR(wdt->sclk);
 	}
 
 	if (pdev->dev.of_node) {
 		err = of_at91wdt_init(pdev->dev.of_node, wdt);
 		if (err)
-			goto err_clk;
+			return err;
 	}
 
 	err = at91_wdt_init(pdev, wdt);
 	if (err)
-		goto err_clk;
+		return err;
 
 	platform_set_drvdata(pdev, wdt);
 
@@ -380,23 +370,15 @@ static int __init at91wdt_probe(struct platform_device *pdev)
 		wdt->wdd.timeout, wdt->nowayout);
 
 	return 0;
-
-err_clk:
-	clk_disable_unprepare(wdt->sclk);
-
-	return err;
 }
 
-static int __exit at91wdt_remove(struct platform_device *pdev)
+static void at91wdt_remove(struct platform_device *pdev)
 {
 	struct at91wdt *wdt = platform_get_drvdata(pdev);
 	watchdog_unregister_device(&wdt->wdd);
 
 	pr_warn("I quit now, hardware will probably reboot!\n");
 	del_timer(&wdt->timer);
-	clk_disable_unprepare(wdt->sclk);
-
-	return 0;
 }
 
 #if defined(CONFIG_OF)
@@ -409,14 +391,14 @@ MODULE_DEVICE_TABLE(of, at91_wdt_dt_ids);
 #endif
 
 static struct platform_driver at91wdt_driver = {
-	.remove		= __exit_p(at91wdt_remove),
+	.probe		= at91wdt_probe,
+	.remove_new	= at91wdt_remove,
 	.driver		= {
 		.name	= "at91_wdt",
 		.of_match_table = of_match_ptr(at91_wdt_dt_ids),
 	},
 };
-
-module_platform_driver_probe(at91wdt_driver, at91wdt_probe);
+module_platform_driver(at91wdt_driver);
 
 MODULE_AUTHOR("Renaud CERRATO <r.cerrato@til-technologies.fr>");
 MODULE_DESCRIPTION("Watchdog driver for Atmel AT91SAM9x processors");

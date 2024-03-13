@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ROHM BU21023/24 Dual touch support resistive touch screen driver
  * Copyright (C) 2012 ROHM CO.,LTD.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #include <linux/delay.h>
 #include <linux/firmware.h>
@@ -304,7 +296,7 @@ static int rohm_i2c_burst_read(struct i2c_client *client, u8 start, void *buf,
 	msg[1].len = len;
 	msg[1].buf = buf;
 
-	i2c_lock_adapter(adap);
+	i2c_lock_bus(adap, I2C_LOCK_SEGMENT);
 
 	for (i = 0; i < 2; i++) {
 		if (__i2c_transfer(adap, &msg[i], 1) < 0) {
@@ -313,7 +305,7 @@ static int rohm_i2c_burst_read(struct i2c_client *client, u8 start, void *buf,
 		}
 	}
 
-	i2c_unlock_adapter(adap);
+	i2c_unlock_bus(adap, I2C_LOCK_SEGMENT);
 
 	return ret;
 }
@@ -862,10 +854,7 @@ static struct attribute *rohm_ts_attrs[] = {
 	&dev_attr_inv_y.attr,
 	NULL,
 };
-
-static const struct attribute_group rohm_ts_attr_group = {
-	.attrs = rohm_ts_attrs,
-};
+ATTRIBUTE_GROUPS(rohm_ts);
 
 static int rohm_ts_device_init(struct i2c_client *client, u8 setup2)
 {
@@ -1103,8 +1092,7 @@ static void rohm_ts_close(struct input_dev *input_dev)
 	ts->initialized = false;
 }
 
-static int rohm_bu21023_i2c_probe(struct i2c_client *client,
-				  const struct i2c_device_id *id)
+static int rohm_bu21023_i2c_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct rohm_ts_data *ts;
@@ -1173,12 +1161,6 @@ static int rohm_bu21023_i2c_probe(struct i2c_client *client,
 		return error;
 	}
 
-	error = devm_device_add_group(dev, &rohm_ts_attr_group);
-	if (error) {
-		dev_err(dev, "failed to create sysfs group: %d\n", error);
-		return error;
-	}
-
 	return error;
 }
 
@@ -1191,6 +1173,7 @@ MODULE_DEVICE_TABLE(i2c, rohm_bu21023_i2c_id);
 static struct i2c_driver rohm_bu21023_i2c_driver = {
 	.driver = {
 		.name = BU21023_NAME,
+		.dev_groups = rohm_ts_groups,
 	},
 	.probe = rohm_bu21023_i2c_probe,
 	.id_table = rohm_bu21023_i2c_id,

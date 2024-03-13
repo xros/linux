@@ -14,30 +14,34 @@
 #include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/slab.h>
+#include <asm/asm-extable.h>
 #include <asm/ebcdic.h>
 #include <asm/debug.h>
 #include <asm/sysinfo.h>
 #include <asm/cpcmd.h>
 #include <asm/topology.h>
-#include <asm/fpu/api.h>
+#include <asm/fpu.h>
 
 int topology_max_mnest;
 
 static inline int __stsi(void *sysinfo, int fc, int sel1, int sel2, int *lvl)
 {
-	register int r0 asm("0") = (fc << 28) | sel1;
-	register int r1 asm("1") = sel2;
+	int r0 = (fc << 28) | sel1;
 	int rc = 0;
 
 	asm volatile(
-		"	stsi	0(%3)\n"
+		"	lr	0,%[r0]\n"
+		"	lr	1,%[r1]\n"
+		"	stsi	0(%[sysinfo])\n"
 		"0:	jz	2f\n"
-		"1:	lhi	%1,%4\n"
-		"2:\n"
+		"1:	lhi	%[rc],%[retval]\n"
+		"2:	lr	%[r0],0\n"
 		EX_TABLE(0b, 1b)
-		: "+d" (r0), "+d" (rc)
-		: "d" (r1), "a" (sysinfo), "K" (-EOPNOTSUPP)
-		: "cc", "memory");
+		: [r0] "+d" (r0), [rc] "+d" (rc)
+		: [r1] "d" (sel2),
+		  [sysinfo] "a" (sysinfo),
+		  [retval] "K" (-EOPNOTSUPP)
+		: "cc", "0", "1", "memory");
 	*lvl = ((unsigned int) r0) >> 28;
 	return rc;
 }
@@ -59,6 +63,8 @@ int stsi(void *sysinfo, int fc, int sel1, int sel2)
 }
 EXPORT_SYMBOL(stsi);
 
+#ifdef CONFIG_PROC_FS
+
 static bool convert_ext_name(unsigned char encoding, char *name, size_t len)
 {
 	switch (encoding) {
@@ -75,10 +81,12 @@ static bool convert_ext_name(unsigned char encoding, char *name, size_t len)
 
 static void stsi_1_1_1(struct seq_file *m, struct sysinfo_1_1_1 *info)
 {
+	bool has_var_cap;
 	int i;
 
 	if (stsi(info, 1, 1, 1))
 		return;
+	has_var_cap = !!info->model_var_cap[0];
 	EBCASC(info->manufacturer, sizeof(info->manufacturer));
 	EBCASC(info->type, sizeof(info->type));
 	EBCASC(info->model, sizeof(info->model));
@@ -87,8 +95,12 @@ static void stsi_1_1_1(struct seq_file *m, struct sysinfo_1_1_1 *info)
 	EBCASC(info->model_capacity, sizeof(info->model_capacity));
 	EBCASC(info->model_perm_cap, sizeof(info->model_perm_cap));
 	EBCASC(info->model_temp_cap, sizeof(info->model_temp_cap));
+	if (has_var_cap)
+		EBCASC(info->model_var_cap, sizeof(info->model_var_cap));
 	seq_printf(m, "Manufacturer:         %-16.16s\n", info->manufacturer);
 	seq_printf(m, "Type:                 %-4.4s\n", info->type);
+	if (info->lic)
+		seq_printf(m, "LIC Identifier:       %016lx\n", info->lic);
 	/*
 	 * Sigh: the model field has been renamed with System z9
 	 * to model_capacity and a new model field has been added
@@ -112,12 +124,18 @@ static void stsi_1_1_1(struct seq_file *m, struct sysinfo_1_1_1 *info)
 		seq_printf(m, "Model Temp. Capacity: %-16.16s %08u\n",
 			   info->model_temp_cap,
 			   info->model_temp_cap_rating);
+	if (has_var_cap && info->model_var_cap_rating)
+		seq_printf(m, "Model Var. Capacity:  %-16.16s %08u\n",
+			   info->model_var_cap,
+			   info->model_var_cap_rating);
 	if (info->ncr)
 		seq_printf(m, "Nominal Cap. Rating:  %08u\n", info->ncr);
 	if (info->npr)
 		seq_printf(m, "Nominal Perm. Rating: %08u\n", info->npr);
 	if (info->ntr)
 		seq_printf(m, "Nominal Temp. Rating: %08u\n", info->ntr);
+	if (has_var_cap && info->nvr)
+		seq_printf(m, "Nominal Var. Rating:  %08u\n", info->nvr);
 	if (info->cai) {
 		seq_printf(m, "Capacity Adj. Ind.:   %d\n", info->cai);
 		seq_printf(m, "Capacity Ch. Reason:  %d\n", info->ccr);
@@ -292,24 +310,14 @@ static int sysinfo_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static int sysinfo_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, sysinfo_show, NULL);
-}
-
-static const struct file_operations sysinfo_fops = {
-	.open		= sysinfo_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
 static int __init sysinfo_create_proc(void)
 {
-	proc_create("sysinfo", 0444, NULL, &sysinfo_fops);
+	proc_create_single("sysinfo", 0444, NULL, sysinfo_show);
 	return 0;
 }
 device_initcall(sysinfo_create_proc);
+
+#endif /* CONFIG_PROC_FS */
 
 /*
  * Service levels interface.
@@ -384,18 +392,6 @@ static const struct seq_operations service_level_seq_ops = {
 	.show		= service_level_show
 };
 
-static int service_level_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &service_level_seq_ops);
-}
-
-static const struct file_operations service_level_ops = {
-	.open		= service_level_open,
-	.read		= seq_read,
-	.llseek 	= seq_lseek,
-	.release	= seq_release
-};
-
 static void service_level_vm_print(struct seq_file *m,
 				   struct service_level *slr)
 {
@@ -418,7 +414,7 @@ static struct service_level service_level_vm = {
 
 static __init int create_proc_service_level(void)
 {
-	proc_create("service_levels", 0, NULL, &service_level_ops);
+	proc_create_seq("service_levels", 0, NULL, &service_level_seq_ops);
 	if (MACHINE_IS_VM)
 		register_service_level(&service_level_vm);
 	return 0;
@@ -430,9 +426,9 @@ subsys_initcall(create_proc_service_level);
  */
 void s390_adjust_jiffies(void)
 {
+	DECLARE_KERNEL_FPU_ONSTACK16(fpu);
 	struct sysinfo_1_2_2 *info;
 	unsigned long capability;
-	struct kernel_fpu fpu;
 
 	info = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!info)
@@ -451,21 +447,14 @@ void s390_adjust_jiffies(void)
 		 * point division ..
 		 */
 		kernel_fpu_begin(&fpu, KERNEL_FPR);
-		asm volatile(
-			"	sfpc	%3\n"
-			"	l	%0,%1\n"
-			"	tmlh	%0,0xff80\n"
-			"	jnz	0f\n"
-			"	cefbr	%%f2,%0\n"
-			"	j	1f\n"
-			"0:	le	%%f2,%1\n"
-			"1:	cefbr	%%f0,%2\n"
-			"	debr	%%f0,%%f2\n"
-			"	cgebr	%0,5,%%f0\n"
-			: "=&d" (capability)
-			: "Q" (info->capability), "d" (10000000), "d" (0)
-			: "cc"
-			);
+		fpu_sfpc(0);
+		if (info->capability & 0xff800000)
+			fpu_ldgr(2, info->capability);
+		else
+			fpu_cefbr(2, info->capability);
+		fpu_cefbr(0, 10000000);
+		fpu_debr(0, 2);
+		capability = fpu_cgebr(0, 5);
 		kernel_fpu_end(&fpu, KERNEL_FPR);
 	} else
 		/*
@@ -563,8 +552,6 @@ static __init int stsi_init_debugfs(void)
 	int lvl, i;
 
 	stsi_root = debugfs_create_dir("stsi", arch_debugfs_dir);
-	if (IS_ERR_OR_NULL(stsi_root))
-		return 0;
 	lvl = stsi(NULL, 0, 0, 0);
 	if (lvl > 0)
 		stsi_0_0_0 = lvl;

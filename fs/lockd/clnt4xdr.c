@@ -75,17 +75,6 @@ static void nlm4_compute_offsets(const struct nlm_lock *lock,
 }
 
 /*
- * Handle decode buffer overflows out-of-line.
- */
-static void print_overflow_msg(const char *func, const struct xdr_stream *xdr)
-{
-	dprintk("lockd: %s prematurely hit the end of our receive buffer. "
-		"Remaining buffer length is %tu words.\n",
-		func, xdr->end - xdr->p);
-}
-
-
-/*
  * Encode/decode NLMv4 basic data types
  *
  * Basic NLMv4 data types are defined in Appendix II, section 6.1.4
@@ -128,24 +117,14 @@ static void encode_netobj(struct xdr_stream *xdr,
 static int decode_netobj(struct xdr_stream *xdr,
 			 struct xdr_netobj *obj)
 {
-	u32 length;
-	__be32 *p;
+	ssize_t ret;
 
-	p = xdr_inline_decode(xdr, 4);
-	if (unlikely(p == NULL))
-		goto out_overflow;
-	length = be32_to_cpup(p++);
-	if (unlikely(length > XDR_MAX_NETOBJ))
-		goto out_size;
-	obj->len = length;
-	obj->data = (u8 *)p;
+	ret = xdr_stream_decode_opaque_inline(xdr, (void *)&obj->data,
+						XDR_MAX_NETOBJ);
+	if (unlikely(ret < 0))
+		return -EIO;
+	obj->len = ret;
 	return 0;
-out_size:
-	dprintk("NFS: returned netobj was too long: %u\n", length);
-	return -EIO;
-out_overflow:
-	print_overflow_msg(__func__, xdr);
-	return -EIO;
 }
 
 /*
@@ -186,7 +165,6 @@ out_size:
 	dprintk("NFS: returned cookie was too long: %u\n", length);
 	return -EIO;
 out_overflow:
-	print_overflow_msg(__func__, xdr);
 	return -EIO;
 }
 
@@ -246,7 +224,6 @@ out_bad_xdr:
 			__func__, be32_to_cpup(p));
 	return -EIO;
 out_overflow:
-	print_overflow_msg(__func__, xdr);
 	return -EIO;
 }
 
@@ -266,7 +243,7 @@ static void encode_nlm4_holder(struct xdr_stream *xdr,
 	u64 l_offset, l_len;
 	__be32 *p;
 
-	encode_bool(xdr, lock->fl.fl_type == F_RDLCK);
+	encode_bool(xdr, lock->fl.c.flc_type == F_RDLCK);
 	encode_int32(xdr, lock->svid);
 	encode_netobj(xdr, lock->oh.data, lock->oh.len);
 
@@ -284,7 +261,6 @@ static int decode_nlm4_holder(struct xdr_stream *xdr, struct nlm_res *result)
 	u32 exclusive;
 	int error;
 	__be32 *p;
-	s32 end;
 
 	memset(lock, 0, sizeof(*lock));
 	locks_init_lock(fl);
@@ -294,7 +270,7 @@ static int decode_nlm4_holder(struct xdr_stream *xdr, struct nlm_res *result)
 		goto out_overflow;
 	exclusive = be32_to_cpup(p++);
 	lock->svid = be32_to_cpup(p);
-	fl->fl_pid = (pid_t)lock->svid;
+	fl->c.flc_pid = (pid_t)lock->svid;
 
 	error = decode_netobj(xdr, &lock->oh);
 	if (unlikely(error))
@@ -304,22 +280,15 @@ static int decode_nlm4_holder(struct xdr_stream *xdr, struct nlm_res *result)
 	if (unlikely(p == NULL))
 		goto out_overflow;
 
-	fl->fl_flags = FL_POSIX;
-	fl->fl_type  = exclusive != 0 ? F_WRLCK : F_RDLCK;
+	fl->c.flc_flags = FL_POSIX;
+	fl->c.flc_type  = exclusive != 0 ? F_WRLCK : F_RDLCK;
 	p = xdr_decode_hyper(p, &l_offset);
 	xdr_decode_hyper(p, &l_len);
-	end = l_offset + l_len - 1;
-
-	fl->fl_start = (loff_t)l_offset;
-	if (l_len == 0 || end < 0)
-		fl->fl_end = OFFSET_MAX;
-	else
-		fl->fl_end = (loff_t)end;
+	nlm4svc_set_file_lock_range(fl, l_offset, l_len);
 	error = 0;
 out:
 	return error;
 out_overflow:
-	print_overflow_msg(__func__, xdr);
 	return -EIO;
 }
 
@@ -388,7 +357,7 @@ static void nlm4_xdr_enc_testargs(struct rpc_rqst *req,
 	const struct nlm_lock *lock = &args->lock;
 
 	encode_cookie(xdr, &args->cookie);
-	encode_bool(xdr, lock->fl.fl_type == F_WRLCK);
+	encode_bool(xdr, lock->fl.c.flc_type == F_WRLCK);
 	encode_nlm4_lock(xdr, lock);
 }
 
@@ -411,7 +380,7 @@ static void nlm4_xdr_enc_lockargs(struct rpc_rqst *req,
 
 	encode_cookie(xdr, &args->cookie);
 	encode_bool(xdr, args->block);
-	encode_bool(xdr, lock->fl.fl_type == F_WRLCK);
+	encode_bool(xdr, lock->fl.c.flc_type == F_WRLCK);
 	encode_nlm4_lock(xdr, lock);
 	encode_bool(xdr, args->reclaim);
 	encode_int32(xdr, args->state);
@@ -434,7 +403,7 @@ static void nlm4_xdr_enc_cancargs(struct rpc_rqst *req,
 
 	encode_cookie(xdr, &args->cookie);
 	encode_bool(xdr, args->block);
-	encode_bool(xdr, lock->fl.fl_type == F_WRLCK);
+	encode_bool(xdr, lock->fl.c.flc_type == F_WRLCK);
 	encode_nlm4_lock(xdr, lock);
 }
 

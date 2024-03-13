@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * LEDs driver for Freescale MC13783/MC13892/MC34708
  *
@@ -9,10 +10,6 @@
  *
  * Copyright (C) 2006-2008 Marvell International Ltd.
  *      Eric Miao <eric.miao@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -124,7 +121,7 @@ static struct mc13xxx_leds_platform_data __init *mc13xxx_led_probe_dt(
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
-	parent = of_get_child_by_name(dev->parent->of_node, "leds");
+	parent = of_get_child_by_name(dev_of_node(dev->parent), "leds");
 	if (!parent)
 		goto out_node_put;
 
@@ -134,16 +131,16 @@ static struct mc13xxx_leds_platform_data __init *mc13xxx_led_probe_dt(
 	if (ret)
 		goto out_node_put;
 
-	pdata->num_leds = of_get_child_count(parent);
+	pdata->num_leds = of_get_available_child_count(parent);
 
-	pdata->led = devm_kzalloc(dev, pdata->num_leds * sizeof(*pdata->led),
+	pdata->led = devm_kcalloc(dev, pdata->num_leds, sizeof(*pdata->led),
 				  GFP_KERNEL);
 	if (!pdata->led) {
 		ret = -ENOMEM;
 		goto out_node_put;
 	}
 
-	for_each_child_of_node(parent, child) {
+	for_each_available_child_of_node(parent, child) {
 		const char *str;
 		u32 tmp;
 
@@ -195,7 +192,7 @@ static int __init mc13xxx_led_probe(struct platform_device *pdev)
 	leds->master = mcdev;
 	platform_set_drvdata(pdev, leds);
 
-	if (dev->parent->of_node) {
+	if (dev_of_node(dev->parent)) {
 		pdata = mc13xxx_led_probe_dt(pdev);
 		if (IS_ERR(pdata))
 			return PTR_ERR(pdata);
@@ -210,7 +207,7 @@ static int __init mc13xxx_led_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	leds->led = devm_kzalloc(dev, leds->num_leds * sizeof(*leds->led),
+	leds->led = devm_kcalloc(dev, leds->num_leds, sizeof(*leds->led),
 				 GFP_KERNEL);
 	if (!leds->led)
 		return -ENOMEM;
@@ -264,15 +261,13 @@ static int __init mc13xxx_led_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int mc13xxx_led_remove(struct platform_device *pdev)
+static void mc13xxx_led_remove(struct platform_device *pdev)
 {
 	struct mc13xxx_leds *leds = platform_get_drvdata(pdev);
 	int i;
 
 	for (i = 0; i < leds->num_leds; i++)
 		led_classdev_unregister(&leds->led[i].cdev);
-
-	return 0;
 }
 
 static const struct mc13xxx_led_devtype mc13783_led_devtype = {
@@ -308,7 +303,7 @@ static struct platform_driver mc13xxx_led_driver = {
 	.driver	= {
 		.name	= "mc13xxx-led",
 	},
-	.remove		= mc13xxx_led_remove,
+	.remove_new	= mc13xxx_led_remove,
 	.id_table	= mc13xxx_led_id_table,
 };
 module_platform_driver_probe(mc13xxx_led_driver, mc13xxx_led_probe);

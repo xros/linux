@@ -32,7 +32,6 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_net.h>
 #include <linux/sched.h>
 #include <linux/serdev.h>
@@ -59,9 +58,8 @@ struct qcauart {
 	unsigned char *tx_buffer;
 };
 
-static int
-qca_tty_receive(struct serdev_device *serdev, const unsigned char *data,
-		size_t count)
+static ssize_t
+qca_tty_receive(struct serdev_device *serdev, const u8 *data, size_t count)
 {
 	struct qcauart *qca = serdev_device_get_drvdata(serdev);
 	struct net_device *netdev = qca->net_dev;
@@ -107,8 +105,8 @@ qca_tty_receive(struct serdev_device *serdev, const unsigned char *data,
 			skb_put(qca->rx_skb, retcode);
 			qca->rx_skb->protocol = eth_type_trans(
 						qca->rx_skb, qca->rx_skb->dev);
-			qca->rx_skb->ip_summed = CHECKSUM_UNNECESSARY;
-			netif_rx_ni(qca->rx_skb);
+			skb_checksum_none_assert(qca->rx_skb);
+			netif_rx(qca->rx_skb);
 			qca->rx_skb = netdev_alloc_skb_ip_align(netdev,
 								netdev->mtu +
 								VLAN_ETH_HLEN);
@@ -167,7 +165,7 @@ static void qca_tty_wakeup(struct serdev_device *serdev)
 	schedule_work(&qca->tx_work);
 }
 
-static struct serdev_device_ops qca_serdev_ops = {
+static const struct serdev_device_ops qca_serdev_ops = {
 	.receive_buf = qca_tty_receive,
 	.write_wakeup = qca_tty_wakeup,
 };
@@ -248,7 +246,7 @@ out:
 	return NETDEV_TX_OK;
 }
 
-static void qcauart_netdev_tx_timeout(struct net_device *dev)
+static void qcauart_netdev_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct qcauart *qca = netdev_priv(dev);
 
@@ -285,8 +283,7 @@ static void qcauart_netdev_uninit(struct net_device *dev)
 {
 	struct qcauart *qca = netdev_priv(dev);
 
-	if (qca->rx_skb)
-		dev_kfree_skb(qca->rx_skb);
+	dev_kfree_skb(qca->rx_skb);
 }
 
 static const struct net_device_ops qcauart_netdev_ops = {
@@ -324,7 +321,6 @@ static int qca_uart_probe(struct serdev_device *serdev)
 {
 	struct net_device *qcauart_dev = alloc_etherdev(sizeof(struct qcauart));
 	struct qcauart *qca;
-	const char *mac;
 	u32 speed = 115200;
 	int ret;
 
@@ -349,12 +345,8 @@ static int qca_uart_probe(struct serdev_device *serdev)
 
 	of_property_read_u32(serdev->dev.of_node, "current-speed", &speed);
 
-	mac = of_get_mac_address(serdev->dev.of_node);
-
-	if (mac)
-		ether_addr_copy(qca->net_dev->dev_addr, mac);
-
-	if (!is_valid_ether_addr(qca->net_dev->dev_addr)) {
+	ret = of_get_ethdev_address(serdev->dev.of_node, qca->net_dev);
+	if (ret) {
 		eth_hw_addr_random(qca->net_dev);
 		dev_info(&serdev->dev, "Using random MAC address: %pM\n",
 			 qca->net_dev->dev_addr);
@@ -410,7 +402,7 @@ static struct serdev_device_driver qca_uart_driver = {
 	.remove = qca_uart_remove,
 	.driver = {
 		.name = QCAUART_DRV_NAME,
-		.of_match_table = of_match_ptr(qca_uart_of_match),
+		.of_match_table = qca_uart_of_match,
 	},
 };
 

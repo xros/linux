@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015, Sony Mobile Communications AB.
  * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -27,6 +19,7 @@
 /**
  * struct qcom_smd_rpm - state of the rpm device driver
  * @rpm_channel:	reference to the smd channel
+ * @dev:		rpm device
  * @ack:		completion for acks
  * @lock:		mutual exclusion around the send/complete pair
  * @ack_status:		result of the rpm request
@@ -80,7 +73,7 @@ struct qcom_rpm_message {
 	__le32 length;
 	union {
 		__le32 msg_id;
-		u8 message[0];
+		DECLARE_FLEX_ARRAY(u8, message);
 	};
 };
 
@@ -92,6 +85,7 @@ struct qcom_rpm_message {
 /**
  * qcom_rpm_smd_write - write @buf to @type:@id
  * @rpm:	rpm handle
+ * @state:	active/sleep state flags
  * @type:	resource type
  * @id:		resource identifier
  * @buf:	the data to be written
@@ -117,7 +111,7 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 	if (WARN_ON(size >= 256))
 		return -EINVAL;
 
-	pkt = kmalloc(size, GFP_KERNEL);
+	pkt = kmalloc(size, GFP_ATOMIC);
 	if (!pkt)
 		return -ENOMEM;
 
@@ -148,7 +142,7 @@ out:
 	mutex_unlock(&rpm->lock);
 	return ret;
 }
-EXPORT_SYMBOL(qcom_rpm_smd_write);
+EXPORT_SYMBOL_GPL(qcom_rpm_smd_write);
 
 static int qcom_smd_rpm_callback(struct rpmsg_device *rpdev,
 				 void *data,
@@ -202,6 +196,9 @@ static int qcom_smd_rpm_probe(struct rpmsg_device *rpdev)
 {
 	struct qcom_smd_rpm *rpm;
 
+	if (!rpdev->dev.of_node)
+		return -EINVAL;
+
 	rpm = devm_kzalloc(&rpdev->dev, sizeof(*rpm), GFP_KERNEL);
 	if (!rpm)
 		return -ENOMEM;
@@ -221,23 +218,18 @@ static void qcom_smd_rpm_remove(struct rpmsg_device *rpdev)
 	of_platform_depopulate(&rpdev->dev);
 }
 
-static const struct of_device_id qcom_smd_rpm_of_match[] = {
-	{ .compatible = "qcom,rpm-apq8084" },
-	{ .compatible = "qcom,rpm-msm8916" },
-	{ .compatible = "qcom,rpm-msm8974" },
-	{ .compatible = "qcom,rpm-msm8996" },
-	{}
+static const struct rpmsg_device_id qcom_smd_rpm_id_table[] = {
+	{ .name = "rpm_requests", },
+	{ /* sentinel */ }
 };
-MODULE_DEVICE_TABLE(of, qcom_smd_rpm_of_match);
+MODULE_DEVICE_TABLE(rpmsg, qcom_smd_rpm_id_table);
 
 static struct rpmsg_driver qcom_smd_rpm_driver = {
 	.probe = qcom_smd_rpm_probe,
 	.remove = qcom_smd_rpm_remove,
 	.callback = qcom_smd_rpm_callback,
-	.drv  = {
-		.name  = "qcom_smd_rpm",
-		.of_match_table = qcom_smd_rpm_of_match,
-	},
+	.id_table = qcom_smd_rpm_id_table,
+	.drv.name = "qcom_smd_rpm",
 };
 
 static int __init qcom_smd_rpm_init(void)

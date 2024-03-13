@@ -4,7 +4,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
-#include <linux/blkdev.h>
+#include <linux/blk_types.h>
 
 struct arqb {
 	u64 data;
@@ -78,7 +78,7 @@ struct aob {
 
 struct aob_rq_header {
 	struct scm_device *scmdev;
-	char data[0];
+	char data[];
 };
 
 struct scm_device {
@@ -105,7 +105,7 @@ enum scm_event {SCM_CHANGE, SCM_AVAIL};
 struct scm_driver {
 	struct device_driver drv;
 	int (*probe) (struct scm_device *scmdev);
-	int (*remove) (struct scm_device *scmdev);
+	void (*remove) (struct scm_device *scmdev);
 	void (*notify) (struct scm_device *scmdev, enum scm_event event);
 	void (*handler) (struct scm_device *scmdev, void *data,
 			blk_status_t error);

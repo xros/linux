@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* binder_alloc_selftest.c
  *
  * Android IPC Subsystem
  *
  * Copyright (C) 2017 Google, Inc.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -81,6 +72,10 @@ enum buf_end_align_type {
 	 * buf1 ]|[ buf2 | buf2 | buf2 ][ ...
 	 */
 	NEXT_NEXT_UNALIGNED,
+	/**
+	 * @LOOP_END: The number of enum values in &buf_end_align_type.
+	 * It is used for controlling loop termination.
+	 */
 	LOOP_END,
 };
 
@@ -102,11 +97,12 @@ static bool check_buffer_pages_allocated(struct binder_alloc *alloc,
 					 struct binder_buffer *buffer,
 					 size_t size)
 {
-	void *page_addr, *end;
+	unsigned long page_addr;
+	unsigned long end;
 	int page_index;
 
-	end = (void *)PAGE_ALIGN((uintptr_t)buffer->data + size);
-	page_addr = buffer->data;
+	end = PAGE_ALIGN(buffer->user_data + size);
+	page_addr = buffer->user_data;
 	for (; page_addr < end; page_addr += PAGE_SIZE) {
 		page_index = (page_addr - alloc->buffer) / PAGE_SIZE;
 		if (!alloc->pages[page_index].page_ptr ||
@@ -166,8 +162,8 @@ static void binder_selftest_free_page(struct binder_alloc *alloc)
 	int i;
 	unsigned long count;
 
-	while ((count = list_lru_count(&binder_alloc_lru))) {
-		list_lru_walk(&binder_alloc_lru, binder_alloc_free_page,
+	while ((count = list_lru_count(&binder_freelist))) {
+		list_lru_walk(&binder_freelist, binder_alloc_free_page,
 			      NULL, count);
 	}
 
@@ -191,7 +187,7 @@ static void binder_selftest_alloc_free(struct binder_alloc *alloc,
 
 	/* Allocate from lru. */
 	binder_selftest_alloc_buf(alloc, buffers, sizes, seq);
-	if (list_lru_count(&binder_alloc_lru))
+	if (list_lru_count(&binder_freelist))
 		pr_err("lru list should be empty but is not\n");
 
 	binder_selftest_free_buf(alloc, buffers, sizes, seq, end);

@@ -488,4 +488,4 @@ static struct usb_composite_driver multi_driver = {
 	.needs_serial	= 1,
 };
 
-module_usb_composite_driver(multi_driver);
+module_usb_composite_driver(multi_driver)

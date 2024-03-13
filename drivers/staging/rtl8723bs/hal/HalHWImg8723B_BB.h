@@ -1,15 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /******************************************************************************
 *
 * Copyright(c) 2007 - 2011 Realtek Corporation. All rights reserved.
-*
-* This program is free software; you can redistribute it and/or modify it
-* under the terms of version 2 of the GNU General Public License as
-* published by the Free Software Foundation.
-*
-* This program is distributed in the hope that it will be useful, but WITHOUT
-* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-* FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
-* more details.
 *
 ******************************************************************************/
 
@@ -23,7 +15,7 @@
 
 void
 ODM_ReadAndConfig_MP_8723B_AGC_TAB(/*  TC: Test Chip, MP: MP Chip */
-	PDM_ODM_T  pDM_Odm
+	struct dm_odm_t *pDM_Odm
 );
 
 /******************************************************************************
@@ -32,7 +24,7 @@ ODM_ReadAndConfig_MP_8723B_AGC_TAB(/*  TC: Test Chip, MP: MP Chip */
 
 void
 ODM_ReadAndConfig_MP_8723B_PHY_REG(/*  TC: Test Chip, MP: MP Chip */
-	PDM_ODM_T  pDM_Odm
+	struct dm_odm_t *pDM_Odm
 );
 
 /******************************************************************************
@@ -41,7 +33,7 @@ ODM_ReadAndConfig_MP_8723B_PHY_REG(/*  TC: Test Chip, MP: MP Chip */
 
 void
 ODM_ReadAndConfig_MP_8723B_PHY_REG_PG(/*  TC: Test Chip, MP: MP Chip */
-	PDM_ODM_T  pDM_Odm
+	struct dm_odm_t *pDM_Odm
 );
 u32 ODM_GetVersion_MP_8723B_PHY_REG_PG(void);
 

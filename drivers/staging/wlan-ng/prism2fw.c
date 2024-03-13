@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1)
 /* from src/prism2/download/prism2dl.c
  *
  * utility for downloading prism2 images moved into kernelspace
@@ -6,27 +7,6 @@
  * --------------------------------------------------------------------
  *
  * linux-wlan
- *
- *   The contents of this file are subject to the Mozilla Public
- *   License Version 1.1 (the "License"); you may not use this file
- *   except in compliance with the License. You may obtain a copy of
- *   the License at http://www.mozilla.org/MPL/
- *
- *   Software distributed under the License is distributed on an "AS
- *   IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- *   implied. See the License for the specific language governing
- *   rights and limitations under the License.
- *
- *   Alternatively, the contents of this file may be used under the
- *   terms of the GNU Public License version 2 (the "GPL"), in which
- *   case the provisions of the GPL are applicable instead of the
- *   above.  If you wish to allow the use of your version of this file
- *   only under the terms of the GPL and not to allow others to use
- *   your version of this file under the MPL, indicate your decision
- *   by deleting the provisions above and replace them with the notice
- *   and other provisions required by the GPL.  If you do not delete
- *   the provisions above, a recipient may use your version of this
- *   file under either the MPL or the GPL.
  *
  * --------------------------------------------------------------------
  *
@@ -293,17 +273,17 @@ static int prism2_fwapply(const struct ihex_binrec *rfptr,
 
 	/* read the card's PRI-SUP */
 	memset(&getmsg, 0, sizeof(getmsg));
-	getmsg.msgcode = DIDmsg_dot11req_mibget;
+	getmsg.msgcode = DIDMSG_DOT11REQ_MIBGET;
 	getmsg.msglen = sizeof(getmsg);
-	strcpy(getmsg.devname, wlandev->name);
+	strscpy(getmsg.devname, wlandev->name, sizeof(getmsg.devname));
 
-	getmsg.mibattribute.did = DIDmsg_dot11req_mibget_mibattribute;
+	getmsg.mibattribute.did = DIDMSG_DOT11REQ_MIBGET_MIBATTRIBUTE;
 	getmsg.mibattribute.status = P80211ENUM_msgitem_status_data_ok;
-	getmsg.resultcode.did = DIDmsg_dot11req_mibget_resultcode;
+	getmsg.resultcode.did = DIDMSG_DOT11REQ_MIBGET_RESULTCODE;
 	getmsg.resultcode.status = P80211ENUM_msgitem_status_no_value;
 
 	item = (struct p80211itemd *)getmsg.mibattribute.data;
-	item->did = DIDmib_p2_p2NIC_p2PRISupRange;
+	item->did = DIDMIB_P2_NIC_PRISUPRANGE;
 	item->status = P80211ENUM_msgitem_status_no_value;
 
 	data = (u32 *)item->data;
@@ -405,7 +385,6 @@ static int crcimage(struct imgchunk *fchunk, unsigned int nfchunks,
 	int i;
 	int c;
 	u32 crcstart;
-	u32 crcend;
 	u32 cstart = 0;
 	u32 cend;
 	u8 *dest;
@@ -415,7 +394,6 @@ static int crcimage(struct imgchunk *fchunk, unsigned int nfchunks,
 		if (!s3crc[i].dowrite)
 			continue;
 		crcstart = s3crc[i].addr;
-		crcend = s3crc[i].addr + s3crc[i].len;
 		/* Find chunk */
 		for (c = 0; c < nfchunks; c++) {
 			cstart = fchunk[c].addr;
@@ -557,10 +535,9 @@ static int mkimage(struct imgchunk *clist, unsigned int *ccnt)
 	/* Allocate buffer space for chunks */
 	for (i = 0; i < *ccnt; i++) {
 		clist[i].data = kzalloc(clist[i].len, GFP_KERNEL);
-		if (!clist[i].data) {
-			pr_err("failed to allocate image space, exitting.\n");
+		if (!clist[i].data)
 			return 1;
-		}
+
 		pr_debug("chunk[%d]: addr=0x%06x len=%d\n",
 			 i, clist[i].addr, clist[i].len);
 	}
@@ -691,6 +668,7 @@ static int plugimage(struct imgchunk *fchunk, unsigned int nfchunks,
 	for (i = 0; i < ns3plug; i++) {
 		pstart = s3plug[i].addr;
 		pend = s3plug[i].addr + s3plug[i].len;
+		j = -1;
 		/* find the matching PDR (or filename) */
 		if (s3plug[i].itemcode != 0xffffffffUL) { /* not filename */
 			for (j = 0; j < pda->nrec; j++) {
@@ -698,14 +676,12 @@ static int plugimage(struct imgchunk *fchunk, unsigned int nfchunks,
 				    le16_to_cpu(pda->rec[j]->code))
 					break;
 			}
-		} else {
-			j = -1;
 		}
 		if (j >= pda->nrec && j != -1) { /*  if no matching PDR, fail */
 			pr_warn("warning: Failed to find PDR for plugrec 0x%04x.\n",
 				s3plug[i].itemcode);
 			continue;	/* and move on to the next PDR */
-#if 0
+
 			/* MSM: They swear that unless it's the MAC address,
 			 * the serial number, or the TX calibration records,
 			 * then there's reasonable defaults in the f/w
@@ -713,9 +689,6 @@ static int plugimage(struct imgchunk *fchunk, unsigned int nfchunks,
 			 * should only be a warning, not fatal.
 			 * TODO: add fatals for the PDRs mentioned above.
 			 */
-			result = 1;
-			continue;
-#endif
 		}
 
 		/* Validate plug len against PDR len */
@@ -752,7 +725,7 @@ static int plugimage(struct imgchunk *fchunk, unsigned int nfchunks,
 
 		if (j == -1) {	/* plug the filename */
 			memset(dest, 0, s3plug[i].len);
-			strncpy(dest, PRISM2_USB_FWFILE, s3plug[i].len - 1);
+			strscpy(dest, PRISM2_USB_FWFILE, s3plug[i].len);
 		} else {	/* plug a PDR */
 			memcpy(dest, &pda->rec[j]->data, s3plug[i].len);
 		}
@@ -789,13 +762,13 @@ static int read_cardpda(struct pda *pda, struct wlandevice *wlandev)
 		return -ENOMEM;
 
 	/* set up the msg */
-	msg->msgcode = DIDmsg_p2req_readpda;
+	msg->msgcode = DIDMSG_P2REQ_READPDA;
 	msg->msglen = sizeof(msg);
-	strcpy(msg->devname, wlandev->name);
-	msg->pda.did = DIDmsg_p2req_readpda_pda;
+	strscpy(msg->devname, wlandev->name, sizeof(msg->devname));
+	msg->pda.did = DIDMSG_P2REQ_READPDA_PDA;
 	msg->pda.len = HFA384x_PDA_LEN_MAX;
 	msg->pda.status = P80211ENUM_msgitem_status_no_value;
-	msg->resultcode.did = DIDmsg_p2req_readpda_resultcode;
+	msg->resultcode.did = DIDMSG_P2REQ_READPDA_RESULTCODE;
 	msg->resultcode.len = sizeof(u32);
 	msg->resultcode.status = P80211ENUM_msgitem_status_no_value;
 
@@ -1013,21 +986,20 @@ static int writeimage(struct wlandevice *wlandev, struct imgchunk *fchunk,
 	rstmsg = kzalloc(sizeof(*rstmsg), GFP_KERNEL);
 	rwrmsg = kzalloc(sizeof(*rwrmsg), GFP_KERNEL);
 	if (!rstmsg || !rwrmsg) {
-		kfree(rstmsg);
-		kfree(rwrmsg);
 		netdev_err(wlandev->netdev,
 			   "%s: no memory for firmware download, aborting download\n",
 			   __func__);
-		return -ENOMEM;
+		result = -ENOMEM;
+		goto free_result;
 	}
 
 	/* Initialize the messages */
-	strcpy(rstmsg->devname, wlandev->name);
-	rstmsg->msgcode = DIDmsg_p2req_ramdl_state;
+	strscpy(rstmsg->devname, wlandev->name, sizeof(rstmsg->devname));
+	rstmsg->msgcode = DIDMSG_P2REQ_RAMDL_STATE;
 	rstmsg->msglen = sizeof(*rstmsg);
-	rstmsg->enable.did = DIDmsg_p2req_ramdl_state_enable;
-	rstmsg->exeaddr.did = DIDmsg_p2req_ramdl_state_exeaddr;
-	rstmsg->resultcode.did = DIDmsg_p2req_ramdl_state_resultcode;
+	rstmsg->enable.did = DIDMSG_P2REQ_RAMDL_STATE_ENABLE;
+	rstmsg->exeaddr.did = DIDMSG_P2REQ_RAMDL_STATE_EXEADDR;
+	rstmsg->resultcode.did = DIDMSG_P2REQ_RAMDL_STATE_RESULTCODE;
 	rstmsg->enable.status = P80211ENUM_msgitem_status_data_ok;
 	rstmsg->exeaddr.status = P80211ENUM_msgitem_status_data_ok;
 	rstmsg->resultcode.status = P80211ENUM_msgitem_status_no_value;
@@ -1035,13 +1007,13 @@ static int writeimage(struct wlandevice *wlandev, struct imgchunk *fchunk,
 	rstmsg->exeaddr.len = sizeof(u32);
 	rstmsg->resultcode.len = sizeof(u32);
 
-	strcpy(rwrmsg->devname, wlandev->name);
-	rwrmsg->msgcode = DIDmsg_p2req_ramdl_write;
+	strscpy(rwrmsg->devname, wlandev->name, sizeof(rwrmsg->devname));
+	rwrmsg->msgcode = DIDMSG_P2REQ_RAMDL_WRITE;
 	rwrmsg->msglen = sizeof(*rwrmsg);
-	rwrmsg->addr.did = DIDmsg_p2req_ramdl_write_addr;
-	rwrmsg->len.did = DIDmsg_p2req_ramdl_write_len;
-	rwrmsg->data.did = DIDmsg_p2req_ramdl_write_data;
-	rwrmsg->resultcode.did = DIDmsg_p2req_ramdl_write_resultcode;
+	rwrmsg->addr.did = DIDMSG_P2REQ_RAMDL_WRITE_ADDR;
+	rwrmsg->len.did = DIDMSG_P2REQ_RAMDL_WRITE_LEN;
+	rwrmsg->data.did = DIDMSG_P2REQ_RAMDL_WRITE_DATA;
+	rwrmsg->resultcode.did = DIDMSG_P2REQ_RAMDL_WRITE_RESULTCODE;
 	rwrmsg->addr.status = P80211ENUM_msgitem_status_data_ok;
 	rwrmsg->len.status = P80211ENUM_msgitem_status_data_ok;
 	rwrmsg->data.status = P80211ENUM_msgitem_status_data_ok;
@@ -1188,9 +1160,10 @@ static int validate_identity(void)
 			/* PRI compat range */
 			if ((s3info[i].info.compat.role == 1) &&
 			    (s3info[i].info.compat.id == 3)) {
-				if ((s3info[i].info.compat.bottom > priid.top)
-				    || (s3info[i].info.compat.top <
-					priid.bottom)) {
+				if ((s3info[i].info.compat.bottom >
+				     priid.top) ||
+				    (s3info[i].info.compat.top <
+				     priid.bottom)) {
 					result = 3;
 				}
 			}

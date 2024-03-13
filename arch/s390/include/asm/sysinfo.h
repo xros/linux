@@ -21,7 +21,8 @@ struct sysinfo_1_1_1 {
 	unsigned char :8;
 	unsigned char ccr;
 	unsigned char cai;
-	char reserved_0[28];
+	char reserved_0[20];
+	unsigned long lic;
 	char manufacturer[16];
 	char type[4];
 	char reserved_1[12];
@@ -39,6 +40,10 @@ struct sysinfo_1_1_1 {
 	unsigned int ncr;
 	unsigned int npr;
 	unsigned int ntr;
+	char reserved_3[4];
+	char model_var_cap[16];
+	unsigned int model_var_cap_rating;
+	unsigned int nvr;
 };
 
 struct sysinfo_1_2_1 {
@@ -66,12 +71,12 @@ struct sysinfo_1_2_2 {
 	unsigned short cpus_configured;
 	unsigned short cpus_standby;
 	unsigned short cpus_reserved;
-	unsigned short adjustment[0];
+	unsigned short adjustment[];
 };
 
 struct sysinfo_1_2_2_extension {
 	unsigned int alt_capability;
-	unsigned short alt_adjustment[0];
+	unsigned short alt_adjustment[];
 };
 
 struct sysinfo_2_2_1 {
@@ -180,7 +185,7 @@ struct sysinfo_15_1_x {
 	unsigned char reserved1;
 	unsigned char mnest;
 	unsigned char reserved2[4];
-	union topology_entry tle[0];
+	union topology_entry tle[];
 };
 
 int stsi(void *sysinfo, int fc, int sel1, int sel2);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,17 +6,12 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include <linux/ctype.h>
 #include <linux/security.h>
 #include <linux/vmalloc.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/mount.h>
@@ -23,22 +19,24 @@
 #include <linux/capability.h>
 #include <linux/rcupdate.h>
 #include <linux/fs.h>
+#include <linux/fs_context.h>
 #include <linux/poll.h>
+#include <linux/zstd.h>
 #include <uapi/linux/major.h>
 #include <uapi/linux/magic.h>
 
 #include "include/apparmor.h"
 #include "include/apparmorfs.h"
 #include "include/audit.h"
-#include "include/context.h"
+#include "include/cred.h"
 #include "include/crypto.h"
 #include "include/ipc.h"
-#include "include/policy_ns.h"
 #include "include/label.h"
 #include "include/policy.h"
 #include "include/policy_ns.h"
 #include "include/resource.h"
 #include "include/policy_unpack.h"
+#include "include/task.h"
 
 /*
  * The apparmor filesystem interface used for policy load and introspection
@@ -69,8 +67,39 @@
  * support fns
  */
 
+struct rawdata_f_data {
+	struct aa_loaddata *loaddata;
+};
+
+#ifdef CONFIG_SECURITY_APPARMOR_EXPORT_BINARY
+#define RAWDATA_F_DATA_BUF(p) (char *)(p + 1)
+
+static void rawdata_f_data_free(struct rawdata_f_data *private)
+{
+	if (!private)
+		return;
+
+	aa_put_loaddata(private->loaddata);
+	kvfree(private);
+}
+
+static struct rawdata_f_data *rawdata_f_data_alloc(size_t size)
+{
+	struct rawdata_f_data *ret;
+
+	if (size > SIZE_MAX - sizeof(*ret))
+		return ERR_PTR(-EINVAL);
+
+	ret = kvzalloc(sizeof(*ret) + size, GFP_KERNEL);
+	if (!ret)
+		return ERR_PTR(-ENOMEM);
+
+	return ret;
+}
+#endif
+
 /**
- * aa_mangle_name - mangle a profile name to std profile layout form
+ * mangle_name - mangle a profile name to std profile layout form
  * @name: profile name to mangle  (NOT NULL)
  * @target: buffer to store mangled name, same length as @name (MAYBE NULL)
  *
@@ -120,27 +149,24 @@ static int aafs_count;
 
 static int aafs_show_path(struct seq_file *seq, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-
-	seq_printf(seq, "%s:[%lu]", AAFS_NAME, inode->i_ino);
+	seq_printf(seq, "%s:[%lu]", AAFS_NAME, d_inode(dentry)->i_ino);
 	return 0;
 }
 
-static void aafs_evict_inode(struct inode *inode)
+static void aafs_free_inode(struct inode *inode)
 {
-	truncate_inode_pages_final(&inode->i_data);
-	clear_inode(inode);
 	if (S_ISLNK(inode->i_mode))
 		kfree(inode->i_link);
+	free_inode_nonrcu(inode);
 }
 
 static const struct super_operations aafs_super_ops = {
 	.statfs = simple_statfs,
-	.evict_inode = aafs_evict_inode,
+	.free_inode = aafs_free_inode,
 	.show_path = aafs_show_path,
 };
 
-static int fill_super(struct super_block *sb, void *data, int silent)
+static int apparmorfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	static struct tree_descr files[] = { {""} };
 	int error;
@@ -153,16 +179,25 @@ static int fill_super(struct super_block *sb, void *data, int silent)
 	return 0;
 }
 
-static struct dentry *aafs_mount(struct file_system_type *fs_type,
-				 int flags, const char *dev_name, void *data)
+static int apparmorfs_get_tree(struct fs_context *fc)
 {
-	return mount_single(fs_type, flags, data, fill_super);
+	return get_tree_single(fc, apparmorfs_fill_super);
+}
+
+static const struct fs_context_operations apparmorfs_context_ops = {
+	.get_tree	= apparmorfs_get_tree,
+};
+
+static int apparmorfs_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &apparmorfs_context_ops;
+	return 0;
 }
 
 static struct file_system_type aafs_ops = {
 	.owner = THIS_MODULE,
 	.name = AAFS_NAME,
-	.mount = aafs_mount,
+	.init_fs_context = apparmorfs_init_fs_context,
 	.kill_sb = kill_anon_super,
 };
 
@@ -191,7 +226,7 @@ static int __aafs_setup_d_inode(struct inode *dir, struct dentry *dentry,
 
 	inode->i_ino = get_next_ino();
 	inode->i_mode = mode;
-	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	simple_inode_init_ts(inode);
 	inode->i_private = data;
 	if (S_ISDIR(mode)) {
 		inode->i_op = iops ? iops : &simple_dir_inode_operations;
@@ -309,37 +344,6 @@ static struct dentry *aafs_create_dir(const char *name, struct dentry *parent)
 }
 
 /**
- * aafs_create_symlink - create a symlink in the apparmorfs filesystem
- * @name: name of dentry to create
- * @parent: parent directory for this dentry
- * @target: if symlink, symlink target string
- * @iops: struct of inode_operations that should be used
- *
- * If @target parameter is %NULL, then the @iops parameter needs to be
- * setup to handle .readlink and .get_link inode_operations.
- */
-static struct dentry *aafs_create_symlink(const char *name,
-					  struct dentry *parent,
-					  const char *target,
-					  const struct inode_operations *iops)
-{
-	struct dentry *dent;
-	char *link = NULL;
-
-	if (target) {
-		link = kstrdup(target, GFP_KERNEL);
-		if (!link)
-			return ERR_PTR(-ENOMEM);
-	}
-	dent = aafs_create(name, S_IFLNK | 0444, parent, NULL, link, NULL,
-			   iops);
-	if (IS_ERR(dent))
-		kfree(link);
-
-	return dent;
-}
-
-/**
  * aafs_remove - removes a file or directory from the apparmorfs filesystem
  *
  * @dentry: dentry of the file/directory/symlink to removed.
@@ -358,6 +362,7 @@ static void aafs_remove(struct dentry *dentry)
 			simple_rmdir(dir, dentry);
 		else
 			simple_unlink(dir, dentry);
+		d_delete(dentry);
 		dput(dentry);
 	}
 	inode_unlock(dir);
@@ -399,7 +404,7 @@ static struct aa_loaddata *aa_simple_write_to_buffer(const char __user *userbuf,
 
 	data->size = copy_size;
 	if (copy_from_user(data->data, userbuf, copy_size)) {
-		kvfree(data);
+		aa_put_loaddata(data);
 		return ERR_PTR(-EFAULT);
 	}
 
@@ -418,9 +423,9 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 	/* high level check about policy management - fine grained in
 	 * below after unpack
 	 */
-	error = aa_may_manage_policy(label, ns, mask);
+	error = aa_may_manage_policy(current_cred(), label, ns, mask);
 	if (error)
-		return error;
+		goto end_section;
 
 	data = aa_simple_write_to_buffer(buf, size, size, pos);
 	error = PTR_ERR(data);
@@ -428,6 +433,7 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 		error = aa_replace_profiles(ns, label, mask, data);
 		aa_put_loaddata(data);
 	}
+end_section:
 	end_current_label_crit_section(label);
 
 	return error;
@@ -480,7 +486,8 @@ static ssize_t profile_remove(struct file *f, const char __user *buf,
 	/* high level check about policy management - fine grained in
 	 * below after unpack
 	 */
-	error = aa_may_manage_policy(label, ns, AA_MAY_REMOVE_POLICY);
+	error = aa_may_manage_policy(current_cred(), label, ns,
+				     AA_MAY_REMOVE_POLICY);
 	if (error)
 		goto out;
 
@@ -580,7 +587,7 @@ static __poll_t ns_revision_poll(struct file *file, poll_table *pt)
 		mutex_lock_nested(&rev->ns->lock, rev->ns->level);
 		poll_wait(file, &rev->ns->wait, pt);
 		if (rev->last_read < rev->ns->revision)
-			mask |= POLLIN | POLLRDNORM;
+			mask |= EPOLLIN | EPOLLRDNORM;
 		mutex_unlock(&rev->ns->lock);
 	}
 
@@ -589,7 +596,7 @@ static __poll_t ns_revision_poll(struct file *file, poll_table *pt)
 
 void __aa_bump_ns_revision(struct aa_ns *ns)
 {
-	ns->revision++;
+	WRITE_ONCE(ns->revision, READ_ONCE(ns->revision) + 1);
 	wake_up_interruptible(&ns->wait);
 }
 
@@ -605,32 +612,30 @@ static const struct file_operations aa_fs_ns_revision_fops = {
 static void profile_query_cb(struct aa_profile *profile, struct aa_perms *perms,
 			     const char *match_str, size_t match_len)
 {
-	struct aa_perms tmp;
-	struct aa_dfa *dfa;
-	unsigned int state = 0;
+	struct aa_ruleset *rules = list_first_entry(&profile->rules,
+						    typeof(*rules), list);
+	struct aa_perms tmp = { };
+	aa_state_t state = DFA_NOMATCH;
 
 	if (profile_unconfined(profile))
 		return;
-	if (profile->file.dfa && *match_str == AA_CLASS_FILE) {
-		dfa = profile->file.dfa;
-		state = aa_dfa_match_len(dfa, profile->file.start,
+	if (rules->file->dfa && *match_str == AA_CLASS_FILE) {
+		state = aa_dfa_match_len(rules->file->dfa,
+					 rules->file->start[AA_CLASS_FILE],
 					 match_str + 1, match_len - 1);
-		tmp = nullperms;
 		if (state) {
 			struct path_cond cond = { };
 
-			tmp = aa_compute_fperms(dfa, state, &cond);
+			tmp = *(aa_lookup_fperms(rules->file, state, &cond));
 		}
-	} else if (profile->policy.dfa) {
-		if (!PROFILE_MEDIATES_SAFE(profile, *match_str))
+	} else if (rules->policy->dfa) {
+		if (!RULE_MEDIATES(rules, *match_str))
 			return;	/* no change to current perms */
-		dfa = profile->policy.dfa;
-		state = aa_dfa_match_len(dfa, profile->policy.start[0],
+		state = aa_dfa_match_len(rules->policy->dfa,
+					 rules->policy->start[0],
 					 match_str, match_len);
 		if (state)
-			aa_compute_perms(dfa, state, &tmp);
-		else
-			tmp = nullperms;
+			tmp = *aa_lookup_perms(rules->policy, state);
 	}
 	aa_apply_modes_to_perms(profile, &tmp);
 	aa_perms_accum_raw(perms, &tmp);
@@ -808,12 +813,10 @@ static ssize_t query_label(char *buf, size_t buf_len,
 struct multi_transaction {
 	struct kref count;
 	ssize_t size;
-	char data[0];
+	char data[];
 };
 
 #define MULTI_TRANSACTION_LIMIT (PAGE_SIZE - sizeof(struct multi_transaction))
-/* TODO: replace with per file lock */
-static DEFINE_SPINLOCK(multi_transaction_lock);
 
 static void multi_transaction_kref(struct kref *kref)
 {
@@ -847,10 +850,10 @@ static void multi_transaction_set(struct file *file,
 	AA_BUG(n > MULTI_TRANSACTION_LIMIT);
 
 	new->size = n;
-	spin_lock(&multi_transaction_lock);
+	spin_lock(&file->f_lock);
 	old = (struct multi_transaction *) file->private_data;
 	file->private_data = new;
-	spin_unlock(&multi_transaction_lock);
+	spin_unlock(&file->f_lock);
 	put_multi_transaction(old);
 }
 
@@ -867,8 +870,10 @@ static struct multi_transaction *multi_transaction_new(struct file *file,
 	if (!t)
 		return ERR_PTR(-ENOMEM);
 	kref_init(&t->count);
-	if (copy_from_user(t->data, buf, size))
+	if (copy_from_user(t->data, buf, size)) {
+		put_multi_transaction(t);
 		return ERR_PTR(-EFAULT);
+	}
 
 	return t;
 }
@@ -879,9 +884,10 @@ static ssize_t multi_transaction_read(struct file *file, char __user *buf,
 	struct multi_transaction *t;
 	ssize_t ret;
 
-	spin_lock(&multi_transaction_lock);
+	spin_lock(&file->f_lock);
 	t = get_multi_transaction(file->private_data);
-	spin_unlock(&multi_transaction_lock);
+	spin_unlock(&file->f_lock);
+
 	if (!t)
 		return 0;
 
@@ -1088,9 +1094,9 @@ static int seq_profile_attach_show(struct seq_file *seq, void *v)
 	struct aa_proxy *proxy = seq->private;
 	struct aa_label *label = aa_get_label_rcu(&proxy->label);
 	struct aa_profile *profile = labels_profile(label);
-	if (profile->attach)
-		seq_printf(seq, "%s\n", profile->attach);
-	else if (profile->xmatch)
+	if (profile->attach.xmatch_str)
+		seq_printf(seq, "%s\n", profile->attach.xmatch_str);
+	else if (profile->attach.xmatch->dfa)
 		seq_puts(seq, "<unknown>\n");
 	else
 		seq_printf(seq, "%s\n", profile->base.name);
@@ -1189,11 +1195,21 @@ static int seq_ns_level_show(struct seq_file *seq, void *v)
 static int seq_ns_name_show(struct seq_file *seq, void *v)
 {
 	struct aa_label *label = begin_current_label_crit_section();
-
-	seq_printf(seq, "%s\n", aa_ns_name(labels_ns(label),
-					   labels_ns(label), true));
+	seq_printf(seq, "%s\n", labels_ns(label)->base.name);
 	end_current_label_crit_section(label);
 
+	return 0;
+}
+
+static int seq_ns_compress_min_show(struct seq_file *seq, void *v)
+{
+	seq_printf(seq, "%d\n", AA_MIN_CLEVEL);
+	return 0;
+}
+
+static int seq_ns_compress_max_show(struct seq_file *seq, void *v)
+{
+	seq_printf(seq, "%d\n", AA_MAX_CLEVEL);
 	return 0;
 }
 
@@ -1201,10 +1217,12 @@ SEQ_NS_FOPS(stacked);
 SEQ_NS_FOPS(nsstacked);
 SEQ_NS_FOPS(level);
 SEQ_NS_FOPS(name);
+SEQ_NS_FOPS(compress_min);
+SEQ_NS_FOPS(compress_max);
 
 
 /* policy/raw_data/ * file ops */
-
+#ifdef CONFIG_SECURITY_APPARMOR_EXPORT_BINARY
 #define SEQ_RAWDATA_FOPS(NAME)						      \
 static int seq_rawdata_ ##NAME ##_open(struct inode *inode, struct file *file)\
 {									      \
@@ -1281,36 +1299,110 @@ static int seq_rawdata_hash_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
+static int seq_rawdata_compressed_size_show(struct seq_file *seq, void *v)
+{
+	struct aa_loaddata *data = seq->private;
+
+	seq_printf(seq, "%zu\n", data->compressed_size);
+
+	return 0;
+}
+
 SEQ_RAWDATA_FOPS(abi);
 SEQ_RAWDATA_FOPS(revision);
 SEQ_RAWDATA_FOPS(hash);
+SEQ_RAWDATA_FOPS(compressed_size);
+
+static int decompress_zstd(char *src, size_t slen, char *dst, size_t dlen)
+{
+	if (slen < dlen) {
+		const size_t wksp_len = zstd_dctx_workspace_bound();
+		zstd_dctx *ctx;
+		void *wksp;
+		size_t out_len;
+		int ret = 0;
+
+		wksp = kvzalloc(wksp_len, GFP_KERNEL);
+		if (!wksp) {
+			ret = -ENOMEM;
+			goto cleanup;
+		}
+		ctx = zstd_init_dctx(wksp, wksp_len);
+		if (ctx == NULL) {
+			ret = -ENOMEM;
+			goto cleanup;
+		}
+		out_len = zstd_decompress_dctx(ctx, dst, dlen, src, slen);
+		if (zstd_is_error(out_len)) {
+			ret = -EINVAL;
+			goto cleanup;
+		}
+cleanup:
+		kvfree(wksp);
+		return ret;
+	}
+
+	if (dlen < slen)
+		return -EINVAL;
+	memcpy(dst, src, slen);
+	return 0;
+}
 
 static ssize_t rawdata_read(struct file *file, char __user *buf, size_t size,
 			    loff_t *ppos)
 {
-	struct aa_loaddata *rawdata = file->private_data;
+	struct rawdata_f_data *private = file->private_data;
 
-	return simple_read_from_buffer(buf, size, ppos, rawdata->data,
-				       rawdata->size);
+	return simple_read_from_buffer(buf, size, ppos,
+				       RAWDATA_F_DATA_BUF(private),
+				       private->loaddata->size);
 }
 
 static int rawdata_release(struct inode *inode, struct file *file)
 {
-	aa_put_loaddata(file->private_data);
+	rawdata_f_data_free(file->private_data);
 
 	return 0;
 }
 
 static int rawdata_open(struct inode *inode, struct file *file)
 {
-	if (!policy_view_capable(NULL))
+	int error;
+	struct aa_loaddata *loaddata;
+	struct rawdata_f_data *private;
+
+	if (!aa_current_policy_view_capable(NULL))
 		return -EACCES;
-	file->private_data = __aa_get_loaddata(inode->i_private);
-	if (!file->private_data)
+
+	loaddata = __aa_get_loaddata(inode->i_private);
+	if (!loaddata)
 		/* lost race: this entry is being reaped */
 		return -ENOENT;
 
+	private = rawdata_f_data_alloc(loaddata->size);
+	if (IS_ERR(private)) {
+		error = PTR_ERR(private);
+		goto fail_private_alloc;
+	}
+
+	private->loaddata = loaddata;
+
+	error = decompress_zstd(loaddata->data, loaddata->compressed_size,
+				RAWDATA_F_DATA_BUF(private),
+				loaddata->size);
+	if (error)
+		goto fail_decompress;
+
+	file->private_data = private;
 	return 0;
+
+fail_decompress:
+	rawdata_f_data_free(private);
+	return error;
+
+fail_private_alloc:
+	aa_put_loaddata(loaddata);
+	return error;
 }
 
 static const struct file_operations rawdata_fops = {
@@ -1382,12 +1474,19 @@ int __aa_fs_create_rawdata(struct aa_ns *ns, struct aa_loaddata *rawdata)
 	rawdata->dents[AAFS_LOADDATA_REVISION] = dent;
 
 	if (aa_g_hash_policy) {
-		dent = aafs_create_file("sha1", S_IFREG | 0444, dir,
+		dent = aafs_create_file("sha256", S_IFREG | 0444, dir,
 					      rawdata, &seq_rawdata_hash_fops);
 		if (IS_ERR(dent))
 			goto fail;
 		rawdata->dents[AAFS_LOADDATA_HASH] = dent;
 	}
+
+	dent = aafs_create_file("compressed_size", S_IFREG | 0444, dir,
+				rawdata,
+				&seq_rawdata_compressed_size_fops);
+	if (IS_ERR(dent))
+		goto fail;
+	rawdata->dents[AAFS_LOADDATA_COMPRESSED_SIZE] = dent;
 
 	dent = aafs_create_file("raw_data", S_IFREG | 0444,
 				      dir, rawdata, &rawdata_fops);
@@ -1407,10 +1506,12 @@ fail:
 
 	return PTR_ERR(dent);
 }
+#endif /* CONFIG_SECURITY_APPARMOR_EXPORT_BINARY */
+
 
 /** fns to setup dynamic per profile/namespace files **/
 
-/**
+/*
  *
  * Requires: @profile->ns->lock held
  */
@@ -1437,7 +1538,7 @@ void __aafs_profile_rmdir(struct aa_profile *profile)
 	}
 }
 
-/**
+/*
  *
  * Requires: @old->ns->lock held
  */
@@ -1452,8 +1553,12 @@ void __aafs_profile_migrate_dents(struct aa_profile *old,
 
 	for (i = 0; i < AAFS_PROF_SIZEOF; i++) {
 		new->dents[i] = old->dents[i];
-		if (new->dents[i])
-			new->dents[i]->d_inode->i_mtime = current_time(new->dents[i]->d_inode);
+		if (new->dents[i]) {
+			struct inode *inode = d_inode(new->dents[i]);
+
+			inode_set_mtime_to_ts(inode,
+					      inode_set_ctime_current(inode));
+		}
 		old->dents[i] = NULL;
 	}
 }
@@ -1472,6 +1577,7 @@ static struct dentry *create_profile_file(struct dentry *dir, const char *name,
 	return dent;
 }
 
+#ifdef CONFIG_SECURITY_APPARMOR_EXPORT_BINARY
 static int profile_depth(struct aa_profile *profile)
 {
 	int depth = 0;
@@ -1484,25 +1590,91 @@ static int profile_depth(struct aa_profile *profile)
 	return depth;
 }
 
-static int gen_symlink_name(char *buffer, size_t bsize, int depth,
-			    const char *dirname, const char *fname)
+static char *gen_symlink_name(int depth, const char *dirname, const char *fname)
 {
+	char *buffer, *s;
 	int error;
+	int size = depth * 6 + strlen(dirname) + strlen(fname) + 11;
+
+	s = buffer = kmalloc(size, GFP_KERNEL);
+	if (!buffer)
+		return ERR_PTR(-ENOMEM);
 
 	for (; depth > 0; depth--) {
-		if (bsize < 7)
-			return -ENAMETOOLONG;
-		strcpy(buffer, "../../");
-		buffer += 6;
-		bsize -= 6;
+		strcpy(s, "../../");
+		s += 6;
+		size -= 6;
 	}
 
-	error = snprintf(buffer, bsize, "raw_data/%s/%s", dirname, fname);
-	if (error >= bsize || error < 0)
-		return -ENAMETOOLONG;
+	error = snprintf(s, size, "raw_data/%s/%s", dirname, fname);
+	if (error >= size || error < 0) {
+		kfree(buffer);
+		return ERR_PTR(-ENAMETOOLONG);
+	}
 
-	return 0;
+	return buffer;
 }
+
+static const char *rawdata_get_link_base(struct dentry *dentry,
+					 struct inode *inode,
+					 struct delayed_call *done,
+					 const char *name)
+{
+	struct aa_proxy *proxy = inode->i_private;
+	struct aa_label *label;
+	struct aa_profile *profile;
+	char *target;
+	int depth;
+
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
+
+	label = aa_get_label_rcu(&proxy->label);
+	profile = labels_profile(label);
+	depth = profile_depth(profile);
+	target = gen_symlink_name(depth, profile->rawdata->name, name);
+	aa_put_label(label);
+
+	if (IS_ERR(target))
+		return target;
+
+	set_delayed_call(done, kfree_link, target);
+
+	return target;
+}
+
+static const char *rawdata_get_link_sha256(struct dentry *dentry,
+					 struct inode *inode,
+					 struct delayed_call *done)
+{
+	return rawdata_get_link_base(dentry, inode, done, "sha256");
+}
+
+static const char *rawdata_get_link_abi(struct dentry *dentry,
+					struct inode *inode,
+					struct delayed_call *done)
+{
+	return rawdata_get_link_base(dentry, inode, done, "abi");
+}
+
+static const char *rawdata_get_link_data(struct dentry *dentry,
+					 struct inode *inode,
+					 struct delayed_call *done)
+{
+	return rawdata_get_link_base(dentry, inode, done, "raw_data");
+}
+
+static const struct inode_operations rawdata_link_sha256_iops = {
+	.get_link	= rawdata_get_link_sha256,
+};
+
+static const struct inode_operations rawdata_link_abi_iops = {
+	.get_link	= rawdata_get_link_abi,
+};
+static const struct inode_operations rawdata_link_data_iops = {
+	.get_link	= rawdata_get_link_data,
+};
+#endif /* CONFIG_SECURITY_APPARMOR_EXPORT_BINARY */
 
 /*
  * Requires: @profile->ns->lock held
@@ -1566,44 +1738,41 @@ int __aafs_profile_mkdir(struct aa_profile *profile, struct dentry *parent)
 	profile->dents[AAFS_PROF_ATTACH] = dent;
 
 	if (profile->hash) {
-		dent = create_profile_file(dir, "sha1", profile,
+		dent = create_profile_file(dir, "sha256", profile,
 					   &seq_profile_hash_fops);
 		if (IS_ERR(dent))
 			goto fail;
 		profile->dents[AAFS_PROF_HASH] = dent;
 	}
 
+#ifdef CONFIG_SECURITY_APPARMOR_EXPORT_BINARY
 	if (profile->rawdata) {
-		char target[64];
-		int depth = profile_depth(profile);
-
-		error = gen_symlink_name(target, sizeof(target), depth,
-					 profile->rawdata->name, "sha1");
-		if (error < 0)
-			goto fail2;
-		dent = aafs_create_symlink("raw_sha1", dir, target, NULL);
+		if (aa_g_hash_policy) {
+			dent = aafs_create("raw_sha256", S_IFLNK | 0444, dir,
+					   profile->label.proxy, NULL, NULL,
+					   &rawdata_link_sha256_iops);
+			if (IS_ERR(dent))
+				goto fail;
+			aa_get_proxy(profile->label.proxy);
+			profile->dents[AAFS_PROF_RAW_HASH] = dent;
+		}
+		dent = aafs_create("raw_abi", S_IFLNK | 0444, dir,
+				   profile->label.proxy, NULL, NULL,
+				   &rawdata_link_abi_iops);
 		if (IS_ERR(dent))
 			goto fail;
-		profile->dents[AAFS_PROF_RAW_HASH] = dent;
-
-		error = gen_symlink_name(target, sizeof(target), depth,
-					 profile->rawdata->name, "abi");
-		if (error < 0)
-			goto fail2;
-		dent = aafs_create_symlink("raw_abi", dir, target, NULL);
-		if (IS_ERR(dent))
-			goto fail;
+		aa_get_proxy(profile->label.proxy);
 		profile->dents[AAFS_PROF_RAW_ABI] = dent;
 
-		error = gen_symlink_name(target, sizeof(target), depth,
-					 profile->rawdata->name, "raw_data");
-		if (error < 0)
-			goto fail2;
-		dent = aafs_create_symlink("raw_data", dir, target, NULL);
+		dent = aafs_create("raw_data", S_IFLNK | 0444, dir,
+				   profile->label.proxy, NULL, NULL,
+				   &rawdata_link_data_iops);
 		if (IS_ERR(dent))
 			goto fail;
+		aa_get_proxy(profile->label.proxy);
 		profile->dents[AAFS_PROF_RAW_DATA] = dent;
 	}
+#endif /*CONFIG_SECURITY_APPARMOR_EXPORT_BINARY */
 
 	list_for_each_entry(child, &profile->base.profiles, base.list) {
 		error = __aafs_profile_mkdir(child, prof_child_dir(profile));
@@ -1622,7 +1791,8 @@ fail2:
 	return error;
 }
 
-static int ns_mkdir_op(struct inode *dir, struct dentry *dentry, umode_t mode)
+static int ns_mkdir_op(struct mnt_idmap *idmap, struct inode *dir,
+		       struct dentry *dentry, umode_t mode)
 {
 	struct aa_ns *ns, *parent;
 	/* TODO: improve permission check */
@@ -1630,7 +1800,8 @@ static int ns_mkdir_op(struct inode *dir, struct dentry *dentry, umode_t mode)
 	int error;
 
 	label = begin_current_label_crit_section();
-	error = aa_may_manage_policy(label, NULL, AA_MAY_LOAD_POLICY);
+	error = aa_may_manage_policy(current_cred(), label, NULL,
+				     AA_MAY_LOAD_POLICY);
 	end_current_label_crit_section(label);
 	if (error)
 		return error;
@@ -1679,12 +1850,13 @@ static int ns_rmdir_op(struct inode *dir, struct dentry *dentry)
 	int error;
 
 	label = begin_current_label_crit_section();
-	error = aa_may_manage_policy(label, NULL, AA_MAY_LOAD_POLICY);
+	error = aa_may_manage_policy(current_cred(), label, NULL,
+				     AA_MAY_LOAD_POLICY);
 	end_current_label_crit_section(label);
 	if (error)
 		return error;
 
-	 parent = aa_get_ns(dir->i_private);
+	parent = aa_get_ns(dir->i_private);
 	/* rmdir calls the generic securityfs functions to remove files
 	 * from the apparmor dir. It is up to the apparmor ns locking
 	 * to avoid races.
@@ -1729,7 +1901,7 @@ static void __aa_fs_list_remove_rawdata(struct aa_ns *ns)
 		__aa_fs_remove_rawdata(ent);
 }
 
-/**
+/*
  *
  * Requires: @ns->lock held
  */
@@ -1895,9 +2067,6 @@ fail2:
 	return error;
 }
 
-
-#define list_entry_is_head(pos, head, member) (&pos->member == (head))
-
 /**
  * __next_ns - find the next namespace to list
  * @root: root namespace to stop search at (NOT NULL)
@@ -1965,7 +2134,7 @@ static struct aa_profile *__first_profile(struct aa_ns *root,
 
 /**
  * __next_profile - step to the next profile in a profile tree
- * @profile: current profile in tree (NOT NULL)
+ * @p: current profile in tree (NOT NULL)
  *
  * Perform a depth first traversal on the profile tree in a namespace
  *
@@ -2116,7 +2285,7 @@ static const struct seq_operations aa_sfs_profiles_op = {
 
 static int profiles_open(struct inode *inode, struct file *file)
 {
-	if (!policy_view_capable(NULL))
+	if (!aa_current_policy_view_capable(NULL))
 		return -EACCES;
 
 	return seq_open(file, &aa_sfs_profiles_op);
@@ -2152,6 +2321,10 @@ static struct aa_sfs_entry aa_sfs_entry_signal[] = {
 	{ }
 };
 
+static struct aa_sfs_entry aa_sfs_entry_attach[] = {
+	AA_SFS_FILE_BOOLEAN("xattr", 1),
+	{ }
+};
 static struct aa_sfs_entry aa_sfs_entry_domain[] = {
 	AA_SFS_FILE_BOOLEAN("change_hat",	1),
 	AA_SFS_FILE_BOOLEAN("change_hatv",	1),
@@ -2159,7 +2332,16 @@ static struct aa_sfs_entry aa_sfs_entry_domain[] = {
 	AA_SFS_FILE_BOOLEAN("change_profile",	1),
 	AA_SFS_FILE_BOOLEAN("stack",		1),
 	AA_SFS_FILE_BOOLEAN("fix_binfmt_elf_mmap",	1),
+	AA_SFS_FILE_BOOLEAN("post_nnp_subset",	1),
+	AA_SFS_FILE_BOOLEAN("computed_longest_left",	1),
+	AA_SFS_DIR("attach_conditions",		aa_sfs_entry_attach),
+	AA_SFS_FILE_BOOLEAN("disconnected.path",            1),
 	AA_SFS_FILE_STRING("version", "1.2"),
+	{ }
+};
+
+static struct aa_sfs_entry aa_sfs_entry_unconfined[] = {
+	AA_SFS_FILE_BOOLEAN("change_profile", 1),
 	{ }
 };
 
@@ -2167,23 +2349,33 @@ static struct aa_sfs_entry aa_sfs_entry_versions[] = {
 	AA_SFS_FILE_BOOLEAN("v5",	1),
 	AA_SFS_FILE_BOOLEAN("v6",	1),
 	AA_SFS_FILE_BOOLEAN("v7",	1),
+	AA_SFS_FILE_BOOLEAN("v8",	1),
+	AA_SFS_FILE_BOOLEAN("v9",	1),
 	{ }
 };
 
+#define PERMS32STR "allow deny subtree cond kill complain prompt audit quiet hide xindex tag label"
 static struct aa_sfs_entry aa_sfs_entry_policy[] = {
 	AA_SFS_DIR("versions",			aa_sfs_entry_versions),
 	AA_SFS_FILE_BOOLEAN("set_load",		1),
+	/* number of out of band transitions supported */
+	AA_SFS_FILE_U64("outofband",		MAX_OOB_SUPPORTED),
+	AA_SFS_FILE_U64("permstable32_version",	1),
+	AA_SFS_FILE_STRING("permstable32", PERMS32STR),
+	AA_SFS_DIR("unconfined_restrictions",   aa_sfs_entry_unconfined),
 	{ }
 };
 
 static struct aa_sfs_entry aa_sfs_entry_mount[] = {
 	AA_SFS_FILE_STRING("mask", "mount umount pivot_root"),
+	AA_SFS_FILE_STRING("move_mount", "detached"),
 	{ }
 };
 
 static struct aa_sfs_entry aa_sfs_entry_ns[] = {
 	AA_SFS_FILE_BOOLEAN("profile",		1),
 	AA_SFS_FILE_BOOLEAN("pivot_root",	0),
+	AA_SFS_FILE_STRING("mask", "userns_create"),
 	{ }
 };
 
@@ -2198,10 +2390,17 @@ static struct aa_sfs_entry aa_sfs_entry_query[] = {
 	AA_SFS_DIR("label",			aa_sfs_entry_query_label),
 	{ }
 };
+
+static struct aa_sfs_entry aa_sfs_entry_io_uring[] = {
+	AA_SFS_FILE_STRING("mask", "sqpoll override_creds"),
+	{ }
+};
+
 static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("policy",			aa_sfs_entry_policy),
 	AA_SFS_DIR("domain",			aa_sfs_entry_domain),
 	AA_SFS_DIR("file",			aa_sfs_entry_file),
+	AA_SFS_DIR("network_v8",		aa_sfs_entry_network),
 	AA_SFS_DIR("mount",			aa_sfs_entry_mount),
 	AA_SFS_DIR("namespaces",		aa_sfs_entry_ns),
 	AA_SFS_FILE_U64("capability",		VFS_CAP_FLAGS_MASK),
@@ -2210,6 +2409,7 @@ static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("ptrace",			aa_sfs_entry_ptrace),
 	AA_SFS_DIR("signal",			aa_sfs_entry_signal),
 	AA_SFS_DIR("query",			aa_sfs_entry_query),
+	AA_SFS_DIR("io_uring",			aa_sfs_entry_io_uring),
 	{ }
 };
 
@@ -2220,6 +2420,8 @@ static struct aa_sfs_entry aa_sfs_entry_apparmor[] = {
 	AA_SFS_FILE_FOPS(".ns_level", 0444, &seq_ns_level_fops),
 	AA_SFS_FILE_FOPS(".ns_name", 0444, &seq_ns_name_fops),
 	AA_SFS_FILE_FOPS("profiles", 0444, &aa_sfs_profiles_fops),
+	AA_SFS_FILE_FOPS("raw_data_compression_level_min", 0444, &seq_ns_compress_min_fops),
+	AA_SFS_FILE_FOPS("raw_data_compression_level_max", 0444, &seq_ns_compress_max_fops),
 	AA_SFS_DIR("features", aa_sfs_entry_features),
 	{ }
 };
@@ -2357,7 +2559,7 @@ static int aa_mk_null_file(struct dentry *parent)
 
 	inode->i_ino = get_next_ino();
 	inode->i_mode = S_IFCHR | S_IRUGO | S_IWUGO;
-	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	simple_inode_init_ts(inode);
 	init_special_inode(inode, S_IFCHR | S_IRUGO | S_IWUGO,
 			   MKDEV(MEM_MAJOR, 3));
 	d_instantiate(dentry, inode);
@@ -2382,41 +2584,32 @@ static const char *policy_get_link(struct dentry *dentry,
 {
 	struct aa_ns *ns;
 	struct path path;
+	int error;
 
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
+
 	ns = aa_get_current_ns();
 	path.mnt = mntget(aafs_mnt);
 	path.dentry = dget(ns_dir(ns));
-	nd_jump_link(&path);
+	error = nd_jump_link(&path);
 	aa_put_ns(ns);
 
-	return NULL;
-}
-
-static int ns_get_name(char *buf, size_t size, struct aa_ns *ns,
-		       struct inode *inode)
-{
-	int res = snprintf(buf, size, "%s:[%lu]", AAFS_NAME, inode->i_ino);
-
-	if (res < 0 || res >= size)
-		res = -ENOENT;
-
-	return res;
+	return ERR_PTR(error);
 }
 
 static int policy_readlink(struct dentry *dentry, char __user *buffer,
 			   int buflen)
 {
-	struct aa_ns *ns;
 	char name[32];
 	int res;
 
-	ns = aa_get_current_ns();
-	res = ns_get_name(name, sizeof(name), ns, d_inode(dentry));
-	if (res >= 0)
+	res = snprintf(name, sizeof(name), "%s:[%lu]", AAFS_NAME,
+		       d_inode(dentry)->i_ino);
+	if (res > 0 && res < sizeof(name))
 		res = readlink_copy(buffer, buflen, name);
-	aa_put_ns(ns);
+	else
+		res = -ENOENT;
 
 	return res;
 }
@@ -2460,34 +2653,26 @@ static int __init aa_create_aafs(void)
 
 	dent = securityfs_create_file(".load", 0666, aa_sfs_entry.dentry,
 				      NULL, &aa_fs_profile_load);
-	if (IS_ERR(dent)) {
-		error = PTR_ERR(dent);
-		goto error;
-	}
+	if (IS_ERR(dent))
+		goto dent_error;
 	ns_subload(root_ns) = dent;
 
 	dent = securityfs_create_file(".replace", 0666, aa_sfs_entry.dentry,
 				      NULL, &aa_fs_profile_replace);
-	if (IS_ERR(dent)) {
-		error = PTR_ERR(dent);
-		goto error;
-	}
+	if (IS_ERR(dent))
+		goto dent_error;
 	ns_subreplace(root_ns) = dent;
 
 	dent = securityfs_create_file(".remove", 0666, aa_sfs_entry.dentry,
 				      NULL, &aa_fs_profile_remove);
-	if (IS_ERR(dent)) {
-		error = PTR_ERR(dent);
-		goto error;
-	}
+	if (IS_ERR(dent))
+		goto dent_error;
 	ns_subremove(root_ns) = dent;
 
 	dent = securityfs_create_file("revision", 0444, aa_sfs_entry.dentry,
 				      NULL, &aa_fs_ns_revision_fops);
-	if (IS_ERR(dent)) {
-		error = PTR_ERR(dent);
-		goto error;
-	}
+	if (IS_ERR(dent))
+		goto dent_error;
 	ns_subrevision(root_ns) = dent;
 
 	/* policy tree referenced by magic policy symlink */
@@ -2501,10 +2686,8 @@ static int __init aa_create_aafs(void)
 	/* magic symlink similar to nsfs redirects based on task policy */
 	dent = securityfs_create_symlink("policy", aa_sfs_entry.dentry,
 					 NULL, &policy_link_iops);
-	if (IS_ERR(dent)) {
-		error = PTR_ERR(dent);
-		goto error;
-	}
+	if (IS_ERR(dent))
+		goto dent_error;
 
 	error = aa_mk_null_file(aa_sfs_entry.dentry);
 	if (error)
@@ -2516,6 +2699,8 @@ static int __init aa_create_aafs(void)
 	aa_info_message("AppArmor Filesystem Enabled");
 	return 0;
 
+dent_error:
+	error = PTR_ERR(dent);
 error:
 	aa_destroy_aafs();
 	AA_ERROR("Error creating AppArmor securityfs\n");

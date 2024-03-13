@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP2+ common Clock Management (CM) IP block functions
  *
  * Copyright (C) 2012 Texas Instruments, Inc.
  * Paul Walmsley
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * XXX This code should eventually be moved to a CM driver.
  */
@@ -29,7 +26,7 @@
  * common CM functions
  */
 static struct cm_ll_data null_cm_ll_data;
-static struct cm_ll_data *cm_ll_data = &null_cm_ll_data;
+static const struct cm_ll_data *cm_ll_data = &null_cm_ll_data;
 
 /* cm_base: base virtual address of the CM IP block */
 struct omap_domain_base cm_base;
@@ -39,19 +36,6 @@ struct omap_domain_base cm2_base;
 
 #define CM_NO_CLOCKS		0x1
 #define CM_SINGLE_INSTANCE	0x2
-
-/**
- * omap2_set_globals_cm - set the CM/CM2 base addresses (for early use)
- * @cm: CM base virtual address
- * @cm2: CM2 base virtual address (if present on the booted SoC)
- *
- * XXX Will be replaced when the PRM/CM drivers are completed.
- */
-void __init omap2_set_globals_cm(void __iomem *cm, void __iomem *cm2)
-{
-	cm_base.va = cm;
-	cm2_base.va = cm2;
-}
 
 /**
  * cm_split_idlest_reg - split CM_IDLEST reg addr into its components
@@ -178,6 +162,16 @@ int omap_cm_module_disable(u8 part, u16 inst, u16 clkctrl_offs)
 	return 0;
 }
 
+u32 omap_cm_xlate_clkctrl(u8 part, u16 inst, u16 clkctrl_offs)
+{
+	if (!cm_ll_data->xlate_clkctrl) {
+		WARN_ONCE(1, "cm: %s: no low-level function defined\n",
+			  __func__);
+		return 0;
+	}
+	return cm_ll_data->xlate_clkctrl(part, inst, clkctrl_offs);
+}
+
 /**
  * cm_register - register per-SoC low-level data with the CM
  * @cld: low-level per-SoC OMAP CM data & function pointers to register
@@ -189,7 +183,7 @@ int omap_cm_module_disable(u8 part, u16 inst, u16 clkctrl_offs)
  * is NULL, or -EEXIST if cm_register() has already been called
  * without an intervening cm_unregister().
  */
-int cm_register(struct cm_ll_data *cld)
+int cm_register(const struct cm_ll_data *cld)
 {
 	if (!cld)
 		return -EINVAL;
@@ -213,7 +207,7 @@ int cm_register(struct cm_ll_data *cld)
  * -EINVAL if @cld is NULL or if @cld does not match the struct
  * cm_ll_data * previously registered by cm_register().
  */
-int cm_unregister(struct cm_ll_data *cld)
+int cm_unregister(const struct cm_ll_data *cld)
 {
 	if (!cld || cm_ll_data != cld)
 		return -EINVAL;
@@ -326,8 +320,10 @@ int __init omap2_cm_base_init(void)
 		data = (struct omap_prcm_init_data *)match->data;
 
 		ret = of_address_to_resource(np, 0, &res);
-		if (ret)
+		if (ret) {
+			of_node_put(np);
 			return ret;
+		}
 
 		if (data->index == TI_CLKM_CM)
 			mem = &cm_base;
@@ -373,8 +369,10 @@ int __init omap_cm_init(void)
 			continue;
 
 		ret = omap2_clk_provider_init(np, data->index, NULL, data->mem);
-		if (ret)
+		if (ret) {
+			of_node_put(np);
 			return ret;
+		}
 	}
 
 	return 0;

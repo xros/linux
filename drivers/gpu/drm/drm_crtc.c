@@ -34,14 +34,20 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/dma-fence.h>
-#include <drm/drmP.h>
+#include <linux/uaccess.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_auth.h>
 #include <drm/drm_debugfs_crc.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_print.h>
+#include <drm/drm_file.h>
 
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
@@ -64,7 +70,7 @@
  * &drm_crtc_funcs.page_flip and &drm_crtc_funcs.cursor_set2, and other legacy
  * operations like &drm_crtc_funcs.gamma_set. For atomic drivers all these
  * features are controlled through &drm_property and
- * &drm_mode_config_funcs.atomic_check and &drm_mode_config_funcs.atomic_check.
+ * &drm_mode_config_funcs.atomic_check.
  */
 
 /**
@@ -90,15 +96,6 @@ struct drm_crtc *drm_crtc_from_index(struct drm_device *dev, int idx)
 }
 EXPORT_SYMBOL(drm_crtc_from_index);
 
-/**
- * drm_crtc_force_disable - Forcibly turn off a CRTC
- * @crtc: CRTC to turn off
- *
- * Note: This should only be used by non-atomic legacy drivers.
- *
- * Returns:
- * Zero on success, error code on failure.
- */
 int drm_crtc_force_disable(struct drm_crtc *crtc)
 {
 	struct drm_mode_set set = {
@@ -109,38 +106,6 @@ int drm_crtc_force_disable(struct drm_crtc *crtc)
 
 	return drm_mode_set_config_internal(&set);
 }
-EXPORT_SYMBOL(drm_crtc_force_disable);
-
-/**
- * drm_crtc_force_disable_all - Forcibly turn off all enabled CRTCs
- * @dev: DRM device whose CRTCs to turn off
- *
- * Drivers may want to call this on unload to ensure that all displays are
- * unlit and the GPU is in a consistent, low power state. Takes modeset locks.
- *
- * Note: This should only be used by non-atomic legacy drivers. For an atomic
- * version look at drm_atomic_helper_shutdown().
- *
- * Returns:
- * Zero on success, error code on failure.
- */
-int drm_crtc_force_disable_all(struct drm_device *dev)
-{
-	struct drm_crtc *crtc;
-	int ret = 0;
-
-	drm_modeset_lock_all(dev);
-	drm_for_each_crtc(crtc, dev)
-		if (crtc->enabled) {
-			ret = drm_crtc_force_disable(crtc);
-			if (ret)
-				goto out;
-		}
-out:
-	drm_modeset_unlock_all(dev);
-	return ret;
-}
-EXPORT_SYMBOL(drm_crtc_force_disable_all);
 
 static unsigned int drm_num_crtcs(struct drm_device *dev)
 {
@@ -160,9 +125,7 @@ int drm_crtc_register_all(struct drm_device *dev)
 	int ret = 0;
 
 	drm_for_each_crtc(crtc, dev) {
-		if (drm_debugfs_crtc_add(crtc))
-			DRM_ERROR("Failed to initialize debugfs entry for CRTC '%s'.\n",
-				  crtc->name);
+		drm_debugfs_crtc_add(crtc);
 
 		if (crtc->funcs->late_register)
 			ret = crtc->funcs->late_register(crtc);
@@ -225,16 +188,9 @@ static const char *drm_crtc_fence_get_timeline_name(struct dma_fence *fence)
 	return crtc->timeline_name;
 }
 
-static bool drm_crtc_fence_enable_signaling(struct dma_fence *fence)
-{
-	return true;
-}
-
 static const struct dma_fence_ops drm_crtc_fence_ops = {
 	.get_driver_name = drm_crtc_fence_get_driver_name,
 	.get_timeline_name = drm_crtc_fence_get_timeline_name,
-	.enable_signaling = drm_crtc_fence_enable_signaling,
-	.wait = dma_fence_default_wait,
 };
 
 struct dma_fence *drm_crtc_create_fence(struct drm_crtc *crtc)
@@ -252,35 +208,61 @@ struct dma_fence *drm_crtc_create_fence(struct drm_crtc *crtc)
 }
 
 /**
- * drm_crtc_init_with_planes - Initialise a new CRTC object with
- *    specified primary and cursor planes.
- * @dev: DRM device
- * @crtc: CRTC object to init
- * @primary: Primary plane for CRTC
- * @cursor: Cursor plane for CRTC
- * @funcs: callbacks for the new CRTC
- * @name: printf style format string for the CRTC name, or NULL for default name
+ * DOC: standard CRTC properties
  *
- * Inits a new object created as base part of a driver crtc object. Drivers
- * should use this function instead of drm_crtc_init(), which is only provided
- * for backwards compatibility with drivers which do not yet support universal
- * planes). For really simple hardware which has only 1 plane look at
- * drm_simple_display_pipe_init() instead.
+ * DRM CRTCs have a few standardized properties:
  *
- * Returns:
- * Zero on success, error code on failure.
+ * ACTIVE:
+ * 	Atomic property for setting the power state of the CRTC. When set to 1
+ * 	the CRTC will actively display content. When set to 0 the CRTC will be
+ * 	powered off. There is no expectation that user-space will reset CRTC
+ * 	resources like the mode and planes when setting ACTIVE to 0.
+ *
+ * 	User-space can rely on an ACTIVE change to 1 to never fail an atomic
+ * 	test as long as no other property has changed. If a change to ACTIVE
+ * 	fails an atomic test, this is a driver bug. For this reason setting
+ * 	ACTIVE to 0 must not release internal resources (like reserved memory
+ * 	bandwidth or clock generators).
+ *
+ * 	Note that the legacy DPMS property on connectors is internally routed
+ * 	to control this property for atomic drivers.
+ * MODE_ID:
+ * 	Atomic property for setting the CRTC display timings. The value is the
+ * 	ID of a blob containing the DRM mode info. To disable the CRTC,
+ * 	user-space must set this property to 0.
+ *
+ * 	Setting MODE_ID to 0 will release reserved resources for the CRTC.
+ * SCALING_FILTER:
+ * 	Atomic property for setting the scaling filter for CRTC scaler
+ *
+ * 	The value of this property can be one of the following:
+ *
+ * 	Default:
+ * 		Driver's default scaling filter
+ * 	Nearest Neighbor:
+ * 		Nearest Neighbor scaling filter
  */
-int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
-			      struct drm_plane *primary,
-			      struct drm_plane *cursor,
-			      const struct drm_crtc_funcs *funcs,
-			      const char *name, ...)
+
+__printf(6, 0)
+static int __drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
+				       struct drm_plane *primary,
+				       struct drm_plane *cursor,
+				       const struct drm_crtc_funcs *funcs,
+				       const char *name, va_list ap)
 {
 	struct drm_mode_config *config = &dev->mode_config;
 	int ret;
 
 	WARN_ON(primary && primary->type != DRM_PLANE_TYPE_PRIMARY);
 	WARN_ON(cursor && cursor->type != DRM_PLANE_TYPE_CURSOR);
+
+	/* crtc index is used with 32bit bitmasks */
+	if (WARN_ON(config->num_crtc >= 32))
+		return -EINVAL;
+
+	WARN_ON(drm_drv_uses_atomic_modeset(dev) &&
+		(!funcs->atomic_destroy_state ||
+		 !funcs->atomic_duplicate_state));
 
 	crtc->dev = dev;
 	crtc->funcs = funcs;
@@ -294,11 +276,7 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
 		return ret;
 
 	if (name) {
-		va_list ap;
-
-		va_start(ap, name);
 		crtc->name = kvasprintf(GFP_KERNEL, name, ap);
-		va_end(ap);
 	} else {
 		crtc->name = kasprintf(GFP_KERNEL, "crtc-%d",
 				       drm_num_crtcs(dev));
@@ -321,9 +299,9 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
 	crtc->primary = primary;
 	crtc->cursor = cursor;
 	if (primary && !primary->possible_crtcs)
-		primary->possible_crtcs = 1 << drm_crtc_index(crtc);
+		primary->possible_crtcs = drm_crtc_mask(crtc);
 	if (cursor && !cursor->possible_crtcs)
-		cursor->possible_crtcs = 1 << drm_crtc_index(crtc);
+		cursor->possible_crtcs = drm_crtc_mask(crtc);
 
 	ret = drm_crtc_crc_init(crtc);
 	if (ret) {
@@ -336,11 +314,176 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
 		drm_object_attach_property(&crtc->base, config->prop_mode_id, 0);
 		drm_object_attach_property(&crtc->base,
 					   config->prop_out_fence_ptr, 0);
+		drm_object_attach_property(&crtc->base,
+					   config->prop_vrr_enabled, 0);
 	}
 
 	return 0;
 }
+
+/**
+ * drm_crtc_init_with_planes - Initialise a new CRTC object with
+ *    specified primary and cursor planes.
+ * @dev: DRM device
+ * @crtc: CRTC object to init
+ * @primary: Primary plane for CRTC
+ * @cursor: Cursor plane for CRTC
+ * @funcs: callbacks for the new CRTC
+ * @name: printf style format string for the CRTC name, or NULL for default name
+ *
+ * Inits a new object created as base part of a driver crtc object. Drivers
+ * should use this function instead of drm_crtc_init(), which is only provided
+ * for backwards compatibility with drivers which do not yet support universal
+ * planes). For really simple hardware which has only 1 plane look at
+ * drm_simple_display_pipe_init() instead.
+ * The &drm_crtc_funcs.destroy hook should call drm_crtc_cleanup() and kfree()
+ * the crtc structure. The crtc structure should not be allocated with
+ * devm_kzalloc().
+ *
+ * The @primary and @cursor planes are only relevant for legacy uAPI, see
+ * &drm_crtc.primary and &drm_crtc.cursor.
+ *
+ * Note: consider using drmm_crtc_alloc_with_planes() or
+ * drmm_crtc_init_with_planes() instead of drm_crtc_init_with_planes()
+ * to let the DRM managed resource infrastructure take care of cleanup
+ * and deallocation.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
+			      struct drm_plane *primary,
+			      struct drm_plane *cursor,
+			      const struct drm_crtc_funcs *funcs,
+			      const char *name, ...)
+{
+	va_list ap;
+	int ret;
+
+	WARN_ON(!funcs->destroy);
+
+	va_start(ap, name);
+	ret = __drm_crtc_init_with_planes(dev, crtc, primary, cursor, funcs,
+					  name, ap);
+	va_end(ap);
+
+	return ret;
+}
 EXPORT_SYMBOL(drm_crtc_init_with_planes);
+
+static void drmm_crtc_init_with_planes_cleanup(struct drm_device *dev,
+					       void *ptr)
+{
+	struct drm_crtc *crtc = ptr;
+
+	drm_crtc_cleanup(crtc);
+}
+
+__printf(6, 0)
+static int __drmm_crtc_init_with_planes(struct drm_device *dev,
+					struct drm_crtc *crtc,
+					struct drm_plane *primary,
+					struct drm_plane *cursor,
+					const struct drm_crtc_funcs *funcs,
+					const char *name,
+					va_list args)
+{
+	int ret;
+
+	drm_WARN_ON(dev, funcs && funcs->destroy);
+
+	ret = __drm_crtc_init_with_planes(dev, crtc, primary, cursor, funcs,
+					  name, args);
+	if (ret)
+		return ret;
+
+	ret = drmm_add_action_or_reset(dev, drmm_crtc_init_with_planes_cleanup,
+				       crtc);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+/**
+ * drmm_crtc_init_with_planes - Initialise a new CRTC object with
+ *    specified primary and cursor planes.
+ * @dev: DRM device
+ * @crtc: CRTC object to init
+ * @primary: Primary plane for CRTC
+ * @cursor: Cursor plane for CRTC
+ * @funcs: callbacks for the new CRTC
+ * @name: printf style format string for the CRTC name, or NULL for default name
+ *
+ * Inits a new object created as base part of a driver crtc object. Drivers
+ * should use this function instead of drm_crtc_init(), which is only provided
+ * for backwards compatibility with drivers which do not yet support universal
+ * planes). For really simple hardware which has only 1 plane look at
+ * drm_simple_display_pipe_init() instead.
+ *
+ * Cleanup is automatically handled through registering
+ * drmm_crtc_cleanup() with drmm_add_action(). The crtc structure should
+ * be allocated with drmm_kzalloc().
+ *
+ * The @drm_crtc_funcs.destroy hook must be NULL.
+ *
+ * The @primary and @cursor planes are only relevant for legacy uAPI, see
+ * &drm_crtc.primary and &drm_crtc.cursor.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drmm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
+			       struct drm_plane *primary,
+			       struct drm_plane *cursor,
+			       const struct drm_crtc_funcs *funcs,
+			       const char *name, ...)
+{
+	va_list ap;
+	int ret;
+
+	va_start(ap, name);
+	ret = __drmm_crtc_init_with_planes(dev, crtc, primary, cursor, funcs,
+					   name, ap);
+	va_end(ap);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+EXPORT_SYMBOL(drmm_crtc_init_with_planes);
+
+void *__drmm_crtc_alloc_with_planes(struct drm_device *dev,
+				    size_t size, size_t offset,
+				    struct drm_plane *primary,
+				    struct drm_plane *cursor,
+				    const struct drm_crtc_funcs *funcs,
+				    const char *name, ...)
+{
+	void *container;
+	struct drm_crtc *crtc;
+	va_list ap;
+	int ret;
+
+	if (WARN_ON(!funcs || funcs->destroy))
+		return ERR_PTR(-EINVAL);
+
+	container = drmm_kzalloc(dev, size, GFP_KERNEL);
+	if (!container)
+		return ERR_PTR(-ENOMEM);
+
+	crtc = container + offset;
+
+	va_start(ap, name);
+	ret = __drmm_crtc_init_with_planes(dev, crtc, primary, cursor, funcs,
+					   name, ap);
+	va_end(ap);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return container;
+}
+EXPORT_SYMBOL(__drmm_crtc_alloc_with_planes);
 
 /**
  * drm_crtc_cleanup - Clean up the core crtc usage
@@ -398,42 +541,45 @@ int drm_mode_getcrtc(struct drm_device *dev,
 {
 	struct drm_mode_crtc *crtc_resp = data;
 	struct drm_crtc *crtc;
+	struct drm_plane *plane;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
-		return -EINVAL;
+		return -EOPNOTSUPP;
 
 	crtc = drm_crtc_find(dev, file_priv, crtc_resp->crtc_id);
 	if (!crtc)
 		return -ENOENT;
 
+	plane = crtc->primary;
+
 	crtc_resp->gamma_size = crtc->gamma_size;
 
-	drm_modeset_lock(&crtc->primary->mutex, NULL);
-	if (crtc->primary->state && crtc->primary->state->fb)
-		crtc_resp->fb_id = crtc->primary->state->fb->base.id;
-	else if (!crtc->primary->state && crtc->primary->fb)
-		crtc_resp->fb_id = crtc->primary->fb->base.id;
+	drm_modeset_lock(&plane->mutex, NULL);
+	if (plane->state && plane->state->fb)
+		crtc_resp->fb_id = plane->state->fb->base.id;
+	else if (!plane->state && plane->fb)
+		crtc_resp->fb_id = plane->fb->base.id;
 	else
 		crtc_resp->fb_id = 0;
 
-	if (crtc->primary->state) {
-		crtc_resp->x = crtc->primary->state->src_x >> 16;
-		crtc_resp->y = crtc->primary->state->src_y >> 16;
+	if (plane->state) {
+		crtc_resp->x = plane->state->src_x >> 16;
+		crtc_resp->y = plane->state->src_y >> 16;
 	}
-	drm_modeset_unlock(&crtc->primary->mutex);
+	drm_modeset_unlock(&plane->mutex);
 
 	drm_modeset_lock(&crtc->mutex, NULL);
 	if (crtc->state) {
 		if (crtc->state->enable) {
 			drm_mode_convert_to_umode(&crtc_resp->mode, &crtc->state->mode);
 			crtc_resp->mode_valid = 1;
-
 		} else {
 			crtc_resp->mode_valid = 0;
 		}
 	} else {
 		crtc_resp->x = crtc->x;
 		crtc_resp->y = crtc->y;
+
 		if (crtc->enabled) {
 			drm_mode_convert_to_umode(&crtc_resp->mode, &crtc->mode);
 			crtc_resp->mode_valid = 1;
@@ -442,6 +588,8 @@ int drm_mode_getcrtc(struct drm_device *dev,
 			crtc_resp->mode_valid = 0;
 		}
 	}
+	if (!file_priv->aspect_ratio_allowed)
+		crtc_resp->mode.flags &= ~DRM_MODE_FLAG_PIC_AR_MASK;
 	drm_modeset_unlock(&crtc->mutex);
 
 	return 0;
@@ -455,32 +603,42 @@ static int __drm_mode_set_config_internal(struct drm_mode_set *set,
 	struct drm_crtc *tmp;
 	int ret;
 
+	WARN_ON(drm_drv_uses_atomic_modeset(crtc->dev));
+
 	/*
 	 * NOTE: ->set_config can also disable other crtcs (if we steal all
 	 * connectors from it), hence we need to refcount the fbs across all
 	 * crtcs. Atomic modeset will have saner semantics ...
 	 */
-	drm_for_each_crtc(tmp, crtc->dev)
-		tmp->primary->old_fb = tmp->primary->fb;
+	drm_for_each_crtc(tmp, crtc->dev) {
+		struct drm_plane *plane = tmp->primary;
+
+		plane->old_fb = plane->fb;
+	}
 
 	fb = set->fb;
 
 	ret = crtc->funcs->set_config(set, ctx);
 	if (ret == 0) {
-		crtc->primary->crtc = crtc;
-		crtc->primary->fb = fb;
+		struct drm_plane *plane = crtc->primary;
+
+		plane->crtc = fb ? crtc : NULL;
+		plane->fb = fb;
 	}
 
 	drm_for_each_crtc(tmp, crtc->dev) {
-		if (tmp->primary->fb)
-			drm_framebuffer_get(tmp->primary->fb);
-		if (tmp->primary->old_fb)
-			drm_framebuffer_put(tmp->primary->old_fb);
-		tmp->primary->old_fb = NULL;
+		struct drm_plane *plane = tmp->primary;
+
+		if (plane->fb)
+			drm_framebuffer_get(plane->fb);
+		if (plane->old_fb)
+			drm_framebuffer_put(plane->old_fb);
+		plane->old_fb = NULL;
 	}
 
 	return ret;
 }
+
 /**
  * drm_mode_set_config_internal - helper to call &drm_mode_config_funcs.set_config
  * @set: modeset config to set
@@ -550,17 +708,17 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 	struct drm_mode_config *config = &dev->mode_config;
 	struct drm_mode_crtc *crtc_req = data;
 	struct drm_crtc *crtc;
+	struct drm_plane *plane;
 	struct drm_connector **connector_set = NULL, *connector;
 	struct drm_framebuffer *fb = NULL;
 	struct drm_display_mode *mode = NULL;
 	struct drm_mode_set set;
 	uint32_t __user *set_connectors_ptr;
 	struct drm_modeset_acquire_ctx ctx;
-	int ret;
-	int i;
+	int ret, i, num_connectors = 0;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
-		return -EINVAL;
+		return -EOPNOTSUPP;
 
 	/*
 	 * Universal plane src offsets are only 16.16, prevent havoc for
@@ -576,22 +734,33 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 	}
 	DRM_DEBUG_KMS("[CRTC:%d:%s]\n", crtc->base.id, crtc->name);
 
-	mutex_lock(&crtc->dev->mode_config.mutex);
-	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
-retry:
-	ret = drm_modeset_lock_all_ctx(crtc->dev, &ctx);
-	if (ret)
-		goto out;
+	plane = crtc->primary;
+
+	/* allow disabling with the primary plane leased */
+	if (crtc_req->mode_valid && !drm_lease_held(file_priv, plane->base.id))
+		return -EACCES;
+
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx,
+				   DRM_MODESET_ACQUIRE_INTERRUPTIBLE, ret);
+
 	if (crtc_req->mode_valid) {
 		/* If we have a mode we need a framebuffer. */
 		/* If we pass -1, set the mode with the currently bound fb */
 		if (crtc_req->fb_id == -1) {
-			if (!crtc->primary->fb) {
+			struct drm_framebuffer *old_fb;
+
+			if (plane->state)
+				old_fb = plane->state->fb;
+			else
+				old_fb = plane->fb;
+
+			if (!old_fb) {
 				DRM_DEBUG_KMS("CRTC doesn't have current FB\n");
 				ret = -EINVAL;
 				goto out;
 			}
-			fb = crtc->primary->fb;
+
+			fb = old_fb;
 			/* Make refcounting symmetric with the lookup path. */
 			drm_framebuffer_get(fb);
 		} else {
@@ -609,10 +778,19 @@ retry:
 			ret = -ENOMEM;
 			goto out;
 		}
+		if (!file_priv->aspect_ratio_allowed &&
+		    (crtc_req->mode.flags & DRM_MODE_FLAG_PIC_AR_MASK) != DRM_MODE_FLAG_PIC_AR_NONE) {
+			DRM_DEBUG_KMS("Unexpected aspect-ratio flag bits\n");
+			ret = -EINVAL;
+			goto out;
+		}
 
-		ret = drm_mode_convert_umode(mode, &crtc_req->mode);
+
+		ret = drm_mode_convert_umode(dev, mode, &crtc_req->mode);
 		if (ret) {
-			DRM_DEBUG_KMS("Invalid mode\n");
+			DRM_DEBUG_KMS("Invalid mode (ret=%d, status=%s)\n",
+				      ret, drm_get_mode_status_name(mode->status));
+			drm_mode_debug_printmodeline(mode);
 			goto out;
 		}
 
@@ -623,14 +801,14 @@ retry:
 		 * match real hardware capabilities. Skip the check in that
 		 * case.
 		 */
-		if (!crtc->primary->format_default) {
-			ret = drm_plane_check_pixel_format(crtc->primary,
-							   fb->format->format);
+		if (!plane->format_default) {
+			ret = drm_plane_check_pixel_format(plane,
+							   fb->format->format,
+							   fb->modifier);
 			if (ret) {
-				struct drm_format_name_buf format_name;
-				DRM_DEBUG_KMS("Invalid pixel format %s\n",
-				              drm_get_format_name(fb->format->format,
-				                                  &format_name));
+				DRM_DEBUG_KMS("Invalid pixel format %p4cc, modifier 0x%llx\n",
+					      &fb->format->format,
+					      fb->modifier);
 				goto out;
 			}
 		}
@@ -692,6 +870,7 @@ retry:
 					connector->name);
 
 			connector_set[i] = connector;
+			num_connectors++;
 		}
 	}
 
@@ -700,30 +879,34 @@ retry:
 	set.y = crtc_req->y;
 	set.mode = mode;
 	set.connectors = connector_set;
-	set.num_connectors = crtc_req->count_connectors;
+	set.num_connectors = num_connectors;
 	set.fb = fb;
-	ret = __drm_mode_set_config_internal(&set, &ctx);
+
+	if (drm_drv_uses_atomic_modeset(dev))
+		ret = crtc->funcs->set_config(&set, &ctx);
+	else
+		ret = __drm_mode_set_config_internal(&set, &ctx);
 
 out:
 	if (fb)
 		drm_framebuffer_put(fb);
 
 	if (connector_set) {
-		for (i = 0; i < crtc_req->count_connectors; i++) {
+		for (i = 0; i < num_connectors; i++) {
 			if (connector_set[i])
 				drm_connector_put(connector_set[i]);
 		}
 	}
 	kfree(connector_set);
 	drm_mode_destroy(dev, mode);
-	if (ret == -EDEADLK) {
-		ret = drm_modeset_backoff(&ctx);
-		if (!ret)
-			goto retry;
-	}
-	drm_modeset_drop_locks(&ctx);
-	drm_modeset_acquire_fini(&ctx);
-	mutex_unlock(&crtc->dev->mode_config.mutex);
+
+	/* In case we need to retry... */
+	connector_set = NULL;
+	fb = NULL;
+	mode = NULL;
+	num_connectors = 0;
+
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
 
 	return ret;
 }
@@ -742,3 +925,34 @@ int drm_mode_crtc_set_obj_prop(struct drm_mode_object *obj,
 
 	return ret;
 }
+
+/**
+ * drm_crtc_create_scaling_filter_property - create a new scaling filter
+ * property
+ *
+ * @crtc: drm CRTC
+ * @supported_filters: bitmask of supported scaling filters, must include
+ *		       BIT(DRM_SCALING_FILTER_DEFAULT).
+ *
+ * This function lets driver to enable the scaling filter property on a given
+ * CRTC.
+ *
+ * RETURNS:
+ * Zero for success or -errno
+ */
+int drm_crtc_create_scaling_filter_property(struct drm_crtc *crtc,
+					    unsigned int supported_filters)
+{
+	struct drm_property *prop =
+		drm_create_scaling_filter_prop(crtc->dev, supported_filters);
+
+	if (IS_ERR(prop))
+		return PTR_ERR(prop);
+
+	drm_object_attach_property(&crtc->base, prop,
+				   DRM_SCALING_FILTER_DEFAULT);
+	crtc->scaling_filter_property = prop;
+
+	return 0;
+}
+EXPORT_SYMBOL(drm_crtc_create_scaling_filter_property);

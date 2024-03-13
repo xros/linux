@@ -21,10 +21,6 @@
  *  -check if sysreq works
  */
 
-#if defined(CONFIG_SERIAL_ARC_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
-#define SUPPORT_SYSRQ
-#endif
-
 #include <linux/module.h>
 #include <linux/serial.h>
 #include <linux/console.h>
@@ -153,7 +149,7 @@ static unsigned int arc_serial_tx_empty(struct uart_port *port)
 /*
  * Driver internal routine, used by both tty(serial core) as well as tx-isr
  *  -Called under spinlock in either cases
- *  -also tty->stopped has already been checked
+ *  -also tty->flow.stopped has already been checked
  *     = by uart_start( ) before calling us
  *     = tx_ist checks that too before calling
  */
@@ -170,8 +166,7 @@ static void arc_serial_tx_chars(struct uart_port *port)
 		sent = 1;
 	} else if (!uart_circ_empty(xmit)) {
 		ch = xmit->buf[xmit->tail];
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
+		uart_xmit_advance(port, 1);
 		while (!(UART_GET_STATUS(port) & TXEMPTY))
 			cpu_relax();
 		UART_SET_DATA(port, ch);
@@ -200,8 +195,6 @@ static void arc_serial_start_tx(struct uart_port *port)
 
 static void arc_serial_rx_chars(struct uart_port *port, unsigned int status)
 {
-	unsigned int ch, flg = 0;
-
 	/*
 	 * UART has 4 deep RX-FIFO. Driver's recongnition of this fact
 	 * is very subtle. Here's how ...
@@ -212,24 +205,23 @@ static void arc_serial_rx_chars(struct uart_port *port, unsigned int status)
 	 * controller, which is indeed the Rx-FIFO.
 	 */
 	do {
+		u8 ch, flg = TTY_NORMAL;
+
 		/*
 		 * This could be an Rx Intr for err (no data),
 		 * so check err and clear that Intr first
 		 */
-		if (unlikely(status & (RXOERR | RXFERR))) {
-			if (status & RXOERR) {
-				port->icount.overrun++;
-				flg = TTY_OVERRUN;
-				UART_CLR_STATUS(port, RXOERR);
-			}
+		if (status & RXOERR) {
+			port->icount.overrun++;
+			flg = TTY_OVERRUN;
+			UART_CLR_STATUS(port, RXOERR);
+		}
 
-			if (status & RXFERR) {
-				port->icount.frame++;
-				flg = TTY_FRAME;
-				UART_CLR_STATUS(port, RXFERR);
-			}
-		} else
-			flg = TTY_NORMAL;
+		if (status & RXFERR) {
+			port->icount.frame++;
+			flg = TTY_FRAME;
+			UART_CLR_STATUS(port, RXFERR);
+		}
 
 		if (status & RXEMPTY)
 			continue;
@@ -240,9 +232,7 @@ static void arc_serial_rx_chars(struct uart_port *port, unsigned int status)
 		if (!(uart_handle_sysrq_char(port, ch)))
 			uart_insert_char(port, status, RXOERR, ch, flg);
 
-		spin_unlock(&port->lock);
 		tty_flip_buffer_push(&port->state->port);
-		spin_lock(&port->lock);
 	} while (!((status = UART_GET_STATUS(port)) & RXEMPTY));
 }
 
@@ -289,9 +279,9 @@ static irqreturn_t arc_serial_isr(int irq, void *dev_id)
 	if (status & RXIENB) {
 
 		/* already in ISR, no need of xx_irqsave */
-		spin_lock(&port->lock);
+		uart_port_lock(port);
 		arc_serial_rx_chars(port, status);
-		spin_unlock(&port->lock);
+		uart_port_unlock(port);
 	}
 
 	if ((status & TXIENB) && (status & TXEMPTY)) {
@@ -301,12 +291,12 @@ static irqreturn_t arc_serial_isr(int irq, void *dev_id)
 		 */
 		UART_TX_IRQ_DISABLE(port);
 
-		spin_lock(&port->lock);
+		uart_port_lock(port);
 
 		if (!uart_tx_stopped(port))
 			arc_serial_tx_chars(port);
 
-		spin_unlock(&port->lock);
+		uart_port_unlock(port);
 	}
 
 	return IRQ_HANDLED;
@@ -357,7 +347,7 @@ static void arc_serial_shutdown(struct uart_port *port)
 
 static void
 arc_serial_set_termios(struct uart_port *port, struct ktermios *new,
-		       struct ktermios *old)
+		       const struct ktermios *old)
 {
 	struct arc_uart_port *uart = to_arc_port(port);
 	unsigned int baud, uartl, uarth, hw_val;
@@ -376,7 +366,7 @@ arc_serial_set_termios(struct uart_port *port, struct ktermios *new,
 	uartl = hw_val & 0xFF;
 	uarth = (hw_val >> 8) & 0xFF;
 
-	spin_lock_irqsave(&port->lock, flags);
+	uart_port_lock_irqsave(port, &flags);
 
 	UART_ALL_IRQ_DISABLE(port);
 
@@ -401,7 +391,7 @@ arc_serial_set_termios(struct uart_port *port, struct ktermios *new,
 
 	uart_update_timeout(port, new->c_cflag, baud);
 
-	spin_unlock_irqrestore(&port->lock, flags);
+	uart_port_unlock_irqrestore(port, flags);
 }
 
 static const char *arc_serial_type(struct uart_port *port)
@@ -514,7 +504,7 @@ static int arc_serial_console_setup(struct console *co, char *options)
 	return uart_set_options(port, co, baud, parity, bits, flow);
 }
 
-static void arc_serial_console_putchar(struct uart_port *port, int ch)
+static void arc_serial_console_putchar(struct uart_port *port, unsigned char ch)
 {
 	while (!(UART_GET_STATUS(port) & TXEMPTY))
 		cpu_relax();
@@ -531,9 +521,9 @@ static void arc_serial_console_write(struct console *co, const char *s,
 	struct uart_port *port = &arc_uart_ports[co->index].port;
 	unsigned long flags;
 
-	spin_lock_irqsave(&port->lock, flags);
+	uart_port_lock_irqsave(port, &flags);
 	uart_console_write(port, s, count, arc_serial_console_putchar);
-	spin_unlock_irqrestore(&port->lock, flags);
+	uart_port_unlock_irqrestore(port, flags);
 }
 
 static struct console arc_console = {
@@ -593,6 +583,11 @@ static int arc_serial_probe(struct platform_device *pdev)
 	if (dev_id < 0)
 		dev_id = 0;
 
+	if (dev_id >= ARRAY_SIZE(arc_uart_ports)) {
+		dev_err(&pdev->dev, "serial%d out of range\n", dev_id);
+		return -EINVAL;
+	}
+
 	uart = &arc_uart_ports[dev_id];
 	port = &uart->port;
 
@@ -608,10 +603,11 @@ static int arc_serial_probe(struct platform_device *pdev)
 	}
 	uart->baud = val;
 
-	port->membase = of_iomap(np, 0);
-	if (!port->membase)
+	port->membase = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(port->membase)) {
 		/* No point of dev_err since UART itself is hosed here */
-		return -ENXIO;
+		return PTR_ERR(port->membase);
+	}
 
 	port->irq = irq_of_parse_and_map(np, 0);
 
@@ -620,6 +616,7 @@ static int arc_serial_probe(struct platform_device *pdev)
 	port->flags = UPF_BOOT_AUTOCONF;
 	port->line = dev_id;
 	port->ops = &arc_serial_pops;
+	port->has_sysrq = IS_ENABLED(CONFIG_SERIAL_ARC_CONSOLE);
 
 	port->fifosize = ARC_UART_TX_FIFO_SIZE;
 
@@ -632,12 +629,6 @@ static int arc_serial_probe(struct platform_device *pdev)
 	return uart_add_one_port(&arc_uart_driver, &arc_uart_ports[dev_id].port);
 }
 
-static int arc_serial_remove(struct platform_device *pdev)
-{
-	/* This will never be called */
-	return 0;
-}
-
 static const struct of_device_id arc_uart_dt_ids[] = {
 	{ .compatible = "snps,arc-uart" },
 	{ /* Sentinel */ }
@@ -646,7 +637,6 @@ MODULE_DEVICE_TABLE(of, arc_uart_dt_ids);
 
 static struct platform_driver arc_platform_driver = {
 	.probe = arc_serial_probe,
-	.remove = arc_serial_remove,
 	.driver = {
 		.name = DRIVER_NAME,
 		.of_match_table  = arc_uart_dt_ids,
