@@ -1048,7 +1048,7 @@ static int zonefs_init_zgroup(struct super_block *sb,
 	zonefs_info(sb, "Zone group \"%s\" has %u file%s\n",
 		    zonefs_zgroup_name(ztype),
 		    zgroup->g_nr_zones,
-		    zgroup->g_nr_zones > 1 ? "s" : "");
+		    str_plural(zgroup->g_nr_zones));
 
 	return 0;
 }
@@ -1422,7 +1422,7 @@ static int __init zonefs_init_inodecache(void)
 {
 	zonefs_inode_cachep = kmem_cache_create("zonefs_inode_cache",
 			sizeof(struct zonefs_inode_info), 0,
-			(SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD | SLAB_ACCOUNT),
+			SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT,
 			NULL);
 	if (zonefs_inode_cachep == NULL)
 		return -ENOMEM;

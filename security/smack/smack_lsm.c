@@ -1238,12 +1238,14 @@ static int smack_inode_permission(struct inode *inode, int mask)
 
 /**
  * smack_inode_setattr - Smack check for setting attributes
+ * @idmap: idmap of the mount
  * @dentry: the object
  * @iattr: for the force flag
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_setattr(struct dentry *dentry, struct iattr *iattr)
+static int smack_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+			       struct iattr *iattr)
 {
 	struct smk_audit_info ad;
 	int rc;
@@ -2563,7 +2565,8 @@ static int smack_netlbl_add(struct sock *sk)
 	local_bh_disable();
 	bh_lock_sock_nested(sk);
 
-	rc = netlbl_sock_setattr(sk, sk->sk_family, &skp->smk_netlabel);
+	rc = netlbl_sock_setattr(sk, sk->sk_family, &skp->smk_netlabel,
+				 netlbl_sk_lock_check(sk));
 	switch (rc) {
 	case 0:
 		ssp->smk_state = SMK_NETLBL_LABELED;
@@ -3651,7 +3654,7 @@ static void smack_d_instantiate(struct dentry *opt_dentry, struct inode *inode)
  * There will only ever be one attribute.
  */
 static int smack_getselfattr(unsigned int attr, struct lsm_ctx __user *ctx,
-			     size_t *size, u32 flags)
+			     u32 *size, u32 flags)
 {
 	int rc;
 	struct smack_known *skp;
@@ -3772,7 +3775,7 @@ static int do_setattr(u64 attr, void *value, size_t size)
  * Returns 0 on success, an error code otherwise.
  */
 static int smack_setselfattr(unsigned int attr, struct lsm_ctx *ctx,
-			     size_t size, u32 flags)
+			     u32 size, u32 flags)
 {
 	int rc;
 
@@ -4883,7 +4886,7 @@ static int smack_inode_copy_up(struct dentry *dentry, struct cred **new)
 	return 0;
 }
 
-static int smack_inode_copy_up_xattr(const char *name)
+static int smack_inode_copy_up_xattr(struct dentry *src, const char *name)
 {
 	/*
 	 * Return 1 if this is the smack access Smack attribute.

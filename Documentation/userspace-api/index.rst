@@ -20,6 +20,7 @@ System calls
    futex2
    ebpf/index
    ioctl/index
+   mseal
 
 Security-related interfaces
 ===========================
@@ -42,6 +43,7 @@ Devices and I/O
 
    accelerators/ocxl
    dma-buf-alloc-exchange
+   gpio/index
    iommu
    iommufd
    media/index
